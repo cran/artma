@@ -1,89 +1,146 @@
 general:
-  - name: "artma_version"
+  artma_version:
     type: "character"
-    default: "0.1.19"
+    default: "0.2.1"
     fixed: true
-    help: "Version of the ARTMA package under which these options were generated"
+    help: "Version of the artma package under which these options were generated"
 
 data:
-  - name: "source_path"
+  source_path:
     type: "character"
     prompt: "file"
     help: "Full path to your dataset source"
 
-#   - name: "data_file"
-#     type: "character"
-#     default: "data.csv"
-#     help: "Name of the data file"
+  na_handling:
+    type: "enum: stop|median|mean"
+    default: "stop"
+    confirm_default: true
+    prompt: "readline"
+    help: |
+      How to handle missing values:
+        {cli::symbol$bullet} {.strong stop}: Abort if any missing values are found
+        {cli::symbol$bullet} {.strong median}: Replace missing values with the variable's median
+        {cli::symbol$bullet} {.strong mean}: Replace missing values with the variable's mean
 
-#   - name: "data_format"
-#     type: "character"
-#     default: "csv"
-#     help: "Format of the data file"
+  colnames:
+    obs_id:
+      type: "character"
+      allow_na: true
+      default: .na
+      standardize: true
+      help: "Column containing observation IDs"
 
-#   - name: "data_sep"
-#     type: "character"
-#     default: ","
-#     help: "Separator used in the data file"
+    study:
+      type: "character"
+      standardize: true
+      help: "Column containing study names"
 
-#   - name: "data_header"
-#     type: "logical"
-#     default: true
-#     help: "Does the data file have a header?"
+    study_id:
+      type: "character"
+      allow_na: true
+      default: .na
+      standardize: true
+      help: "Column containing study IDs"
 
-#   - name: "data_row_names"
-#     type: "logical"
-#     default: false
-#     help: "Does the data file have row names?"
+    effect:
+      type: "character"
+      standardize: true
+      help: "Column containing effect estimates"
 
-#   - name: "data_col_names"
-#     type: "logical"
-#     default: true
-#     help: "Does the data file have column names?"
+    se:
+      type: "character"
+      standardize: true
+      help: "Column containing standard errors"
 
-#   - name: "data_na"
-#     type: "character"
-#     default: "NA"
-#     help: "Character used to represent missing values"
+    t_stat:
+      type: "character"
+      standardize: true
+      allow_na: true
+      default: .na
+      help: "Column containing t-statistics"
 
-#   - name: "data_encoding"
-#     type: "character"
-#     default: "UTF-8"
-#     help: "Encoding of the data file"
+    n_obs:
+      type: "character"
+      standardize: true
+      help: "Column containing the number of observations"
 
-#   - name: "data_skip"
-#     type: "integer"
-#     default: 0
-#     help: "Number of rows to skip at the beginning of the data file"
+    study_size:
+      type: "character"
+      standardize: true
+      allow_na: true
+      default: .na
+      help: "Column containing the study sizes, i.e. the number of estimates per study"
 
-#   - name: "data_nrows"
-#     type: "integer"
-#     default: -1
-#     help: "Number of rows to read from the data file"
+    reg_dof:
+      type: "character"
+      standardize: true
+      allow_na: true
+      default: .na
+      help: "Column containing the degrees of freedom for the regression"
 
-#   - name: "data_ncols"
-#     type: "integer"
-#     default: -1
-#     help: "Number of columns to read from the data file"
+    precision:
+      type: "character"
+      standardize: true
+      allow_na: true
+      default: .na
+      help: "Column containing the precision of the effect estimates"
 
-logging:
-  - name: "log_file_name"
+  config_setup:
+    type: "enum: auto|manual"
+    default: "auto"
+    confirm_default: true
+    prompt: "readline"
+    help: |
+      How to configure the data:
+        {cli::symbol$bullet} {.strong auto}: Automatically generate and validate the data configuration
+        {cli::symbol$bullet} {.strong manual}: Manually configure and validate the data configuration
+
+  config:
+    type: "list"
+    default: .na
+    allow_na: true
+    prompt: "function"
+    prompt_function: "prompt_data_config"
+    help: |
+      A list of configuration options for the data.
+      Each variable in the dataset requires a list of configuration options.
+      For more details, read the 'data_config' vignette.
+
+calc:
+  precision_type:
+    type: "enum: '1/SE'|'DoF'"
+    default: "1/SE"
+    help: |
+      The type of precision to calculate:
+        {cli::symbol$bullet} {.strong 1/SE}: Calculate precision as 1/SE
+        {cli::symbol$bullet} {.strong DoF}: Calculate precision as sqrt(DoF)
+
+  se_zero_handling:
+    type: "enum: stop|warn|ignore"
+    default: "stop"
+    help: |
+      Having standard errors equal to zero can lead to division by zero errors, introducing infinite t-statistics.
+      By default, the package will stop if any zero standard errors are found.
+      You can change this behavior by setting the option to 'warn' or 'ignore'.
+      How to handle zero standard errors:
+        {cli::symbol$bullet} {.strong stop}: Abort if any zero standard errors are found
+        {cli::symbol$bullet} {.strong warn}: Warn if any zero standard errors are found
+        {cli::symbol$bullet} {.strong ignore}: Ignore zero standard errors
+
+temp:
+  # A set of options that are only set at runtime but never stored in the options file.
+  file_name:
     type: "character"
-    default: "artma.log"
-    help: "The name of the log file"
+    allow_na: true
+    default: null
+    help: |
+      Name of the file under which the options is stored.
+      This is not required during the file creation, but the option value is added upon loading the file.
 
-  - name: "log_level"
+  dir_name:
     type: "character"
-    default: "INFO"
-    allow_na: false
-    help: "The level of logging"
-
-  - name: "log_to_console"
-    type: "logical"
-    default: true
-    help: "Log to console too (not just to the log file)"
-
-  - name: "flush_logs_on_setup"
-    type: "logical"
-    default: false
-    help: "Flush logs on setup"
+    allow_na: true
+    default: null
+    help: |
+      Name of the directory to save the options to.
+      This is not required during the file creation, but the option value is added upon loading the file.

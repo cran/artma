@@ -150,24 +150,21 @@ validate_value_type <- function(value, expected_type) {
   )
 }
 
-#' Assert Conditions
-#'
-#' This function asserts that a condition is TRUE. If the condition is FALSE,
+#' @title Assert Conditions
+#' @description This function asserts that a condition is TRUE. If the condition is FALSE,
 #' the function aborts with an appropriate error message including the failed
 #' condition and a backtrace.
-#'
 #' @param condition_to_validate *\[logical\]* The condition to validate.
-#' @param error_message [character(1), optional] The error message to display if the condition is FALSE.
-#'
+#' @param msg [character(1), optional] The error message to display if the condition is FALSE.
 #' @return `NULL`. The function is called for its side effects.
 #' @export
-assert <- function(condition_to_validate, error_message = NULL) {
-  if (is.null(error_message)) {
-    error_message <- paste("Assertion failed:", deparse(substitute(condition_to_validate)))
+assert <- function(condition_to_validate, msg = NULL) {
+  if (is.null(msg)) {
+    msg <- paste("Assertion failed:", deparse(substitute(condition_to_validate)))
   }
   if (!condition_to_validate) {
     cli::cli_abort(
-      message = error_message,
+      message = msg,
       .subclass = "assertion_error"
     )
   }
@@ -193,9 +190,35 @@ assert_options_template_exists <- function(path) {
 #' @return *\[boolean\]* A boolean indicating whether or not x is a character vector or empty
 #' @export
 is_char_vector_or_empty <- function(x, throw_error = FALSE) {
-  is_empty <- is.vector(x) && (length(x) == 0 || is.character(x))
+  is_empty <- rlang::is_empty(x)
   if (throw_error && !is_empty) {
     cli::cli_abort("The object is not a character vector or empty")
   }
   return(is_empty)
+}
+
+#' @title Check if an option path is valid
+#' @description Check if an option path is valid
+#' @param opt_path *\[character\]* The option path to check.
+#' @return *\[logical\]* Whether the option path is valid.
+#' @examples
+#' validate_opt_path("data.colnames") # passes
+#' validate_opt_path("data.colnames.obs_id") # passes
+#' validate_opt_path(c("data.colnames", "data.colnames.obs_id")) # fails
+#' validate_opt_path(NULL) # passes
+#' @export
+validate_opt_path <- function(opt_path) {
+  if (is.null(opt_path)) {
+    return(invisible(NULL))
+  }
+  if (!is.character(opt_path)) {
+    cli::cli_abort("The option path must be a character string.")
+  }
+  if (length(opt_path) != 1) {
+    cli::cli_abort("The option path must be a single character string.")
+  }
+  if (!grepl("^[[:alnum:]_]+(\\.[[:alnum:]_]+)*$", opt_path)) {
+    cli::cli_abort("The option path must be a single word or dot-separated path (e.g. 'data' or 'data.colnames')")
+  }
+  return(invisible(NULL))
 }

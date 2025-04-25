@@ -1,21 +1,28 @@
 #' @title Crawl and import modules
-#' @description Provided a path to a directory, crawl this directory for .R files and import all of them as box modules. Each such module will be imported under its name.
+#' @description Provided a path to a directory, crawl this directory for files matching a pattern and import all of them as box modules. Each such module will be imported under its name.
 #' @details Assume you have a file 'my_custom_module.R' in a directory you want to import. Running this function on that directory loads a module named 'my_custom_module' into memory through box. Consequently, calls su
 #' @param dir_path *\[character\]* Path to the directory to crawl.
+#' @param pattern *\[character\]* Pattern to match files against. Defaults to "\\.R$" to match all R files.
 #' `list` A list of box modules, accessible by their name.
 #'
 #' @usage
 #' # Assume you have a 'my_custom_module.R' inside the following directory
 #' custom_dir <- file.path('path', 'to', 'your', 'dir')
 #'
+#' # Import all R files
 #' modules <- crawl_and_import_modules(custom_dir)
+#'
+#' # Import only files starting with "mock_"
+#' mock_modules <- crawl_and_import_modules(custom_dir, pattern = "^mock_.*\\.R$")
+#'
 #' my_custom_module <- modules[['my_custom_module']]
 #'
 #' # The following calls will work
 #' my_custom_module$some_method()
 #' my_custom_module$another_method()
 #' modules$my_custom_module$some_method()
-crawl_and_import_modules <- function(dir_path) {
+crawl_and_import_modules <- function(dir_path, pattern = "\\.R$") {
+  dir_path <- normalizePath(dir_path, mustWork = FALSE)
   if (!dir.exists(dir_path)) {
     cli::cli_abort(glue::glue("Non-existent directory when importing modules: {dir_path}"))
   }
@@ -26,13 +33,13 @@ crawl_and_import_modules <- function(dir_path) {
 
   # It is possible that the box imports may not work across all devices. Were that to be the case, consider using 'with_dir' to change the working dir temporarily for the following chunk of code.
 
-  r_files <- list.files(path = dir_path, pattern = "\\.R$", full.names = FALSE)
+  r_files <- list.files(path = dir_path, pattern = pattern, full.names = FALSE)
   for (f in r_files) {
     module_name <- base::basename(tools::file_path_sans_ext(f))
     module_path <- tools::file_path_as_absolute(file.path(dir_path, f))
 
     box_import_statement <- turn_path_into_box_import(module_path)
-    logger::log_debug(glue::glue("Running the following import statement: '{box_import_statement}'"))
+    cli::cli_inform("Running the following import statement: {.code {box_import_statement}}")
     eval(box_import_statement) # Imports the module
 
     # Calling the module name should now return the module itself
@@ -58,7 +65,7 @@ validate_runtime_method_modules <- function(modules) { # nolint: object_length_l
   }
 
   if (length(modules) == 0) {
-    logger::log_warn("No runtime method modules to validate.")
+    cli::cli_alert_warning("No runtime method modules to validate.")
     return(NULL)
   }
 

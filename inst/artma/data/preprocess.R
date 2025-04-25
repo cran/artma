@@ -1,81 +1,175 @@
-#' Preprocess the raw excel data:
-#' - Adjust the source data dimensions
-#' - Transform ALL columns into the correct data type.
-#'
-#' Check column validity, add winsorized statistics (Effect, SE, t-stat)
-#' @param input_data *\[data.frame\]* Main data frame
-#' @param input_var_list *\[data.frame\]* Data frame with variable descriptions.
-#' @return *\[data.frame\]* The preprocessed data
-preprocess_data <- function(input_data, input_var_list) { # nolint: cyclocomp_linter
-  box::use(
-    artma / libs / validation[validate]
-  )
+box::use(
+  artma / data / utils[get_required_colnames],
+  artma / data_config / read[get_data_config],
+  artma / data_config / utils[get_config_values]
+)
 
-  validate(
-    is.data.frame(input_data),
-    is.data.frame(input_var_list)
-  )
-  # Remove redundant columns
-  expected_col_n <- nrow(input_var_list)
-  while (ncol(input_data) > expected_col_n) {
-    input_data <- input_data[, -ncol(input_data)]
-  }
-
-  # Variable name validity check
-  varnames <- colnames(input_data)
-  expected_varnames <- input_var_list$var_name
-  # Check if all columns of the first vector are in the second one and vice versa
-  if (!all(varnames %in% expected_varnames) || !all(expected_varnames %in% varnames)) {
-    missing_from_var_list <- varnames[!varnames %in% expected_varnames]
-    missing_from_data <- expected_varnames[!expected_varnames %in% varnames]
-    cli::cli_abort(
-      paste(
-        "Mismatching variable names. \n",
-        "These variables are not a part of the variable list: ",
-        glue::glue_collapse(missing_from_var_list, sep = ", "), "\n",
-        "These variables are not a part of the main data frame columns: ",
-        glue::glue_collapse(missing_from_data, sep = ", "), "\n"
-      )
-    )
-  }
-  # Check for correct ordering
-  if (!identical(varnames, expected_varnames)) {
-    problematic_indexes <- which(varnames != expected_varnames)
-    cli::cli_abort(
-      paste(
-        "The order of some columns in the data frame and the expected variable list is different. \n",
-        paste("Problematic indexes and their column names: \n"),
-        paste(
-          problematic_indexes,
-          ": Data frame has '", varnames[problematic_indexes],
-          "' but expected variable list has '",
-          expected_varnames[problematic_indexes], "'.",
-          collapse = "\n"
-        )
-      )
-    )
-  }
-
-  # Remove redundant rows
-  while (is.na(input_data[nrow(input_data), "study_name"])) {
-    input_data <- input_data[-nrow(input_data), ]
-  }
-
-  # Preprocess and enforce correct data types
-  for (col_name in varnames) {
-    col_data_type <- input_var_list$data_type[input_var_list$var_name == col_name]
-    if (col_data_type == "int" || col_data_type == "dummy") {
-      input_data[[col_name]] <- as.integer(input_data[[col_name]])
-    } else if (col_data_type == "float" || col_data_type == "perc") {
-      input_data[[col_name]] <- as.numeric(input_data[[col_name]])
-    } else if (col_data_type == "category") {
-      input_data[[col_name]] <- as.character(input_data[[col_name]])
+#' @title Remove redundant columns
+#' @description Remove columns that are not expected in the data frame.
+#' @param df *\[data.frame\]* The data frame to remove columns from
+#' @return *\[data.frame\]* The data frame with the redundant columns removed
+#' @keywords internal
+remove_redundant_columns <- function(df) {
+  cli::cli_inform("Removing redundant columns…")
+  expected_col_n <- length(get_data_config())
+  while (ncol(df) > expected_col_n) {
+    col_to_remove <- colnames(df)[ncol(df)]
+    if (!all(is.na(df[[col_to_remove]]))) {
+      cli::cli_abort("Cannot remove column {.val {col_to_remove}} as it contains non-NA values.")
     }
+    df <- df[, -ncol(df)]
   }
-  logger::log_info("Preprocessing finished.")
-  return(input_data)
+  df
 }
 
-box::export(
-  preprocess_data
-)
+#' @title Verify variable names
+#' @description Verify that the variable names in the data frame match the expected variable names.
+#' @param df *\[data.frame\]* The data frame to verify variable names for
+#' @return *\[data.frame\]* The data frame with the redundant columns removed
+#' @keywords internal
+verify_variable_names <- function(df) {
+  varnames <- colnames(df)
+  config <- get_data_config()
+  expected_varnames <- get_config_values(config, "var_name")
+
+  cli::cli_inform("Checking variable names…")
+  if (!setequal(varnames, expected_varnames)) {
+    missing_from_var_list <- setdiff(varnames, expected_varnames)
+    missing_from_data <- setdiff(expected_varnames, varnames)
+    cli::cli_abort(c(
+      "x" = "Mismatching variable names.",
+      "i" = "Not in variable list: {.val {missing_from_var_list}}",
+      "i" = "Not in data frame: {.val {missing_from_data}}"
+    ))
+  }
+  df
+}
+
+
+#' @title Verify variable order
+#' @description Verify that the variable order in the data frame matches the expected variable order.
+#' @param df *\[data.frame\]* The data frame to verify variable order for
+#' @return *\[data.frame\]* The data frame with the redundant columns removed
+#' @keywords internal
+verify_variable_order <- function(df) {
+  cli::cli_inform("Checking variable name order…")
+  varnames <- colnames(df)
+  config <- get_data_config()
+  expected_varnames <- get_config_values(config, "var_name")
+  if (!identical(varnames, expected_varnames)) {
+    problematic <- which(varnames != expected_varnames)
+    cli::cli_abort(c(
+      "x" = "Column order differs from expected list.",
+      "i" = "Problematic indexes: {.val {problematic}}",
+      "i" = "DF: '{.val {varnames[problematic]}}'; Expected: '{.val {expected_varnames[problematic]}}'"
+    ))
+  }
+  df
+}
+
+
+#' @title Remove empty rows
+#' @description Remove rows that are empty.
+#' @param df *\[data.frame\]* The data frame to remove empty rows from
+#' @return *\[data.frame\]* The data frame with the empty rows removed
+#' @keywords internal
+remove_empty_rows <- function(df) {
+  cli::cli_inform("Removing empty rows…")
+  required_colnames <- get_required_colnames()
+  na_rows <- which(purrr::map_lgl(seq_len(nrow(df)), ~ all(is.na(df[., required_colnames, drop = FALSE]))))
+  if (length(na_rows)) {
+    df <- df[-na_rows, ]
+    cli::cli_alert_success("Removed {.val {length(na_rows)}} empty rows.")
+  }
+  df
+}
+
+#' @title Check that required columns contain no empty cells
+#' @description Check that required columns contain no empty cells.
+#' @param df *\[data.frame\]* The data frame to check that required columns contain no empty cells for
+#' @return *\[data.frame\]* The data frame with the redundant columns removed
+#' @keywords internal
+check_required_non_empty <- function(df) {
+  cli::cli_inform("Checking that required columns contain no empty cells…")
+  required_colnames <- get_required_colnames()
+
+  invalid_cols <- which(vapply(required_colnames, function(x) any(is.na(df[[x]])), logical(1)))
+  if (length(invalid_cols) > 0) {
+    box::use(artma / const[CONST])
+    cli::cli_abort(c(
+      "x" = "Missing values found in required columns: {.val {required_colnames[invalid_cols]}}",
+      "i" = "To use {.emph {CONST$PACKAGE_NAME}} runtime methods, please ensure that the required columns contain no empty cells."
+    ))
+  }
+
+  df
+}
+
+
+
+#' @title Enforce correct data types
+#' @description Enforce correct data types.
+#' @param df *\[data.frame\]* The data frame to enforce correct data types for
+#' @return *\[data.frame\]* The data frame with the correct data types enforced
+#' @keywords internal
+enforce_data_types <- function(df) {
+  cli::cli_inform("Enforcing correct data types…")
+  config <- get_data_config()
+  for (col_name in make.names(colnames(df))) {
+    dtype <- config[[col_name]]$data_type
+    if (dtype %in% c("int", "dummy")) {
+      df[[col_name]] <- as.integer(df[[col_name]])
+    } else if (dtype %in% c("float", "perc")) {
+      df[[col_name]] <- as.numeric(df[[col_name]])
+    } else if (dtype == "category") {
+      df[[col_name]] <- as.character(df[[col_name]])
+    }
+  }
+  df
+}
+
+#' @title Check for invalid values
+#' @description Check for invalid values and enforce correct ones
+#' @param df *\[data.frame\]* The data frame to check for invalid values for
+#' @return *\[data.frame\]* The data frame with the invalid values enforced
+#' @keywords internal
+enforce_correct_values <- function(df) {
+  cli::cli_inform("Checking for invalid values…")
+
+  box::use(artma / libs / validation[assert])
+
+  se_zero_handling <- getOption("artma.calc.se_zero_handling")
+
+  zero_se_rows <- which(df$se == 0)
+
+  if (se_zero_handling == "stop") {
+    assert(length(zero_se_rows) == 0, "The 'se' column contains zero values")
+  } else if (se_zero_handling == "warn") {
+    if (length(zero_se_rows) > 0) {
+      cli::cli_warn("The 'se' column contains zero values in {length(zero_se_rows)} rows")
+    }
+  }
+
+  df
+}
+
+
+
+#' @title Preprocess data
+#' @description Preprocess the raw data frame.
+#' @param df *[data.frame]* Raw data frame to clean.
+#' @return *[data.frame]* The validated, type‑safe, and trimmed data frame.
+preprocess_data <- function(df) {
+  box::use(magrittr[`%>%`])
+
+  df %>%
+    remove_redundant_columns() %>%
+    verify_variable_names() %>%
+    verify_variable_order() %>%
+    remove_empty_rows() %>%
+    check_required_non_empty() %>%
+    enforce_data_types() %>%
+    enforce_correct_values()
+}
+
+box::export(preprocess_data)

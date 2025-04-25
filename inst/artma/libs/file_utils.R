@@ -6,6 +6,9 @@
 #'  Raise an error in case the folder does not exist.
 #' @export
 ensure_folder_existence <- function(folder_name, require_existence = FALSE) {
+  box::use(artma / libs / validation[validate])
+  validate(is.character(folder_name), is.logical(require_existence))
+
   if (!dir.exists(folder_name)) {
     if (require_existence) {
       cli::cli_abort(
@@ -13,6 +16,7 @@ ensure_folder_existence <- function(folder_name, require_existence = FALSE) {
         class = "folder_not_found"
       )
     }
+    cli::cli_inform("Creating folder {.path {folder_name}}.")
     dir.create(folder_name, recursive = TRUE)
   }
 }
@@ -48,11 +52,7 @@ validate_files <- function(files) {
 #' @return `NULL` The function writes the file and does not return anything
 #' @export
 write_txt_file <- function(msg_list, full_path) {
-  box::use(
-    artma / libs / utils[is_empty]
-  )
-
-  if (is_empty(msg_list)) {
+  if (rlang::is_empty(msg_list)) {
     return(NULL) # Nothing to write
   }
   writeLines(unlist(msg_list), full_path)

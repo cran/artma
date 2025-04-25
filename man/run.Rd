@@ -2,7 +2,7 @@
 % Please edit documentation in R/run.R
 \name{run}
 \alias{run}
-\title{Run ARTMA}
+\title{Run artma}
 \usage{
 run(methods = NULL, options_file_name = NULL, options_dir = NULL)
 }
@@ -17,5 +17,5 @@ run(methods = NULL, options_file_name = NULL, options_dir = NULL)
 \emph{[list]} Results of the invocations, indexed by method names.
 }
 \description{
-Run ARTMA with the specified methods and options.
+Run artma with the specified methods and options.
 }

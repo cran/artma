@@ -13,7 +13,7 @@ options.modify(
 )
 }
 \arguments{
-\item{options_file_name}{\emph{[character]} Name of the user options file to modify, including the suffix.}
+\item{options_file_name}{\emph{[character, optional]} Name of the user options file to modify, including the suffix.}
 
 \item{options_dir}{\emph{[character, optional]} Full path to the folder that contains user options files. If not provided, the default folder is chosen. Defaults to \code{NULL}.}
 

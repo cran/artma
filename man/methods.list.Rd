@@ -10,5 +10,5 @@ methods.list()
 \code{NULL} Prints the available methods into the console.
 }
 \description{
-Print all runtime methods supported by ARTMA into the console.
+Print all runtime methods supported by artma into the console.
 }

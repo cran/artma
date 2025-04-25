@@ -31,11 +31,10 @@ remove_options_with_prefix <- function(prefix) {
   opts <- options()
   opts_to_remove <- names(opts)[startsWith(names(opts), prefix)]
 
-  logger::log_debug("Clearing the following options from the options namespace:")
-  logger::log_debug(opts_to_remove)
+  cli::cli_inform("Clearing the following options from the options namespace: {.emph {opts_to_remove}}")
 
   if (length(opts_to_remove) == 0) {
-    logger::log_debug("No options found with the prefix: ", prefix)
+    cli::cli_alert_info("No options found with the prefix: {prefix}")
     return(invisible(NULL))
   }
 
@@ -75,33 +74,19 @@ flat_to_nested <- function(flat_option_list) {
   nested_list
 }
 
-#' @title Nested to flat
-#' @description Convert a list of nested options to a flat one
-#' @param nested [list] A list of nested options
-#' @param parent_key *\[character, optional\]* Parent key for the nested options. Defaults to `NULL`.
-#' @param sep *\[character, optional\]* Separator to use when concatenating the level names. Defaulst to '.'.
-nested_to_flat <- function(nested, parent_key = NULL, sep = ".") {
-  if (!is.list(nested)) {
-    cli::cli_abort("The options must be passed as a nested list.")
+
+#' @title Parse template enum value
+#' @description Parse a template enum value
+#' @param opt_type *\[character\]* A template enum value
+#' @return *\[character\]* A vector of valid values
+parse_template_enum_value <- function(opt_type) {
+  if (!startsWith(opt_type, "enum:")) {
+    cli::cli_abort("The option type must start with 'enum:'.")
   }
-
-  flat <- list()
-
-  for (name in names(nested)) {
-    if (is.null(parent_key)) {
-      new_key <- name
-    } else {
-      new_key <- paste(parent_key, name, sep = sep)
-    }
-
-    if (is.list(nested[[name]])) {
-      flat <- c(flat, nested_to_flat(nested[[name]], new_key, sep))
-    } else {
-      flat[[new_key]] <- nested[[name]]
-    }
-  }
-
-  flat
+  enum_str <- sub("^enum:", "", opt_type)
+  values <- strsplit(enum_str, "\\|(?=(?:[^']*'[^']*')*[^']*$)", perl = TRUE)[[1]]
+  trimmed_values <- gsub("^\\s*'?|'?\\s*$", "", values)
+  trimmed_values
 }
 
 #' @title Parse options file name
@@ -109,7 +94,7 @@ nested_to_flat <- function(nested, parent_key = NULL, sep = ".") {
 parse_options_file_name <- function(input_string) {
   str_out <- rlang::duplicate(input_string)
 
-  logger::log_debug(cli::format_inline("Parsing the following string into a user options file name: {.emph {input_string}}"))
+  cli::cli_inform("Parsing the following string into a user options file name: {.file {input_string}}")
 
   tryCatch(
     {
@@ -177,7 +162,7 @@ validate_option_value <- function(val, opt_type, opt_name, allow_na = FALSE) {
 
   # Handle enumerations, e.g. "enum: red|blue|green"
   if (startsWith(opt_type, "enum:")) {
-    valid_values <- strsplit(sub("^enum:", "", opt_type), "\\|")[[1]]
+    valid_values <- parse_template_enum_value(opt_type)
     if (!val %in% valid_values) {
       return(
         cli::format_inline(
@@ -197,12 +182,32 @@ validate_option_value <- function(val, opt_type, opt_name, allow_na = FALSE) {
   )
 }
 
+#' @title Validate user input
+#' @description Validate user input to ensure it does not contain the package name prefix.
+#' @param user_input [list] A list of user input.
+#' @return `NULL`
+validate_user_input <- function(user_input) {
+  box::use(artma / const[CONST])
+
+  pkg_name <- CONST$PACKAGE_NAME
+
+  # None of the names should start with the package name
+  has_pkg_prefix <- vapply(names(user_input), function(x) startsWith(x, pkg_name), logical(1))
+  if (any(has_pkg_prefix)) {
+    invalid_names <- names(user_input)[has_pkg_prefix] # nolint: unused_declared_object_linter.
+    cli::cli_abort("Please provide the names of the options without the '{pkg_name}' prefix. Got: {.code {invalid_names}}.")
+  }
+
+  return(invisible(NULL))
+}
+
 box::export(
   flat_to_nested,
   get_expected_type,
   get_option_group,
-  nested_to_flat,
   parse_options_file_name,
+  parse_template_enum_value,
   remove_options_with_prefix,
-  validate_option_value
+  validate_option_value,
+  validate_user_input
 )

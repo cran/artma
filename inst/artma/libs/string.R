@@ -1,12 +1,29 @@
 box::use(artma / libs / validation[validate, assert])
 
-#' Pluralize a word
+#' Pluralize a word based on count
 #'
-#' @param word *\[character\]* The word to pluralize
-#' `character` The pluralized word
-#' @export
-pluralize <- function(word) {
+#' @param word *\[character\]* The word to potentially pluralize
+#' @param count *\[integer\]* The count to determine if pluralization is needed
+#' `character` The word, pluralized if count is not 1
+pluralize <- function(word, count = NULL) {
   validate(is.character(word))
+
+  if (is.null(count)) {
+    if (grepl("[sxz]$", word) || grepl("[sc]h$", word)) {
+      return(paste0(word, "es"))
+    } else if (grepl("[^aeiou]y$", word)) {
+      return(sub("y$", "ies", word))
+    } else {
+      return(paste0(word, "s"))
+    }
+  }
+
+  validate(is.numeric(count))
+
+  if (count == 1) {
+    return(word)
+  }
+
   if (grepl("[sxz]$", word) || grepl("[sc]h$", word)) {
     return(paste0(word, "es"))
   } else if (grepl("[^aeiou]y$", word)) {
@@ -15,13 +32,11 @@ pluralize <- function(word) {
     return(paste0(word, "s"))
   }
 }
-
 #' Find a string in a vector of strings using a substring
 #'
 #' @param vector_of_strings *\[character\]* The vector of strings to search
 #' @param substring *\[character\]* The substring to search for
 #' `character` The string that contains the substring
-#' @export
 find_string_using_substring <- function(vector_of_strings, substring) {
   assert(is.character(substring), "The substring must be a character")
   assert(is.vector(vector_of_strings), "The vector of strings must be a character vector")
@@ -38,7 +53,6 @@ find_string_using_substring <- function(vector_of_strings, substring) {
 #' @title Trim quotes
 #' @description Removes single or double quotes from the beggining and end of a string. Preserves these quotes elsewhere in the string.
 #' @param s *\[character\]* The string to trim quotes for.
-#' @export
 trim_quotes <- function(s) gsub("^(\"|')+|(\"|')+$", "", s)
 
 
@@ -47,7 +61,6 @@ trim_quotes <- function(s) gsub("^(\"|')+|(\"|')+$", "", s)
 #' @param input_string *\[character\]* The string to clean
 #' `character` The cleaned string
 #' @importFrom stringr
-#' @export
 clean_string <- function(input_string) {
   # Remove special characters
   str_out <- stringr::str_replace_all(input_string, "[^a-zA-Z0-9]", "_")
@@ -64,3 +77,25 @@ clean_string <- function(input_string) {
 
   return(str_out)
 }
+
+#' Make a verbose name
+#'
+#' @param input_str *\[character\]* The string to make verbose
+#' `character` The verbose string
+make_verbose_name <- function(input_str) {
+  verbose <- gsub("_", " ", input_str)
+  verbose <- trimws(verbose)
+  verbose <- paste(toupper(substring(verbose, 1, 1)),
+    substring(verbose, 2),
+    sep = ""
+  )
+  verbose
+}
+
+box::export(
+  clean_string,
+  find_string_using_substring,
+  make_verbose_name,
+  pluralize,
+  trim_quotes
+)

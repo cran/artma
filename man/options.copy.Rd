@@ -7,7 +7,8 @@
 options.copy(
   options_file_name_from = NULL,
   options_file_name_to = NULL,
-  options_dir = NULL
+  options_dir = NULL,
+  should_overwrite = NULL
 )
 }
 \arguments{
@@ -16,6 +17,8 @@ options.copy(
 \item{options_file_name_to}{\emph{[character, optional]} Name of the options file to copy to. If not provided, the user will be prompted. Defaults to \code{NULL}.}
 
 \item{options_dir}{\emph{[character, optional]} Full path to the folder that contains user options files. If not provided, the default folder is chosen. Defaults to \code{NULL}.}
+
+\item{should_overwrite}{\emph{[logical, optional]} Whether to overwrite an existing file without asking. If \code{TRUE}, the file will be overwritten without prompting. If \code{FALSE}, the function will abort if the file already exists. If \code{NULL} (default), the user will be prompted.}
 }
 \value{
 \code{NULL}

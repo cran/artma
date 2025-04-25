@@ -9,8 +9,10 @@ options.load(
   options_dir = NULL,
   create_options_if_null = TRUE,
   load_with_prefix = TRUE,
+  template_path = NULL,
   should_validate = TRUE,
   should_set_to_namespace = FALSE,
+  should_add_temp_options = FALSE,
   should_return = TRUE
 )
 }
@@ -23,9 +25,13 @@ options.load(
 
 \item{load_with_prefix}{\emph{[logical, optional]} Whether the options should be loaded with the package prefix. Defaults to TRUE.}
 
+\item{template_path}{\emph{[character, optional]} Path to the template YAML file. Defaults to \code{NULL}.}
+
 \item{should_validate}{\emph{[logical, optional]} Whether the options should be validated after loading. Defaults to TRUE.}
 
 \item{should_set_to_namespace}{\emph{[logical, optional]} Whether the options should be set in the options() namespace. Defaults to TRUE.}
+
+\item{should_add_temp_options}{\emph{[logical, optional]} Whether the options should be added to the temporary options. Defaults to FALSE.}
 
 \item{should_return}{\emph{[logical, optional]} Whether the function should return the list of options. Defaults to FALSE.}
 }

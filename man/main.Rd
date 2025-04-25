@@ -2,18 +2,20 @@
 % Please edit documentation in R/main.R
 \name{main}
 \alias{main}
-\title{ARTMA main}
+\title{artma main}
 \usage{
-main(options = NULL, options_dir = NULL)
+main(options = NULL, options_dir = NULL, FUN = NULL)
 }
 \arguments{
 \item{options}{\emph{[character]} Name of the user options file to use.}
 
 \item{options_dir}{\emph{[character]} Path to the directory that contains user options.}
+
+\item{FUN}{\emph{[function]} The function to be called after the setup.}
 }
 \value{
 \emph{[any]} Depends on the main function definition.
 }
 \description{
-ARTMA main
+artma main
 }

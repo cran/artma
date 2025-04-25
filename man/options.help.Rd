@@ -8,7 +8,7 @@ options.help(options = NULL, template_path = NULL)
 }
 \arguments{
 \item{options}{\emph{[character, optional]} A single option name (dot-separated) or a
-character vector thereof. If \code{NULL}, prints \strong{all} options from
+character vector thereof. If \code{NULL}, prints \strong{all} options from"
 the template.}
 
 \item{template_path}{\emph{[character, optional]} Path to the template YAML file.

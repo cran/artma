@@ -11,7 +11,7 @@ options.create(
   user_input = list(),
   should_validate = TRUE,
   should_overwrite = FALSE,
-  action_name = "created"
+  action_name = "creating"
 )
 }
 \arguments{

@@ -14,6 +14,6 @@ runtime_setup(FUN, options_file_name = NULL, options_dir = NULL)
 \item{options_dir}{\emph{[character, optional]} Path to the directory that contains user options. Defaults to the directory specified in PATHS.}
 }
 \description{
-A function user as a wrapper for runtime functions invocation to ensure crucial fucntionality, such as imports, logging, etc., all work as expected.
+A function user as a wrapper for runtime functions invocation to ensure crucial fucntionality, such as imports, etc., all work as expected.
 }
 \keyword{internal}

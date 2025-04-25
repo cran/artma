@@ -39,7 +39,6 @@ ask_for_existing_options_file_name <- function(
 
   box::use(
     artma[options.list],
-    artma / libs / utils[is_empty],
     artma / libs / string[pluralize]
   )
 
@@ -57,7 +56,7 @@ ask_for_existing_options_file_name <- function(
     choices = user_options_file_names,
     multiple = multiple
   )
-  if (is_empty(selected_file_name)) {
+  if (rlang::is_empty(selected_file_name)) {
     cli::cli_abort("No user options file was selected. Aborting...")
   }
   return(selected_file_name)
@@ -128,7 +127,7 @@ ask_for_options_to_modify <- function() {
 
   cli::cli_h3("Instructions")
   cli::cli_ul(c(
-    "The names should be {.emph separated by dots} and {.strong NOT} prepended by the package name prefix. {.strong Example}: {CONST$STYLES$OPTIONS$NAME('logging.log_file_name')}",
+    "The names should be {.emph separated by dots} and {.strong NOT} prepended by the package name prefix. {.strong Example}: {CONST$STYLES$OPTIONS$NAME('data.source_path')}",
     "{.strong DO NOT} use quotes for option names.",
     "The values should usually be provided {.emph without quotes}. Use quotes only if the value is a string that contains spaces or special characters.",
     "Press {.kbd Enter} to finish."
