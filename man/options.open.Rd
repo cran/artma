@@ -16,4 +16,6 @@ options.open(options_file_name = NULL, options_dir = NULL)
 }
 \description{
 Open an options file for editing. Must be run interactively.
+The editor is resolved from: (1) cli.editor option, (2) VISUAL/EDITOR env vars,
+or (3) system default file handler.
 }

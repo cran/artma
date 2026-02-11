@@ -2,7 +2,7 @@
 #'
 #' @return TRUE if loaded via devtools, FALSE otherwise
 #' @keywords internal
-is_devtools_load <- function() { # nolint: unused_declared_object_linter.
+is_devtools_load <- function() {
   identical(Sys.getenv("DEVTOOLS_LOAD"), "true")
 }
 
@@ -29,10 +29,34 @@ get_valid_boxpath <- function(libname, pkgname) {
     boxpath_defined(pkg_path),
     boxpath_defined(dev_path)
   ))) {
-    return(current_box_path) # Already valid
-  }
+    return(current_box_path)
+  } # Already valid
 
   unique(c(current_box_path, pkg_path, dev_path))
+}
+
+#' Reference runtime dependencies so R CMD check detects Imports usage.
+#'
+#' These packages are required by the modules shipped under `inst/artma`
+#' and are accessed via `pkg::fun()` at runtime. Because those modules are
+#' not parsed when `R CMD check` scans the package's R sources, we touch the
+#' symbols here to make the dependency explicit.
+#'
+#' @keywords internal
+#' @noRd
+register_runtime_dependencies <- function() {
+  invisible(list(
+    ggplot2::ggplot,
+    ggtext::element_markdown,
+    NlcOptim::solnl,
+    lmtest::coeftest,
+    plm::plm,
+    plm::vcovHC,
+    sandwich::vcovCL,
+    sandwich::vcovHC,
+    yaml::read_yaml,
+    yaml::write_yaml
+  ))
 }
 
 #' @title .onLoad hook for package initialization
@@ -41,7 +65,7 @@ get_valid_boxpath <- function(libname, pkgname) {
 #' @param pkgname The name of the package.
 #' @return `NULL` Sets up the package on load
 #' @keywords internal
-.onLoad <- function(libname, pkgname) { # nolint: unused_declared_object_linter.
+.onLoad <- function(libname, pkgname) {
   op <- options()
   op.artma <- list(
     # artma.abc = xyz
@@ -54,6 +78,8 @@ get_valid_boxpath <- function(libname, pkgname) {
   # Mandatory set
   options(box.path = get_valid_boxpath(libname, pkgname))
 
+  register_runtime_dependencies()
+
   invisible()
 }
 
@@ -62,7 +88,7 @@ get_valid_boxpath <- function(libname, pkgname) {
 #' @note The box imports no longer work after the package is detached.
 #' @return `NULL` Cleans up the package on unload
 #' @keywords internal
-.onUnload <- function(libpath) { # nolint: unused_declared_object_linter.
+.onUnload <- function(libpath) {
   # Remove options with the "artma" prefix
   opts_to_remove <- names(options())[startsWith(names(options()), "artma")]
   options(stats::setNames(rep(list(NULL), length(opts_to_remove)), opts_to_remove))

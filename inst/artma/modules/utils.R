@@ -1,0 +1,117 @@
+#' @title Crawl and import modules
+#' @description Provided a path to a directory, crawl this directory for files matching a pattern and import all of them as box modules. Each such module will be imported under its name.
+#' @details Assume you have a file 'my_custom_module.R' in a directory you want to import. Running this function on that directory loads a module named 'my_custom_module' into memory through box. Consequently, calls su
+#' @param dir_path *\[character\]* Path to the directory to crawl.
+#' @param pattern *\[character\]* Pattern to match files against. Defaults to "\\.R$" to match all R files.
+#' `list` A list of box modules, accessible by their name.
+#'
+#' @usage
+#' # Assume you have a 'my_custom_module.R' inside the following directory
+#' custom_dir <- file.path('path', 'to', 'your', 'dir')
+#'
+#' # Import all R files
+#' modules <- crawl_and_import_modules(custom_dir)
+#'
+#' # Import only files starting with "mock_"
+#' mock_modules <- crawl_and_import_modules(custom_dir, pattern = "^mock_.*\\.R$")
+#'
+#' my_custom_module <- modules[['my_custom_module']]
+#'
+#' # The following calls will work
+#' my_custom_module$some_method()
+#' my_custom_module$another_method()
+#' modules$my_custom_module$some_method()
+crawl_and_import_modules <- function(dir_path, pattern = "\\.R$") {
+  box::use(artma / libs / core / utils[get_verbosity])
+
+  dir_path <- normalizePath(dir_path, mustWork = FALSE)
+  if (!dir.exists(dir_path)) {
+    cli::cli_abort(sprintf("Non-existent directory when importing modules: %s", dir_path))
+  }
+
+  box::use(artma / modules / path[turn_path_into_box_import])
+
+  modules <- list()
+
+  # It is possible that the box imports may not work across all devices. Were that to be the case, consider using 'with_dir' to change the working dir temporarily for the following chunk of code.
+
+  r_files <- list.files(path = dir_path, pattern = pattern, full.names = FALSE)
+  for (f in r_files) {
+    module_name <- base::basename(tools::file_path_sans_ext(f))
+    module_path <- tools::file_path_as_absolute(file.path(dir_path, f))
+
+    box_import_statement <- turn_path_into_box_import(module_path)
+    if (get_verbosity() >= 4) {
+      cli::cli_inform("Running the following import statement: {.code {box_import_statement}}")
+    }
+    eval(box_import_statement) # Imports the module
+
+    # Calling the module name should now return the module itself
+    imported_module <- eval(parse(text = module_name))
+    if (!inherits(imported_module, "box$mod")) {
+      cli::cli_abort(sprintf("Failed to import %s as a box module. Aborting...", module_name))
+    }
+    modules[[module_name]] <- imported_module
+  }
+
+  modules
+}
+
+
+#' @title Validate runtime method modules
+#' @description Given a list of modules, validate that all of the components of this list are valid runtime method modules. This means ensuring they are proper module objects, contain the 'run' function, etc. Raise an error if any of these validations fail.
+#' @param modules [list[box.module]] A list of modules to validate.
+#' @return `NULL` Validates the object structure
+validate_runtime_method_modules <- function(modules) { # nolint: object_length_linter.
+  box::use(artma / libs / core / utils[get_verbosity])
+
+  if (!is.list(modules)) {
+    obj_class <- class(modules)
+    cli::cli_abort(sprintf("Invalid runtime method modules object: %s. Class: '%s'. Expected: 'list'.", modules, obj_class))
+  }
+
+  if (length(modules) == 0) {
+    if (get_verbosity() >= 2) {
+      cli::cli_alert_warning("No runtime method modules to validate.")
+    }
+    return(NULL)
+  }
+
+  for (module_name in names(modules)) {
+    tryCatch(
+      {
+        main_method <- modules[[module_name]]$run # Can throw an error
+
+        if (!inherits(main_method, "function")) {
+          cli::cli_abort(sprintf("Missing or invalid 'run' function in module '%s'. Make sure your module contains this function.", module_name))
+        }
+      },
+      error = function(e) {
+        cli::cli_abort(sprintf("Error validating the '%s' runtime methods module: %s", module_name, e))
+      }
+    )
+  }
+}
+
+
+#' @title Get the exports of a package
+#' @description Get the exports of a package.
+#' @param pkg [character] The name of the package to get the exports of.
+#' @return [character] A vector of the exports of the package.
+get_pkg_exports <- function(pkg) {
+  import_statement <- sprintf("box::use(mod = %s)", pkg)
+  eval(parse(text = import_statement))
+  ns <- attr(mod, "namespace")
+  exports <- base::getNamespaceExports(ns)
+  funs <- Filter(
+    function(x) is.function(get(x, envir = ns, inherits = FALSE)),
+    exports
+  )
+  funs
+}
+
+box::export(
+  crawl_and_import_modules,
+  get_pkg_exports,
+  validate_runtime_method_modules
+)

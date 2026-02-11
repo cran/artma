@@ -7,13 +7,16 @@
 config.fix(options_file_name = NULL, options_dir = NULL)
 }
 \arguments{
-\item{options_file_name}{\emph{[character, optional]} The name of the options file to read the data config from. If \code{NULL} (default), the data config will be read from the \code{artma.data.config} option.}
+\item{options_file_name}{\emph{[character, optional]} The name of the options
+file. If \code{NULL} (default), the user will be prompted interactively.}
 
-\item{options_dir}{\emph{[character, optional]} The directory to read the options file from. If \code{NULL} (default), the current working directory will be used.}
+\item{options_dir}{\emph{[character, optional]} The directory containing options
+files. If \code{NULL} (default), the default directory is used.}
 }
 \value{
 \emph{[list]} The fixed data config.
 }
 \description{
-Fix the data config.
+Regenerate the data config from the dataframe, clearing all
+overrides.
 }

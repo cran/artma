@@ -1,5 +1,6 @@
 PACKAGE_NAME <- "artma"
 PACKAGE_NAME_VERBOSE <- "Automatic Replication Tools for Meta-Analysis"
+RUN_URL <- "https://petrcala.r-universe.dev/"
 
 #' @export
 CONST <- list(
@@ -7,7 +8,9 @@ CONST <- list(
   PACKAGE_NAME_VERBOSE = PACKAGE_NAME_VERBOSE,
   DATA = list(
     # A list of recognized data (meaning data frame) types
-    TYPES = c("csv", "tsv", "xlsx", "xls", "xlsm", "json", "dta", "rds")
+    TYPES = c("csv", "tsv", "xlsx", "xls", "xlsm", "json", "dta", "rds"),
+    # Strings that should be interpreted as NA when reading data files
+    NA_STRINGS = c("", "NA", "N/A", "na", "n/a", "NULL", "null")
   ),
   DATE_FORMAT = "%Y-%m-%d %H:%M:%S",
   DATE_ONLY_FORMAT = "%Y-%m-%d",
@@ -47,14 +50,33 @@ CONST <- list(
       DIRECTORY = "directory",
       FUNCTION = "function"
     ),
+    # These are the names of the template files that are used to generate the options template.
+    TEMPLATE_NAMES = c("template.yaml", "template.yml", "options_template.yaml", "options_template.yml"),
+    # These are the names of the keywords that are recognized in the options template.
+    RECOGNIZED_KEYWORDS = c("default", "help", "prompt", "allow_na", "confirm_default"),
     DEFAULT_PROMPT_TYPE = "readline",
     SPECIAL_KEYS = c("description", "details", "type", "optional", "default", "values")
+  ),
+  VARIABLE_SUMMARY_STATS = list(
+    NAMES = c(
+      "Var Name", "Var Class", "Mean", "Median",
+      "Min", "Max", "SD", "Obs", "Missing obs"
+    ),
+    DESIRED_VARS = c("effect", "se", "sample_size", "dof")
+  ),
+  EFFECT_SUMMARY_STATS = list(
+    NAMES = c(
+      "Var Name", "Var Class", "Mean", "CI lower", "CI upper", "Weighted Mean",
+      "WM CI lower", "WM CI upper", "Median", "Min", "Max", "SD", "Obs"
+    ),
+    DESIRED_VARS = c("effect", "se", "sample_size", "dof")
   ),
   MOCKS = list(
     TMP_DATA_FILE_NAME = "tmp_data.csv",
     TMP_OPTIONS_FILE_NAME = "tmp_options.yaml",
     MOCK_DF_NROWS = 1000,
-    MOCK_DF_NSTUDIES = 50
+    MOCK_DF_NSTUDIES = 50,
+    MOCK_DF_SEED = 123
   ),
   PATTERNS = list(
     YAML_FILES = list(
@@ -62,6 +84,7 @@ CONST <- list(
       REGEX = "\\.ya(ml|yml)$"
     )
   ),
+  DEFAULT_VERBOSITY = 3,
   STYLES = list(
     OPTIONS = list(
       NAME = cli::col_magenta,
@@ -69,5 +92,27 @@ CONST <- list(
       TYPE = cli::col_cyan,
       DEFAULT = cli::col_yellow
     )
+  ),
+  RUNTIME_METHODS = list(
+    EXECUTION_ORDER = c(
+      "variable_summary_stats",
+      "effect_summary_stats",
+      "box_plot",
+      "funnel_plot",
+      "t_stat_histogram",
+      "prima_facie_graphs",
+      "linear_tests",
+      "nonlinear_tests",
+      "exogeneity_tests",
+      "p_hacking_tests",
+      "bma",
+      "fma"
+    )
+  ),
+  URLS = list(
+    BASE = RUN_URL,
+    PACKAGE_BASE = paste0(RUN_URL, "/", PACKAGE_NAME),
+    VIGNETTE_BASE = paste0(RUN_URL, "/articles/", PACKAGE_NAME),
+    PACKAGE_PDF = paste0(RUN_URL, "/", PACKAGE_NAME, "/", PACKAGE_NAME, ".pdf")
   )
 )

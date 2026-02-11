@@ -1,0 +1,870 @@
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta charset="utf-8" />
+<meta name="generator" content="pandoc" />
+<meta http-equiv="X-UA-Compatible" content="IE=EDGE" />
+
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+
+
+<title>Understanding Options Files in artma</title>
+
+<script>// Pandoc 2.9 adds attributes on both header and div. We remove the former (to
+// be compatible with the behavior of Pandoc < 2.8).
+document.addEventListener('DOMContentLoaded', function(e) {
+  var hs = document.querySelectorAll("div.section[class*='level'] > :first-child");
+  var i, h, a;
+  for (i = 0; i < hs.length; i++) {
+    h = hs[i];
+    if (!/^h[1-6]$/i.test(h.tagName)) continue;  // it should be a header h1-h6
+    a = h.attributes;
+    while (a.length > 0) h.removeAttribute(a[0].name);
+  }
+});
+</script>
+
+<style type="text/css">
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+span.underline{text-decoration: underline;}
+div.column{display: inline-block; vertical-align: top; width: 50%;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+</style>
+
+
+
+<style type="text/css">
+code {
+white-space: pre;
+}
+.sourceCode {
+overflow: visible;
+}
+</style>
+<style type="text/css" data-origin="pandoc">
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+{ counter-reset: source-line 0; }
+pre.numberSource code > span
+{ position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+{ content: counter(source-line);
+position: relative; left: -1em; text-align: right; vertical-align: baseline;
+border: none; display: inline-block;
+-webkit-touch-callout: none; -webkit-user-select: none;
+-khtml-user-select: none; -moz-user-select: none;
+-ms-user-select: none; user-select: none;
+padding: 0 4px; width: 4em;
+color: #aaaaaa;
+}
+pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa; padding-left: 4px; }
+div.sourceCode
+{ }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+code span.al { color: #ff0000; font-weight: bold; } 
+code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.at { color: #7d9029; } 
+code span.bn { color: #40a070; } 
+code span.bu { color: #008000; } 
+code span.cf { color: #007020; font-weight: bold; } 
+code span.ch { color: #4070a0; } 
+code span.cn { color: #880000; } 
+code span.co { color: #60a0b0; font-style: italic; } 
+code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.do { color: #ba2121; font-style: italic; } 
+code span.dt { color: #902000; } 
+code span.dv { color: #40a070; } 
+code span.er { color: #ff0000; font-weight: bold; } 
+code span.ex { } 
+code span.fl { color: #40a070; } 
+code span.fu { color: #06287e; } 
+code span.im { color: #008000; font-weight: bold; } 
+code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.kw { color: #007020; font-weight: bold; } 
+code span.op { color: #666666; } 
+code span.ot { color: #007020; } 
+code span.pp { color: #bc7a00; } 
+code span.sc { color: #4070a0; } 
+code span.ss { color: #bb6688; } 
+code span.st { color: #4070a0; } 
+code span.va { color: #19177c; } 
+code span.vs { color: #4070a0; } 
+code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } 
+</style>
+<script>
+// apply pandoc div.sourceCode style to pre.sourceCode instead
+(function() {
+  var sheets = document.styleSheets;
+  for (var i = 0; i < sheets.length; i++) {
+    if (sheets[i].ownerNode.dataset["origin"] !== "pandoc") continue;
+    try { var rules = sheets[i].cssRules; } catch (e) { continue; }
+    var j = 0;
+    while (j < rules.length) {
+      var rule = rules[j];
+      // check if there is a div.sourceCode rule
+      if (rule.type !== rule.STYLE_RULE || rule.selectorText !== "div.sourceCode") {
+        j++;
+        continue;
+      }
+      var style = rule.style.cssText;
+      // check if color or background-color is set
+      if (rule.style.color === '' && rule.style.backgroundColor === '') {
+        j++;
+        continue;
+      }
+      // replace div.sourceCode by a pre.sourceCode rule
+      sheets[i].deleteRule(j);
+      sheets[i].insertRule('pre.sourceCode{' + style + '}', j);
+    }
+  }
+})();
+</script>
+
+
+
+
+<style type="text/css">body {
+background-color: #fff;
+margin: 1em auto;
+max-width: 700px;
+overflow: visible;
+padding-left: 2em;
+padding-right: 2em;
+font-family: "Open Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+font-size: 14px;
+line-height: 1.35;
+}
+#TOC {
+clear: both;
+margin: 0 0 10px 10px;
+padding: 4px;
+width: 400px;
+border: 1px solid #CCCCCC;
+border-radius: 5px;
+background-color: #f6f6f6;
+font-size: 13px;
+line-height: 1.3;
+}
+#TOC .toctitle {
+font-weight: bold;
+font-size: 15px;
+margin-left: 5px;
+}
+#TOC ul {
+padding-left: 40px;
+margin-left: -1.5em;
+margin-top: 5px;
+margin-bottom: 5px;
+}
+#TOC ul ul {
+margin-left: -2em;
+}
+#TOC li {
+line-height: 16px;
+}
+table {
+margin: 1em auto;
+border-width: 1px;
+border-color: #DDDDDD;
+border-style: outset;
+border-collapse: collapse;
+}
+table th {
+border-width: 2px;
+padding: 5px;
+border-style: inset;
+}
+table td {
+border-width: 1px;
+border-style: inset;
+line-height: 18px;
+padding: 5px 5px;
+}
+table, table th, table td {
+border-left-style: none;
+border-right-style: none;
+}
+table thead, table tr.even {
+background-color: #f7f7f7;
+}
+p {
+margin: 0.5em 0;
+}
+blockquote {
+background-color: #f6f6f6;
+padding: 0.25em 0.75em;
+}
+hr {
+border-style: solid;
+border: none;
+border-top: 1px solid #777;
+margin: 28px 0;
+}
+dl {
+margin-left: 0;
+}
+dl dd {
+margin-bottom: 13px;
+margin-left: 13px;
+}
+dl dt {
+font-weight: bold;
+}
+ul {
+margin-top: 0;
+}
+ul li {
+list-style: circle outside;
+}
+ul ul {
+margin-bottom: 0;
+}
+pre, code {
+background-color: #f7f7f7;
+border-radius: 3px;
+color: #333;
+white-space: pre-wrap; 
+}
+pre {
+border-radius: 3px;
+margin: 5px 0px 10px 0px;
+padding: 10px;
+}
+pre:not([class]) {
+background-color: #f7f7f7;
+}
+code {
+font-family: Consolas, Monaco, 'Courier New', monospace;
+font-size: 85%;
+}
+p > code, li > code {
+padding: 2px 0px;
+}
+div.figure {
+text-align: center;
+}
+img {
+background-color: #FFFFFF;
+padding: 2px;
+border: 1px solid #DDDDDD;
+border-radius: 3px;
+border: 1px solid #CCCCCC;
+margin: 0 5px;
+}
+h1 {
+margin-top: 0;
+font-size: 35px;
+line-height: 40px;
+}
+h2 {
+border-bottom: 4px solid #f7f7f7;
+padding-top: 10px;
+padding-bottom: 2px;
+font-size: 145%;
+}
+h3 {
+border-bottom: 2px solid #f7f7f7;
+padding-top: 10px;
+font-size: 120%;
+}
+h4 {
+border-bottom: 1px solid #f7f7f7;
+margin-left: 8px;
+font-size: 105%;
+}
+h5, h6 {
+border-bottom: 1px solid #ccc;
+font-size: 105%;
+}
+a {
+color: #0033dd;
+text-decoration: none;
+}
+a:hover {
+color: #6666ff; }
+a:visited {
+color: #800080; }
+a:visited:hover {
+color: #BB00BB; }
+a[href^="http:"] {
+text-decoration: underline; }
+a[href^="https:"] {
+text-decoration: underline; }
+
+code > span.kw { color: #555; font-weight: bold; } 
+code > span.dt { color: #902000; } 
+code > span.dv { color: #40a070; } 
+code > span.bn { color: #d14; } 
+code > span.fl { color: #d14; } 
+code > span.ch { color: #d14; } 
+code > span.st { color: #d14; } 
+code > span.co { color: #888888; font-style: italic; } 
+code > span.ot { color: #007020; } 
+code > span.al { color: #ff0000; font-weight: bold; } 
+code > span.fu { color: #900; font-weight: bold; } 
+code > span.er { color: #a61717; background-color: #e3d2d2; } 
+</style>
+
+
+
+
+</head>
+
+<body>
+
+
+
+
+<h1 class="title toc-ignore">Understanding Options Files in artma</h1>
+
+
+
+<div id="introduction" class="section level2">
+<h2>Introduction</h2>
+<p>Options files are the primary mechanism for configuring
+<strong>artma</strong> (Automatic Replication Tools for Meta-Analysis)
+analyses. They store all the settings needed to run your meta-analysis,
+including data paths, column mappings, method parameters, and output
+preferences. This vignette explains how options files work, how to
+create and use them, and provides best practices for managing your
+analysis configurations.</p>
+</div>
+<div id="what-are-options-files" class="section level2">
+<h2>What Are Options Files?</h2>
+<p>Options files are hierarchical YAML (YAML Ain’t Markup Language)
+configuration files that store all settings for an artma analysis.
+Instead of passing dozens of parameters to functions, you create a
+single options file that contains everything needed to run your
+analysis.</p>
+<div id="key-benefits" class="section level3">
+<h3>Key Benefits</h3>
+<ul>
+<li><strong>Reproducibility</strong>: Save your exact analysis
+configuration for future reference</li>
+<li><strong>Organization</strong>: Keep different analysis
+configurations separate (e.g., one per dataset or research
+question)</li>
+<li><strong>Simplicity</strong>: Create once, reuse many times</li>
+<li><strong>Validation</strong>: Options are validated against a
+template to ensure correctness</li>
+</ul>
+</div>
+<div id="file-format" class="section level3">
+<h3>File Format</h3>
+<p>Options files use YAML format, which is human-readable and supports
+hierarchical structures:</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode yaml"><code class="sourceCode yaml"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="fu">data</span><span class="kw">:</span></span>
+<span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a><span class="at">  </span><span class="fu">source_path</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;/path/to/your/data.csv&quot;</span></span>
+<span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a><span class="at">  </span><span class="fu">colnames</span><span class="kw">:</span></span>
+<span id="cb1-4"><a href="#cb1-4" tabindex="-1"></a><span class="at">    </span><span class="fu">effect</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;effect_size&quot;</span></span>
+<span id="cb1-5"><a href="#cb1-5" tabindex="-1"></a><span class="at">    </span><span class="fu">se</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;standard_error&quot;</span></span>
+<span id="cb1-6"><a href="#cb1-6" tabindex="-1"></a><span class="at">    </span><span class="fu">study</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;study_name&quot;</span></span>
+<span id="cb1-7"><a href="#cb1-7" tabindex="-1"></a><span class="fu">methods</span><span class="kw">:</span></span>
+<span id="cb1-8"><a href="#cb1-8" tabindex="-1"></a><span class="at">  </span><span class="fu">effect_summary_stats</span><span class="kw">:</span></span>
+<span id="cb1-9"><a href="#cb1-9" tabindex="-1"></a><span class="at">    </span><span class="fu">conf_level</span><span class="kw">:</span><span class="at"> </span><span class="fl">0.95</span></span></code></pre></div>
+</div>
+</div>
+<div id="options-file-structure" class="section level2">
+<h2>Options File Structure</h2>
+<p>Options files are organized into several main sections, each
+controlling different aspects of your analysis:</p>
+<div id="general" class="section level3">
+<h3>1. <code>general</code></h3>
+<p>Contains general package information:</p>
+<ul>
+<li><code>artma_version</code>: Version of artma used to create the file
+(automatically set)</li>
+</ul>
+</div>
+<div id="data" class="section level3">
+<h3>2. <code>data</code></h3>
+<p>Controls data loading and preprocessing:</p>
+<ul>
+<li><code>source_path</code>: Path to your dataset file (CSV, Excel,
+JSON, Stata, or RDS)</li>
+<li><code>colnames</code>: Column name mappings (effect, se, study,
+n_obs, etc.)</li>
+<li><code>na_handling</code>: How to handle missing values (stop,
+remove, median, mean, interpolate, mice)</li>
+<li><code>config_setup</code>: Whether to auto-configure or manually
+configure data</li>
+<li><code>config</code>: Detailed data configuration for each
+variable</li>
+<li><code>winsorization_level</code>: Outlier treatment level (0, 0.01,
+0.05, 0.10)</li>
+</ul>
+</div>
+<div id="calc" class="section level3">
+<h3>3. <code>calc</code></h3>
+<p>Calculation settings:</p>
+<ul>
+<li><code>precision_type</code>: How to calculate precision (‘1/SE’ or
+‘DoF’)</li>
+<li><code>se_zero_handling</code>: How to handle zero standard errors
+(stop, warn, ignore)</li>
+</ul>
+</div>
+<div id="methods" class="section level3">
+<h3>4. <code>methods</code></h3>
+<p>Method-specific parameters for each analysis method:</p>
+<div id="effect_summary_stats" class="section level4">
+<h4><code>effect_summary_stats</code></h4>
+<ul>
+<li><code>conf_level</code>: Confidence level for intervals (default:
+0.95)</li>
+<li><code>formal_output</code>: Whether to format output for LaTeX</li>
+</ul>
+</div>
+<div id="linear_tests" class="section level4">
+<h4><code>linear_tests</code></h4>
+<ul>
+<li><code>bootstrap_replications</code>: Number of bootstrap
+replications (default: 100)</li>
+<li><code>conf_level</code>: Confidence level for bootstrap
+intervals</li>
+</ul>
+</div>
+<div id="nonlinear_tests" class="section level4">
+<h4><code>nonlinear_tests</code></h4>
+<ul>
+<li><code>stem_representative_sample</code>: How to select
+representative observations (medians, first, all)</li>
+<li><code>selection_cutoffs</code>: Publication probability
+thresholds</li>
+<li><code>selection_symmetric</code>: Whether to impose symmetry in
+selection model</li>
+<li><code>selection_model</code>: Distribution assumption (normal,
+t)</li>
+<li><code>hierarchical_iterations</code>: Number of posterior draws</li>
+</ul>
+</div>
+<div id="exogeneity_tests" class="section level4">
+<h4><code>exogeneity_tests</code></h4>
+<ul>
+<li><code>iv_instrument</code>: Instrument selection (automatic or
+specific formula)</li>
+<li><code>puniform_alpha</code>: Significance level for p-uniform*</li>
+<li><code>puniform_method</code>: Estimation method (ML or P)</li>
+</ul>
+</div>
+<div id="bma-bayesian-model-averaging" class="section level4">
+<h4><code>bma</code> (Bayesian Model Averaging)</h4>
+<ul>
+<li><code>burn</code>: Burn-in iterations (default: 10000)</li>
+<li><code>iter</code>: MCMC iterations (default: 50000)</li>
+<li><code>g</code>: Prior specification (default: “UIP”)</li>
+<li><code>mprior</code>: Model prior (default: “uniform”)</li>
+<li><code>nmodel</code>: Number of top models to retain</li>
+<li><code>mcmc</code>: Sampler type (“bd” or “rev.jump”)</li>
+<li><code>use_vif_optimization</code>: Whether to use VIF
+optimization</li>
+<li><code>print_results</code>: Output level (none, fast, verbose, all,
+table)</li>
+<li><code>export_graphics</code>: Whether to export plots</li>
+<li><code>export_path</code>: Directory for exported graphics</li>
+</ul>
+</div>
+<div id="p_hacking_tests" class="section level4">
+<h4><code>p_hacking_tests</code></h4>
+<ul>
+<li><code>include_caliper</code>: Whether to include Caliper tests</li>
+<li><code>caliper_thresholds</code>: T-statistic thresholds to test</li>
+<li><code>caliper_widths</code>: Interval widths around thresholds</li>
+<li><code>include_elliott</code>: Whether to include Elliott et
+al. tests</li>
+<li><code>lcm_iterations</code>: Number of simulations for LCM test</li>
+</ul>
+</div>
+</div>
+<div id="output" class="section level3">
+<h3>5. <code>output</code></h3>
+<p>Controls output formatting:</p>
+<ul>
+<li><code>round_to</code>: Number of decimal places for numeric
+output</li>
+<li><code>format</code>: Output format options</li>
+</ul>
+</div>
+<div id="cli" class="section level3">
+<h3>6. <code>cli</code></h3>
+<p>Command-line interface settings:</p>
+<ul>
+<li><code>editor</code>: Preferred editor for opening options files</li>
+<li><code>save_preference</code>: Whether to save user preferences</li>
+</ul>
+</div>
+<div id="verbose" class="section level3">
+<h3>7. <code>verbose</code></h3>
+<p>Controls verbosity levels:</p>
+<ul>
+<li><code>level</code>: How much information to display (1-4)
+<ul>
+<li>1: Errors only</li>
+<li>2: Warnings + errors</li>
+<li>3: Info (default)</li>
+<li>4: Debug/trace</li>
+</ul></li>
+</ul>
+</div>
+<div id="cache" class="section level3">
+<h3>8. <code>cache</code></h3>
+<p>Caching behavior:</p>
+<ul>
+<li><code>use_cache</code>: Whether to use caching</li>
+<li><code>max_age</code>: Time-to-live for cached results</li>
+</ul>
+</div>
+<div id="temp" class="section level3">
+<h3>9. <code>temp</code></h3>
+<p>Temporary file settings (runtime only, not stored)</p>
+</div>
+</div>
+<div id="creating-options-files" class="section level2">
+<h2>Creating Options Files</h2>
+<div id="interactive-creation" class="section level3">
+<h3>Interactive Creation</h3>
+<p>The easiest way to create an options file is interactively. When you
+run an artma function without specifying an options file, you’ll be
+prompted to create one:</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a><span class="co"># This will prompt you to create an options file</span></span>
+<span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a>artma<span class="sc">::</span><span class="fu">artma</span>()</span></code></pre></div>
+<p>You can also create one explicitly:</p>
+<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a>artma<span class="sc">::</span><span class="fu">options.create</span>()</span></code></pre></div>
+<p>During creation, you’ll be guided through:</p>
+<ol style="list-style-type: decimal">
+<li><strong>Naming your file</strong>: Enter a descriptive name (e.g.,
+<code>my_analysis</code>, <code>meta_analysis_2025</code>). The
+<code>.yaml</code> extension is added automatically.</li>
+<li><strong>Setting required options</strong>: You’ll be prompted for
+essential settings like:
+<ul>
+<li>Data source path</li>
+<li>Column name mappings</li>
+<li>Missing value handling strategy</li>
+</ul></li>
+<li><strong>Optional settings</strong>: You can accept defaults or
+customize method parameters</li>
+</ol>
+</div>
+<div id="naming-your-options-file" class="section level3">
+<h3>Naming Your Options File</h3>
+<p>Choose descriptive names that help you identify the analysis:</p>
+<ul>
+<li><code>my_analysis.yaml</code> - Simple, generic</li>
+<li><code>meta_analysis_2025.yaml</code> - Includes date</li>
+<li><code>charity_effects.yaml</code> - Domain-specific</li>
+<li><code>project_config.yaml</code> - Descriptive</li>
+</ul>
+<p><strong>Note</strong>: The <code>.yaml</code> extension is
+automatically added, so you only need to provide the base name.</p>
+</div>
+<div id="programmatic-creation" class="section level3">
+<h3>Programmatic Creation</h3>
+<p>You can also create options files programmatically by providing
+values:</p>
+<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a>artma<span class="sc">::</span><span class="fu">options.create</span>(</span>
+<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a>  <span class="at">options_file_name =</span> <span class="st">&quot;my_analysis&quot;</span>,</span>
+<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a>  <span class="at">user_input =</span> <span class="fu">list</span>(</span>
+<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a>    <span class="st">&quot;data.source_path&quot;</span> <span class="ot">=</span> <span class="st">&quot;/path/to/data.csv&quot;</span>,</span>
+<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a>    <span class="st">&quot;data.colnames.effect&quot;</span> <span class="ot">=</span> <span class="st">&quot;effect_size&quot;</span>,</span>
+<span id="cb4-6"><a href="#cb4-6" tabindex="-1"></a>    <span class="st">&quot;data.colnames.se&quot;</span> <span class="ot">=</span> <span class="st">&quot;standard_error&quot;</span>,</span>
+<span id="cb4-7"><a href="#cb4-7" tabindex="-1"></a>    <span class="st">&quot;data.colnames.study&quot;</span> <span class="ot">=</span> <span class="st">&quot;study_name&quot;</span>,</span>
+<span id="cb4-8"><a href="#cb4-8" tabindex="-1"></a>    <span class="st">&quot;methods.effect_summary_stats.conf_level&quot;</span> <span class="ot">=</span> <span class="fl">0.99</span></span>
+<span id="cb4-9"><a href="#cb4-9" tabindex="-1"></a>  )</span>
+<span id="cb4-10"><a href="#cb4-10" tabindex="-1"></a>)</span></code></pre></div>
+</div>
+</div>
+<div id="loading-and-using-options-files" class="section level2">
+<h2>Loading and Using Options Files</h2>
+<div id="loading-options" class="section level3">
+<h3>Loading Options</h3>
+<p>Options files are loaded automatically when you call artma
+functions:</p>
+<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a>artma<span class="sc">::</span><span class="fu">artma</span>(</span>
+<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a>  <span class="at">options =</span> <span class="st">&quot;my_analysis.yaml&quot;</span>,</span>
+<span id="cb5-3"><a href="#cb5-3" tabindex="-1"></a>  <span class="at">options_dir =</span> <span class="cn">NULL</span>  <span class="co"># Uses default directory if NULL</span></span>
+<span id="cb5-4"><a href="#cb5-4" tabindex="-1"></a>)</span></code></pre></div>
+</div>
+<div id="how-options-are-accessed" class="section level3">
+<h3>How Options Are Accessed</h3>
+<p>When an options file is loaded, its values are temporarily stored in
+R’s <code>options()</code> namespace with the <code>artma.</code>
+prefix:</p>
+<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a><span class="co"># Within a function that has loaded an options file</span></span>
+<span id="cb6-2"><a href="#cb6-2" tabindex="-1"></a>conf_level <span class="ot">&lt;-</span> <span class="fu">getOption</span>(<span class="st">&quot;artma.methods.effect_summary_stats.conf_level&quot;</span>)</span>
+<span id="cb6-3"><a href="#cb6-3" tabindex="-1"></a><span class="co"># Returns: 0.95 (or whatever was set in the options file)</span></span></code></pre></div>
+<p>You can also use the helper function to get option groups:</p>
+<div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a>box<span class="sc">::</span><span class="fu">use</span>(artma <span class="sc">/</span> options <span class="sc">/</span> utils[get_option_group])</span>
+<span id="cb7-2"><a href="#cb7-2" tabindex="-1"></a></span>
+<span id="cb7-3"><a href="#cb7-3" tabindex="-1"></a>effect_stats_opts <span class="ot">&lt;-</span> <span class="fu">get_option_group</span>(<span class="st">&quot;artma.methods.effect_summary_stats&quot;</span>)</span>
+<span id="cb7-4"><a href="#cb7-4" tabindex="-1"></a><span class="co"># Returns a list with conf_level, formal_output, etc.</span></span></code></pre></div>
+</div>
+<div id="important-temporary-loading" class="section level3">
+<h3>Important: Temporary Loading</h3>
+<p><strong>Options are loaded only for the duration of the function
+call</strong>. This prevents different analyses from interfering with
+each other. Each time you call <code>artma::artma()</code>, the options
+file is freshly loaded.</p>
+</div>
+</div>
+<div id="best-practices" class="section level2">
+<h2>Best Practices</h2>
+<div id="one-dataset-per-options-file" class="section level3">
+<h3>One Dataset Per Options File</h3>
+<p>By default, you should have <strong>one dataset per options
+file</strong>. This keeps configurations clear and prevents confusion.
+If you need to run the same analysis with different parameters, create
+separate options files:</p>
+<ul>
+<li><code>analysis_default.yaml</code> - Default parameters</li>
+<li><code>analysis_sensitivity.yaml</code> - Sensitivity analysis
+parameters</li>
+<li><code>analysis_robustness.yaml</code> - Robustness check
+parameters</li>
+</ul>
+</div>
+<div id="organizing-multiple-options-files" class="section level3">
+<h3>Organizing Multiple Options Files</h3>
+<p>Store related options files together. The default location is a
+temporary directory, but you can specify a custom directory:</p>
+<div class="sourceCode" id="cb8"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" tabindex="-1"></a>artma<span class="sc">::</span><span class="fu">artma</span>(</span>
+<span id="cb8-2"><a href="#cb8-2" tabindex="-1"></a>  <span class="at">options =</span> <span class="st">&quot;my_analysis.yaml&quot;</span>,</span>
+<span id="cb8-3"><a href="#cb8-3" tabindex="-1"></a>  <span class="at">options_dir =</span> <span class="st">&quot;~/my_meta_analyses/configs&quot;</span></span>
+<span id="cb8-4"><a href="#cb8-4" tabindex="-1"></a>)</span></code></pre></div>
+</div>
+<div id="version-control" class="section level3">
+<h3>Version Control</h3>
+<p>Options files are text files (YAML), making them perfect for version
+control. Consider:</p>
+<ul>
+<li>Tracking options files in Git for reproducibility</li>
+<li>Including options files in research project repositories</li>
+<li>Documenting changes in commit messages</li>
+</ul>
+</div>
+<div id="validation" class="section level3">
+<h3>Validation</h3>
+<p>Always validate your options files before using them:</p>
+<div class="sourceCode" id="cb9"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb9-1"><a href="#cb9-1" tabindex="-1"></a>artma<span class="sc">::</span><span class="fu">options.validate</span>(<span class="st">&quot;my_analysis.yaml&quot;</span>)</span></code></pre></div>
+<p>This checks that:</p>
+<ul>
+<li>All required options are present</li>
+<li>Option values match expected types</li>
+<li>The file structure matches the template</li>
+</ul>
+</div>
+</div>
+<div id="examples" class="section level2">
+<h2>Examples</h2>
+<div id="minimal-options-file" class="section level3">
+<h3>Minimal Options File</h3>
+<p>A minimal options file for a basic analysis:</p>
+<div class="sourceCode" id="cb10"><pre class="sourceCode yaml"><code class="sourceCode yaml"><span id="cb10-1"><a href="#cb10-1" tabindex="-1"></a><span class="fu">general</span><span class="kw">:</span></span>
+<span id="cb10-2"><a href="#cb10-2" tabindex="-1"></a><span class="at">  </span><span class="fu">artma_version</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;0.3.2&quot;</span></span>
+<span id="cb10-3"><a href="#cb10-3" tabindex="-1"></a></span>
+<span id="cb10-4"><a href="#cb10-4" tabindex="-1"></a><span class="fu">data</span><span class="kw">:</span></span>
+<span id="cb10-5"><a href="#cb10-5" tabindex="-1"></a><span class="at">  </span><span class="fu">source_path</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;/data/my_meta_analysis.csv&quot;</span></span>
+<span id="cb10-6"><a href="#cb10-6" tabindex="-1"></a><span class="at">  </span><span class="fu">colnames</span><span class="kw">:</span></span>
+<span id="cb10-7"><a href="#cb10-7" tabindex="-1"></a><span class="at">    </span><span class="fu">effect</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;effect_size&quot;</span></span>
+<span id="cb10-8"><a href="#cb10-8" tabindex="-1"></a><span class="at">    </span><span class="fu">se</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;standard_error&quot;</span></span>
+<span id="cb10-9"><a href="#cb10-9" tabindex="-1"></a><span class="at">    </span><span class="fu">study</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;study_name&quot;</span></span>
+<span id="cb10-10"><a href="#cb10-10" tabindex="-1"></a><span class="at">    </span><span class="fu">n_obs</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;sample_size&quot;</span></span>
+<span id="cb10-11"><a href="#cb10-11" tabindex="-1"></a><span class="at">  </span><span class="fu">na_handling</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;stop&quot;</span></span>
+<span id="cb10-12"><a href="#cb10-12" tabindex="-1"></a><span class="at">  </span><span class="fu">config_setup</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;auto&quot;</span></span>
+<span id="cb10-13"><a href="#cb10-13" tabindex="-1"></a></span>
+<span id="cb10-14"><a href="#cb10-14" tabindex="-1"></a><span class="fu">methods</span><span class="kw">:</span></span>
+<span id="cb10-15"><a href="#cb10-15" tabindex="-1"></a><span class="at">  </span><span class="fu">effect_summary_stats</span><span class="kw">:</span></span>
+<span id="cb10-16"><a href="#cb10-16" tabindex="-1"></a><span class="at">    </span><span class="fu">conf_level</span><span class="kw">:</span><span class="at"> </span><span class="fl">0.95</span></span></code></pre></div>
+</div>
+<div id="advanced-options-file" class="section level3">
+<h3>Advanced Options File</h3>
+<p>An options file with custom method parameters:</p>
+<div class="sourceCode" id="cb11"><pre class="sourceCode yaml"><code class="sourceCode yaml"><span id="cb11-1"><a href="#cb11-1" tabindex="-1"></a><span class="fu">general</span><span class="kw">:</span></span>
+<span id="cb11-2"><a href="#cb11-2" tabindex="-1"></a><span class="at">  </span><span class="fu">artma_version</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;0.3.2&quot;</span></span>
+<span id="cb11-3"><a href="#cb11-3" tabindex="-1"></a></span>
+<span id="cb11-4"><a href="#cb11-4" tabindex="-1"></a><span class="fu">data</span><span class="kw">:</span></span>
+<span id="cb11-5"><a href="#cb11-5" tabindex="-1"></a><span class="at">  </span><span class="fu">source_path</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;/data/complex_analysis.csv&quot;</span></span>
+<span id="cb11-6"><a href="#cb11-6" tabindex="-1"></a><span class="at">  </span><span class="fu">colnames</span><span class="kw">:</span></span>
+<span id="cb11-7"><a href="#cb11-7" tabindex="-1"></a><span class="at">    </span><span class="fu">effect</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;beta&quot;</span></span>
+<span id="cb11-8"><a href="#cb11-8" tabindex="-1"></a><span class="at">    </span><span class="fu">se</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;se_beta&quot;</span></span>
+<span id="cb11-9"><a href="#cb11-9" tabindex="-1"></a><span class="at">    </span><span class="fu">study</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;paper_id&quot;</span></span>
+<span id="cb11-10"><a href="#cb11-10" tabindex="-1"></a><span class="at">    </span><span class="fu">n_obs</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;n&quot;</span></span>
+<span id="cb11-11"><a href="#cb11-11" tabindex="-1"></a><span class="at">    </span><span class="fu">study_id</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;study_id&quot;</span></span>
+<span id="cb11-12"><a href="#cb11-12" tabindex="-1"></a><span class="at">  </span><span class="fu">na_handling</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;median&quot;</span></span>
+<span id="cb11-13"><a href="#cb11-13" tabindex="-1"></a><span class="at">  </span><span class="fu">winsorization_level</span><span class="kw">:</span><span class="at"> </span><span class="fl">0.05</span></span>
+<span id="cb11-14"><a href="#cb11-14" tabindex="-1"></a><span class="at">  </span><span class="fu">config_setup</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;manual&quot;</span></span>
+<span id="cb11-15"><a href="#cb11-15" tabindex="-1"></a></span>
+<span id="cb11-16"><a href="#cb11-16" tabindex="-1"></a><span class="fu">calc</span><span class="kw">:</span></span>
+<span id="cb11-17"><a href="#cb11-17" tabindex="-1"></a><span class="at">  </span><span class="fu">precision_type</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;1/SE&quot;</span></span>
+<span id="cb11-18"><a href="#cb11-18" tabindex="-1"></a><span class="at">  </span><span class="fu">se_zero_handling</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;warn&quot;</span></span>
+<span id="cb11-19"><a href="#cb11-19" tabindex="-1"></a></span>
+<span id="cb11-20"><a href="#cb11-20" tabindex="-1"></a><span class="fu">methods</span><span class="kw">:</span></span>
+<span id="cb11-21"><a href="#cb11-21" tabindex="-1"></a><span class="at">  </span><span class="fu">effect_summary_stats</span><span class="kw">:</span></span>
+<span id="cb11-22"><a href="#cb11-22" tabindex="-1"></a><span class="at">    </span><span class="fu">conf_level</span><span class="kw">:</span><span class="at"> </span><span class="fl">0.99</span></span>
+<span id="cb11-23"><a href="#cb11-23" tabindex="-1"></a><span class="at">    </span><span class="fu">formal_output</span><span class="kw">:</span><span class="at"> </span><span class="ch">true</span></span>
+<span id="cb11-24"><a href="#cb11-24" tabindex="-1"></a><span class="at">  </span></span>
+<span id="cb11-25"><a href="#cb11-25" tabindex="-1"></a><span class="at">  </span><span class="fu">bma</span><span class="kw">:</span></span>
+<span id="cb11-26"><a href="#cb11-26" tabindex="-1"></a><span class="at">    </span><span class="fu">burn</span><span class="kw">:</span><span class="at"> </span><span class="dv">20000</span></span>
+<span id="cb11-27"><a href="#cb11-27" tabindex="-1"></a><span class="at">    </span><span class="fu">iter</span><span class="kw">:</span><span class="at"> </span><span class="dv">100000</span></span>
+<span id="cb11-28"><a href="#cb11-28" tabindex="-1"></a><span class="at">    </span><span class="fu">g</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;UIP&quot;</span></span>
+<span id="cb11-29"><a href="#cb11-29" tabindex="-1"></a><span class="at">    </span><span class="fu">mprior</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;uniform&quot;</span></span>
+<span id="cb11-30"><a href="#cb11-30" tabindex="-1"></a><span class="at">    </span><span class="fu">nmodel</span><span class="kw">:</span><span class="at"> </span><span class="dv">2000</span></span>
+<span id="cb11-31"><a href="#cb11-31" tabindex="-1"></a><span class="at">    </span><span class="fu">use_vif_optimization</span><span class="kw">:</span><span class="at"> </span><span class="ch">true</span></span>
+<span id="cb11-32"><a href="#cb11-32" tabindex="-1"></a><span class="at">    </span><span class="fu">print_results</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;verbose&quot;</span></span>
+<span id="cb11-33"><a href="#cb11-33" tabindex="-1"></a><span class="at">  </span></span>
+<span id="cb11-34"><a href="#cb11-34" tabindex="-1"></a><span class="at">  </span><span class="fu">linear_tests</span><span class="kw">:</span></span>
+<span id="cb11-35"><a href="#cb11-35" tabindex="-1"></a><span class="at">    </span><span class="fu">bootstrap_replications</span><span class="kw">:</span><span class="at"> </span><span class="dv">500</span></span>
+<span id="cb11-36"><a href="#cb11-36" tabindex="-1"></a><span class="at">    </span><span class="fu">conf_level</span><span class="kw">:</span><span class="at"> </span><span class="fl">0.95</span></span>
+<span id="cb11-37"><a href="#cb11-37" tabindex="-1"></a><span class="at">  </span></span>
+<span id="cb11-38"><a href="#cb11-38" tabindex="-1"></a><span class="at">  </span><span class="fu">p_hacking_tests</span><span class="kw">:</span></span>
+<span id="cb11-39"><a href="#cb11-39" tabindex="-1"></a><span class="at">    </span><span class="fu">include_caliper</span><span class="kw">:</span><span class="at"> </span><span class="ch">true</span></span>
+<span id="cb11-40"><a href="#cb11-40" tabindex="-1"></a><span class="at">    </span><span class="fu">caliper_thresholds</span><span class="kw">:</span><span class="at"> </span><span class="kw">[</span><span class="fl">1.645</span><span class="kw">,</span><span class="at"> </span><span class="fl">1.96</span><span class="kw">,</span><span class="at"> </span><span class="fl">2.58</span><span class="kw">]</span></span>
+<span id="cb11-41"><a href="#cb11-41" tabindex="-1"></a><span class="at">    </span><span class="fu">include_elliott</span><span class="kw">:</span><span class="at"> </span><span class="ch">true</span></span>
+<span id="cb11-42"><a href="#cb11-42" tabindex="-1"></a></span>
+<span id="cb11-43"><a href="#cb11-43" tabindex="-1"></a><span class="fu">verbose</span><span class="kw">:</span></span>
+<span id="cb11-44"><a href="#cb11-44" tabindex="-1"></a><span class="at">  </span><span class="fu">level</span><span class="kw">:</span><span class="at"> </span><span class="dv">3</span></span>
+<span id="cb11-45"><a href="#cb11-45" tabindex="-1"></a></span>
+<span id="cb11-46"><a href="#cb11-46" tabindex="-1"></a><span class="fu">cache</span><span class="kw">:</span></span>
+<span id="cb11-47"><a href="#cb11-47" tabindex="-1"></a><span class="at">  </span><span class="fu">use_cache</span><span class="kw">:</span><span class="at"> </span><span class="ch">true</span></span>
+<span id="cb11-48"><a href="#cb11-48" tabindex="-1"></a><span class="at">  </span><span class="fu">max_age</span><span class="kw">:</span><span class="at"> </span><span class="dv">86400</span></span></code></pre></div>
+</div>
+</div>
+<div id="managing-options-files" class="section level2">
+<h2>Managing Options Files</h2>
+<div id="listing-options-files" class="section level3">
+<h3>Listing Options Files</h3>
+<p>See all available options files:</p>
+<div class="sourceCode" id="cb12"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb12-1"><a href="#cb12-1" tabindex="-1"></a>artma<span class="sc">::</span><span class="fu">options.list</span>()</span></code></pre></div>
+</div>
+<div id="copying-options-files" class="section level3">
+<h3>Copying Options Files</h3>
+<p>Create a new options file based on an existing one:</p>
+<div class="sourceCode" id="cb13"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb13-1"><a href="#cb13-1" tabindex="-1"></a>artma<span class="sc">::</span><span class="fu">options.copy</span>(</span>
+<span id="cb13-2"><a href="#cb13-2" tabindex="-1"></a>  <span class="at">options_file_name_from =</span> <span class="st">&quot;baseline.yaml&quot;</span>,</span>
+<span id="cb13-3"><a href="#cb13-3" tabindex="-1"></a>  <span class="at">options_file_name_to =</span> <span class="st">&quot;sensitivity.yaml&quot;</span></span>
+<span id="cb13-4"><a href="#cb13-4" tabindex="-1"></a>)</span></code></pre></div>
+</div>
+<div id="modifying-options-files" class="section level3">
+<h3>Modifying Options Files</h3>
+<p>Update an existing options file:</p>
+<div class="sourceCode" id="cb14"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb14-1"><a href="#cb14-1" tabindex="-1"></a>artma<span class="sc">::</span><span class="fu">options.modify</span>(</span>
+<span id="cb14-2"><a href="#cb14-2" tabindex="-1"></a>  <span class="at">options_file_name =</span> <span class="st">&quot;my_analysis.yaml&quot;</span>,</span>
+<span id="cb14-3"><a href="#cb14-3" tabindex="-1"></a>  <span class="at">options_to_modify =</span> <span class="fu">list</span>(</span>
+<span id="cb14-4"><a href="#cb14-4" tabindex="-1"></a>    <span class="st">&quot;methods.effect_summary_stats.conf_level&quot;</span> <span class="ot">=</span> <span class="fl">0.99</span>,</span>
+<span id="cb14-5"><a href="#cb14-5" tabindex="-1"></a>    <span class="st">&quot;methods.bma.iter&quot;</span> <span class="ot">=</span> <span class="dv">100000</span></span>
+<span id="cb14-6"><a href="#cb14-6" tabindex="-1"></a>  )</span>
+<span id="cb14-7"><a href="#cb14-7" tabindex="-1"></a>)</span></code></pre></div>
+</div>
+<div id="opening-options-files" class="section level3">
+<h3>Opening Options Files</h3>
+<p>Open an options file in your preferred editor:</p>
+<div class="sourceCode" id="cb15"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb15-1"><a href="#cb15-1" tabindex="-1"></a>artma<span class="sc">::</span><span class="fu">options.open</span>(<span class="st">&quot;my_analysis.yaml&quot;</span>)</span></code></pre></div>
+</div>
+<div id="fixing-options-files" class="section level3">
+<h3>Fixing Options Files</h3>
+<p>If an options file has errors, fix it automatically:</p>
+<div class="sourceCode" id="cb16"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb16-1"><a href="#cb16-1" tabindex="-1"></a>artma<span class="sc">::</span><span class="fu">options.fix</span>(<span class="st">&quot;my_analysis.yaml&quot;</span>)</span></code></pre></div>
+<p>This will:</p>
+<ul>
+<li>Add missing required options with defaults</li>
+<li>Fix type mismatches</li>
+<li>Validate the corrected file</li>
+</ul>
+</div>
+</div>
+<div id="troubleshooting" class="section level2">
+<h2>Troubleshooting</h2>
+<div id="common-issues" class="section level3">
+<h3>Common Issues</h3>
+<ol style="list-style-type: decimal">
+<li><strong>“Options file not found”</strong>
+<ul>
+<li>Check the file name and directory path</li>
+<li>Ensure the <code>.yaml</code> extension is correct</li>
+<li>Verify the file exists in the specified directory</li>
+</ul></li>
+<li><strong>“Invalid option value”</strong>
+<ul>
+<li>Check that option values match expected types (character, numeric,
+logical)</li>
+<li>For enum options, ensure the value is one of the allowed
+choices</li>
+<li>Validate the file:
+<code>artma::options.validate(&quot;file.yaml&quot;)</code></li>
+</ul></li>
+<li><strong>“Missing required option”</strong>
+<ul>
+<li>Use <code>artma::options.fix()</code> to add missing options with
+defaults</li>
+<li>Or manually add the missing option to the YAML file</li>
+</ul></li>
+<li><strong>“Column not found in data”</strong>
+<ul>
+<li>Verify column name mappings in <code>data.colnames</code></li>
+<li>Check that your dataset contains the specified columns</li>
+<li>Use standardized column names if available</li>
+</ul></li>
+</ol>
+</div>
+</div>
+<div id="summary" class="section level2">
+<h2>Summary</h2>
+<p>Options files are the foundation of reproducible meta-analysis in
+artma. They:</p>
+<ul>
+<li>Store all analysis configuration in one place</li>
+<li>Enable easy reproduction of analyses</li>
+<li>Support version control and collaboration</li>
+<li>Validate settings automatically</li>
+<li>Work seamlessly with all artma functions</li>
+</ul>
+<p>Remember:</p>
+<ul>
+<li>Create descriptive file names</li>
+<li>One dataset per options file (typically)</li>
+<li>Validate files before use</li>
+<li>Keep options files in version control for reproducibility</li>
+</ul>
+<p>For more information on specific options, see the help documentation
+for individual functions or explore the options template using
+<code>artma::options.help()</code>.</p>
+</div>
+
+
+
+<!-- code folding -->
+
+
+<!-- dynamically load mathjax for compatibility with self-contained -->
+<script>
+  (function () {
+    var script = document.createElement("script");
+    script.type = "text/javascript";
+    script.src  = "https://mathjax.rstudio.com/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML";
+    document.getElementsByTagName("head")[0].appendChild(script);
+  })();
+</script>
+
+</body>
+</html>

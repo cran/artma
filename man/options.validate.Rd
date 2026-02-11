@@ -9,8 +9,7 @@ options.validate(
   options_dir = NULL,
   should_flag_redundant = FALSE,
   template_path = NULL,
-  failure_action = "abort_verbose",
-  verbose = TRUE
+  failure_action = "abort_verbose"
 )
 }
 \arguments{
@@ -22,9 +21,7 @@ options.validate(
 
 \item{template_path}{\emph{[character, optional]} Full path to the options template file. Defaults to \code{NULL}.}
 
-\item{failure_action}{\emph{[character]} Action to take if validation fails. Can be one of: 'abort_verbose', 'abort_quiet', 'return_errors_verbose', 'return_errors_quiet'. Defaults to 'abort_verbose'.}
-
-\item{verbose}{\emph{[logical, optional]} If TRUE, print additional information about the validation process. Defaults to TRUE.
+\item{failure_action}{\emph{[character]} Action to take if validation fails. Can be one of: 'abort_verbose', 'abort_quiet', 'return_errors_verbose', 'return_errors_quiet'. Defaults to 'abort_verbose'.
 \code{list} Invisibly returns a list of error messages (empty if no errors).}
 }
 \value{

@@ -9,7 +9,10 @@
 #' @return *\[data.frame\]* The modified data frame with updated degrees of freedom.
 #' @export
 fill_dof_using_pcc <- function(df, replace_existing = NULL, drop_missing = NULL, drop_negative = NULL, drop_zero = NULL) {
-  box::use(dof_calc = artma / calc / dof)
+  box::use(
+    artma / libs / core / utils[get_verbosity],
+    dof_calc = artma / calc / dof
+  )
 
   pcc <- df$effect
   t_values <- df$t_value
@@ -28,16 +31,21 @@ fill_dof_using_pcc <- function(df, replace_existing = NULL, drop_missing = NULL,
     t_value = t_values[fillable_rows],
     pcc = pcc[fillable_rows]
   )
-  cli::cli_inform("Filled {sum(fillable_rows)} missing degrees of freedom.")
+
+  if (get_verbosity() >= 3) {
+    cli::cli_inform("Filled {sum(fillable_rows)} missing degrees of freedom.")
+  }
 
   #' A helper function to drop rows based on a condition
   drop_rows <- function(condition, msg) {
     n_rows_to_drop <- sum(condition)
     if (n_rows_to_drop > 0) {
-      cli::cli_inform("Dropping {n_rows_to_drop} {msg}")
+      if (get_verbosity() >= 3) {
+        cli::cli_inform("Dropping {n_rows_to_drop} {msg}")
+      }
       return(df[!condition, ])
     }
-    return(df)
+    df
   }
 
   if (drop_missing) {
@@ -52,5 +60,5 @@ fill_dof_using_pcc <- function(df, replace_existing = NULL, drop_missing = NULL,
     df <- drop_rows(df$dof == 0, "rows with zero degrees of freedom.")
   }
 
-  return(df)
+  df
 }

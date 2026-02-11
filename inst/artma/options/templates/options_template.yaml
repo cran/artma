@@ -1,26 +1,61 @@
 general:
   artma_version:
     type: "character"
-    default: "0.2.1"
+    default: "0.3.3"
     fixed: true
     help: "Version of the artma package under which these options were generated"
+
+autonomy:
+  level:
+    type: "integer"
+    default: 4
+    confirm_default: true
+    prompt: "function"
+    prompt_function: "prompt_autonomy_level"
+    suppress_help_in_prompt: true
+    help: |
+      The autonomy level controls how much user interaction is required during analysis.
+      Higher levels mean less user interaction and more automatic decision-making.
+
+      Autonomy levels:
+        {cli::symbol$bullet} {.strong 1 - Minimal}: Maximum user control - prompt for all optional decisions
+        {cli::symbol$bullet} {.strong 2 - Low}: Frequent prompts - ask for most non-critical decisions
+        {cli::symbol$bullet} {.strong 3 - Medium}: Balanced - prompt for important decisions only
+        {cli::symbol$bullet} {.strong 4 - High}: Mostly autonomous - minimal prompts for critical decisions only (default for interactive mode)
+        {cli::symbol$bullet} {.strong 5 - Full}: Fully autonomous - no prompts, use all defaults and auto-detection (default for non-interactive mode)
+
+      In non-interactive mode (e.g., R scripts, batch jobs), level 5 is always used regardless of this setting,
+      as user prompts are not possible in such environments.
 
 data:
   source_path:
     type: "character"
     prompt: "file"
+    prompt_hint: "or type {.emph {'mock'}} to generate mock data"
     help: "Full path to your dataset source"
 
   na_handling:
-    type: "enum: stop|median|mean"
-    default: "stop"
-    confirm_default: true
-    prompt: "readline"
+    type: "enum: stop|remove|median|mean|interpolate|mice"
+    default: .na
+    allow_na: true
+    prompt: "function"
+    prompt_function: "prompt_na_handling"
+    suppress_help_in_prompt: true
     help: |
       How to handle missing values:
-        {cli::symbol$bullet} {.strong stop}: Abort if any missing values are found
-        {cli::symbol$bullet} {.strong median}: Replace missing values with the variable's median
-        {cli::symbol$bullet} {.strong mean}: Replace missing values with the variable's mean
+        {cli::symbol$bullet} {.strong stop}: Abort if any missing values are found (safest, default)
+        {cli::symbol$bullet} {.strong remove}: Remove entire rows with any missing values (listwise deletion)
+        {cli::symbol$bullet} {.strong median}: Replace missing values with the variable's median (robust to outliers)
+        {cli::symbol$bullet} {.strong mean}: Replace missing values with the variable's mean (assumes normality)
+        {cli::symbol$bullet} {.strong interpolate}: Use linear interpolation based on neighboring values (best for sequential data)
+        {cli::symbol$bullet} {.strong mice}: Multiple Imputation by Chained Equations (advanced, requires mice package)
+
+      Imputation strategies (median, mean, interpolate, mice) can be applied to numeric required columns
+      (effect, se, n_obs) as well as optional columns. Non-numeric required columns (study) must always be
+      complete and cannot be imputed. The "remove" strategy will remove rows with any missing values,
+      including in required columns.
+
+      If this option is not set (NA), you will be prompted interactively when missing values are detected.
 
   colnames:
     obs_id:
@@ -30,17 +65,10 @@ data:
       standardize: true
       help: "Column containing observation IDs"
 
-    study:
-      type: "character"
-      standardize: true
-      help: "Column containing study names"
-
     study_id:
       type: "character"
-      allow_na: true
-      default: .na
       standardize: true
-      help: "Column containing study IDs"
+      help: "Column containing study identifiers (names or IDs)"
 
     effect:
       type: "character"
@@ -88,12 +116,12 @@ data:
   config_setup:
     type: "enum: auto|manual"
     default: "auto"
-    confirm_default: true
+    confirm_default: false # Changed from true as the manual setup is just less flexible overall
     prompt: "readline"
     help: |
-      How to configure the data:
-        {cli::symbol$bullet} {.strong auto}: Automatically generate and validate the data configuration
-        {cli::symbol$bullet} {.strong manual}: Manually configure and validate the data configuration
+      How should the system identify which columns in your data file contain which variables?
+        {cli::symbol$bullet} {.strong auto}: Automatically detect column names (e.g., recognizes "effect", "se", "study_name") and ask you to confirm the mapping
+        {cli::symbol$bullet} {.strong manual}: Skip automatic detection and manually specify which columns map to which variables (interactive mode only)
 
   config:
     type: "list"
@@ -105,6 +133,23 @@ data:
       A list of configuration options for the data.
       Each variable in the dataset requires a list of configuration options.
       For more details, read the 'data_config' vignette.
+
+  winsorization_level:
+    type: "numeric"
+    default: 0.01
+    confirm_default: true
+    prompt: "function"
+    prompt_function: "prompt_winsorization_level"
+    suppress_help_in_prompt: true
+    help: |
+      Winsorization level for effect and standard error variables.
+      Values will be capped at the specified quantile from both tails.
+      Options:
+        {cli::symbol$bullet} {.strong 0}: No winsorization (keep all original values)
+        {cli::symbol$bullet} {.strong 0.01}: Winsorize at 1% level (default)
+        {cli::symbol$bullet} {.strong 0.05}: Winsorize at 5% level
+        {cli::symbol$bullet} {.strong 0.10}: Winsorize at 10% level
+      Higher values provide stronger outlier protection but may distort the data more.
 
 calc:
   precision_type:
@@ -126,6 +171,662 @@ calc:
         {cli::symbol$bullet} {.strong stop}: Abort if any zero standard errors are found
         {cli::symbol$bullet} {.strong warn}: Warn if any zero standard errors are found
         {cli::symbol$bullet} {.strong ignore}: Ignore zero standard errors
+
+visualization:
+  theme:
+    type: "enum: blue|yellow|green|red|purple"
+    default: "blue"
+    help: |
+      Color theme for all visualizations:
+        {cli::symbol$bullet} {.strong blue}: Default blue theme
+        {cli::symbol$bullet} {.strong yellow}: Yellow/gold theme
+        {cli::symbol$bullet} {.strong green}: Green theme
+        {cli::symbol$bullet} {.strong red}: Red theme
+        {cli::symbol$bullet} {.strong purple}: Purple theme
+
+  export_graphics:
+    type: "logical"
+    default: true
+    help: |
+      If `TRUE`, export all generated plots to PNG files in the output directory.
+
+  export_path:
+    type: "character"
+    default: "graphics"
+    help: |
+      Subdirectory (relative to output.dir) for exporting graphics.
+      Only used if export_graphics is `TRUE`.
+
+  graph_scale:
+    type: "numeric"
+    default: 2
+    help: |
+      Scaling factor for exported graphics.
+      Values > 1 increase resolution; values < 1 decrease it.
+
+methods:
+  add_significance_marks:
+    type: "logical"
+    default: true
+    help: |
+      If `TRUE`, append significance asterisks to coefficient estimates across all
+      model diagnostics.
+
+  variable_summary_stats:
+    use_verbose_names:
+      type: "logical"
+      default: true
+      help: |
+        If `TRUE`, print out the descriptive variable names. If `FALSE`,
+        print out the data frame column names. Defaults to `TRUE`.
+
+  effect_summary_stats:
+    conf_level:
+      type: "numeric"
+      default: 0.95
+      help: |
+        The confidence level for the confidence intervals. Defaults to 0.95 (95%).
+
+    formal_output:
+      type: "logical"
+      default: false
+      help: |
+        If `TRUE`, return the table in a form that can be used in LaTeX. Defaults to `FALSE`.
+
+  linear_tests:
+    bootstrap_replications:
+      type: "integer"
+      default: 100
+      help: |
+        Number of bootstrap replications to use when computing cluster-robust
+        confidence intervals. Set to `0` to disable bootstrapping.
+
+    conf_level:
+      type: "numeric"
+      default: 0.95
+      help: |
+        Confidence level used for bootstrap intervals. Must lie between 0 and 1.
+
+  nonlinear_tests:
+    round_to:
+      type: "integer"
+      allow_na: true
+      default: .na
+      help: |
+        Override the default number of decimals shown in the non-linear summary.
+        Leave unset to use the global output option.
+
+    stem_representative_sample:
+      type: "enum: medians|first|all"
+      default: "medians"
+      help: |
+        Choose the representative observation per study when running the STEM
+        estimator. Use {.strong medians} to rely on study medians, {.strong first}
+        to pick the first observation, or {.strong all} to use every estimate.
+
+    selection_cutoffs:
+      type: "numeric"
+      default: [1.96]
+      help: |
+        Cut-off values supplied to the selection model. Provide one or more
+        positive values corresponding to the publication probability thresholds.
+
+    selection_symmetric:
+      type: "logical"
+      default: false
+      help: |
+        If `TRUE`, impose symmetry when estimating the selection model.
+
+    selection_model:
+      type: "enum: normal|t"
+      default: "normal"
+      help: |
+        Distributional assumption used by the selection model.
+
+    hierarchical_iterations:
+      type: "integer"
+      default: 6000
+      help: |
+        Number of posterior draws to request from the hierarchical model.
+
+  exogeneity_tests:
+    iv_instrument:
+      type: "enum: automatic|1/sqrt(n_obs)|1/n_obs|1/n_obs^2|log(n_obs)"
+      default: "automatic"
+      help: |
+        Instrument to use for the instrumental variable (IV) regression.
+        Use {.strong automatic} to automatically select the best instrument
+        based on diagnostics (R-squared, weak instruments, Wu-Hausman, Sargan).
+        Alternatively, specify a specific instrument formula involving n_obs.
+
+    puniform_alpha:
+      type: "numeric"
+      default: 0.05
+      help: |
+        Significance level for the p-uniform* selection model.
+        Defaults to 0.05 (5%).
+
+    puniform_method:
+      type: "enum: ML|P"
+      default: "ML"
+      help: |
+        Estimation method for p-uniform*.
+        Use {.strong ML} for maximum likelihood or {.strong P} for method of moments.
+
+  box_plot:
+    factor_by:
+      type: "character"
+      allow_na: true
+      default: .na
+      help: |
+        Column name to group the box plots by.
+        If not specified, the system will auto-detect suitable categorical variables
+        or prompt for selection in interactive mode.
+
+    max_boxes:
+      type: "integer"
+      default: 60
+      help: |
+        Maximum number of boxes to display in a single plot.
+        When the number of unique factor values exceeds this threshold,
+        the data will be split across multiple plots.
+
+    show_mean_line:
+      type: "logical"
+      default: true
+      help: |
+        If `TRUE`, display a horizontal line at the overall mean effect value.
+
+    effect_label:
+      type: "character"
+      default: "effect"
+      help: |
+        Verbose label for the effect axis (e.g., "Effect of Price Elasticity").
+
+  funnel_plot:
+    effect_proximity:
+      type: "numeric"
+      default: 0.2
+      help: |
+        Outlier filtering threshold for effect values.
+        Values outside (mean +/- max_effect * effect_proximity) combined with
+        high precision are considered outliers. Range: 0 to 1.
+        Set to 1 to disable effect-based outlier filtering.
+
+    maximum_precision:
+      type: "numeric"
+      default: 0.2
+      help: |
+        Outlier filtering threshold for precision.
+        Only observations with precision >= (max_precision * maximum_precision)
+        are candidates for outlier removal. Range: 0 to 1.
+        Set to 1 to disable precision-based outlier filtering.
+
+    precision_to_log:
+      type: "logical"
+      default: false
+      help: |
+        If `TRUE`, apply log transformation to precision values on the y-axis.
+        Useful when precision values span several orders of magnitude.
+
+    use_study_medians:
+      type: "logical"
+      default: false
+      help: |
+        If `TRUE`, plot the median effect per study instead of all observations.
+        Reduces visual clutter when studies contribute many estimates.
+
+    add_zero:
+      type: "logical"
+      default: true
+      help: |
+        If `TRUE`, always include zero in the x-axis ticks when it falls
+        within the data range. Useful as a reference point.
+
+  t_stat_histogram:
+    lower_cutoff:
+      type: "numeric"
+      default: -120
+      help: |
+        Lower cutoff bound for the main (full-range) histogram.
+        T-statistic values below this threshold are excluded.
+
+    upper_cutoff:
+      type: "numeric"
+      default: 120
+      help: |
+        Upper cutoff bound for the main (full-range) histogram.
+        T-statistic values above this threshold are excluded.
+
+    critical_values:
+      type: "numeric"
+      default: [1.96]
+      help: |
+        Positive critical t-statistic values to highlight with vertical lines.
+        Symmetric lines are drawn at both +/- each value.
+        Common thresholds:
+          {cli::symbol$bullet} {.strong 1.645}: 10% significance level
+          {cli::symbol$bullet} {.strong 1.96}: 5% significance level (default)
+          {cli::symbol$bullet} {.strong 2.58}: 1% significance level
+
+    n_bins:
+      type: "integer"
+      default: 80
+      help: |
+        Number of bins for the histogram. Higher values show finer detail.
+
+    show_mean_line:
+      type: "logical"
+      default: true
+      help: |
+        If `TRUE`, display a dashed vertical line at the mean t-statistic value.
+
+    show_density_curve:
+      type: "logical"
+      default: true
+      help: |
+        If `TRUE`, overlay a kernel density curve on the histogram.
+
+    min_tick_distance:
+      type: "numeric"
+      default: 0.5
+      help: |
+        Minimum distance between regular x-axis ticks and critical value ticks.
+        Prevents tick label overlap near critical values.
+
+    close_up_enabled:
+      type: "logical"
+      default: true
+      help: |
+        If `TRUE`, generate a second close-up histogram with tighter bounds
+        in addition to the full-range histogram.
+
+    close_up_lower:
+      type: "numeric"
+      default: -10
+      help: |
+        Lower bound for the close-up histogram view.
+        Only used when close_up_enabled is `TRUE`.
+
+    close_up_upper:
+      type: "numeric"
+      default: 10
+      help: |
+        Upper bound for the close-up histogram view.
+        Only used when close_up_enabled is `TRUE`.
+
+    close_up_min_tick_distance:
+      type: "numeric"
+      default: 0.3
+      help: |
+        Minimum tick distance for the close-up view.
+        Smaller values allow tighter tick placement in the zoomed view.
+
+  prima_facie_graphs:
+    type:
+      type: "enum: density|histogram|automatic"
+      default: "automatic"
+      help: |
+        Graph type for prima facie plots:
+          {cli::symbol$bullet} {.strong density}: Smooth density curves (better for >3 groups)
+          {cli::symbol$bullet} {.strong histogram}: Filled histogram bars (better for 2-3 groups)
+          {cli::symbol$bullet} {.strong automatic}: Chooses based on number of groups (default)
+
+    groups:
+      type: "character"
+      allow_na: true
+      default: .na
+      help: |
+        Variable group IDs to create prima facie graphs for.
+        If not specified, auto-detects dummy and categorical variable groups.
+        Provide a comma-separated list of group IDs (e.g., "dummy_country,categorical_age").
+
+    hide_outliers:
+      type: "logical"
+      default: true
+      help: |
+        If `TRUE`, trim the outermost bin-width of data from each side
+        to reduce visual impact of extreme values.
+
+    n_bins:
+      type: "integer"
+      default: 80
+      help: |
+        Number of bins for histogram calculation and outlier trimming.
+        Higher values show finer detail.
+
+    legend_font_size:
+      type: "numeric"
+      default: 14
+      help: |
+        Font size for legend text in prima facie graphs.
+
+  bma:
+    burn:
+      type: "integer"
+      default: 10000
+      help: |
+        Number of burn-in iterations for the Bayesian Model Averaging MCMC sampler.
+        Higher values ensure better convergence but increase computation time.
+
+    iter:
+      type: "integer"
+      default: 50000
+      help: |
+        Number of MCMC iterations after burn-in for BMA estimation.
+        More iterations provide more stable posterior estimates.
+
+    g:
+      type: "character"
+      default: "UIP"
+      help: |
+        Prior specification for the g-parameter in BMA.
+        Common options: "UIP" (Unit Information Prior), "BRIC", "EBL".
+
+    mprior:
+      type: "character"
+      default: "uniform"
+      help: |
+        Model prior specification for BMA.
+        Options: "uniform" (all models equally likely), "random", "fixed".
+
+    nmodel:
+      type: "integer"
+      default: 1000
+      help: |
+        Number of top models to retain during BMA estimation.
+        Higher values capture more of the model space but increase memory usage.
+
+    mcmc:
+      type: "character"
+      default: "bd"
+      help: |
+        MCMC sampler type for BMA.
+        Options: "bd" (birth-death), "rev.jump" (reversible jump).
+
+    use_vif_optimization:
+      type: "logical"
+      default: false
+      help: |
+        If `TRUE`, use Variance Inflation Factor (VIF) optimization to identify
+        and remove multicollinear variables before running BMA.
+
+    max_groups_to_remove:
+      type: "integer"
+      default: 30
+      help: |
+        Maximum number of variable groups to remove during VIF optimization.
+        Only relevant if use_vif_optimization is `TRUE`.
+
+  fma:
+    round_to:
+      type: "integer"
+      allow_na: true
+      default: .na
+      help: |
+        Override the default number of decimals shown in the FMA output.
+        Leave unset to use the global output option.
+
+    print_results:
+      type: "enum: none|fast|verbose|all"
+      default: "fast"
+      help: |
+        Level of result output:
+          {cli::symbol$bullet} {.strong none}: No output
+          {cli::symbol$bullet} {.strong fast}: Coefficients and standard errors only
+          {cli::symbol$bullet} {.strong verbose}: Coefficients, standard errors, p-values, and model weights
+          {cli::symbol$bullet} {.strong all}: Same as verbose (kept for consistency with BMA)
+
+  p_hacking_tests:
+    include_caliper:
+      type: "logical"
+      default: true
+      help: |
+        If `TRUE`, include Caliper tests (Gerber & Malhotra, 2008) for selective
+        reporting around significance thresholds.
+
+    caliper_thresholds:
+      type: "numeric"
+      default: [1.645, 1.96, 2.58]
+      help: |
+        T-statistic thresholds to test with the Caliper method.
+        Default tests at 1.645 (10% significance), 1.96 (5% significance), and 2.58 (1% significance).
+
+    caliper_widths:
+      type: "numeric"
+      default: [0.05, 0.1, 0.15]
+      help: |
+        Caliper interval widths to test around each threshold.
+        Narrower widths focus on immediate vicinity of the threshold.
+
+    caliper_display_ratios:
+      type: "logical"
+      default: true
+      help: |
+        If `TRUE`, display ratios (n_above/n_below) for Caliper tests.
+        If `FALSE`, display total count (n_above + n_below).
+
+    include_elliott:
+      type: "logical"
+      default: true
+      help: |
+        If `TRUE`, include Elliott et al. (2022) p-hacking detection tests.
+
+    simulate_cdfs:
+      use_cpp:
+        type: "logical"
+        default: true
+        help: |
+          If `TRUE`, use the compiled C++ implementation for Brownian bridge
+          simulations in the LCM test. Falls back to pure R automatically
+          if the C++ code is unavailable. Set to `FALSE` to force the R
+          implementation.
+
+      chunk_size:
+        type: "integer"
+        default: 512
+        help: |
+          Number of iterations per C++ chunk when displaying a progress bar
+          during LCM critical-value simulation. Larger chunks reduce overhead
+          but make the progress bar less responsive.
+
+    lcm_iterations:
+      type: "integer"
+      default: 3000
+      help: |
+        Number of simulations for LCM test critical values.
+        Higher values increase precision but take longer to compute.
+
+    lcm_grid_points:
+      type: "integer"
+      default: 3000
+      help: |
+        Number of grid points per LCM simulation.
+        Higher values increase accuracy of the Brownian bridge approximation.
+
+    include_discontinuity:
+      type: "logical"
+      default: true
+      help: |
+        If `TRUE`, include the discontinuity test at p = 0.05.
+        Requires the {.pkg rddensity} package.
+
+    discontinuity_bandwidth:
+      type: "numeric"
+      default: 0.05
+      help: |
+        Initial bandwidth for the discontinuity test.
+        The algorithm will adaptively adjust if needed.
+
+    include_cox_shi:
+      type: "logical"
+      default: true
+      help: |
+        If `TRUE`, include Cox-Shi tests for monotonicity restrictions.
+        These tests can detect violations of expected p-value distributions.
+
+    cox_shi_bins:
+      type: "integer"
+      default: 20
+      help: |
+        Number of bins for discretization in Cox-Shi tests.
+        More bins provide finer resolution but require more observations.
+
+    cox_shi_order:
+      type: "integer"
+      default: 2
+      help: |
+        Order of monotonicity (K) for Cox-Shi tests.
+        Higher orders impose stricter shape restrictions.
+
+    cox_shi_bounds:
+      type: "integer"
+      default: 1
+      help: |
+        Whether to use theoretical bounds in Cox-Shi tests (1 = yes, 0 = no).
+        Bounds account for the two-sided nature of t-tests.
+
+    include_maive:
+      type: "logical"
+      default: true
+      help: |
+        If `TRUE`, include MAIVE estimator (Irsova et al., 2023) for publication
+        bias correction using instrumental variables.
+
+    maive_method:
+      type: "integer"
+      default: 3
+      help: |
+        MAIVE method selection:
+          1 = FAT-PET
+          2 = PEESE
+          3 = PET-PEESE (default)
+          4 = Endogenous Kink (EK)
+
+    maive_weight:
+      type: "integer"
+      default: 0
+      help: |
+        MAIVE weighting scheme:
+          0 = No weights (default)
+          1 = Standard weights
+          2 = Adjusted weights
+
+    maive_instrument:
+      type: "integer"
+      default: 1
+      help: |
+        MAIVE instrumenting:
+          0 = No instrumenting
+          1 = Use instrumental variables (default)
+
+    maive_studylevel:
+      type: "integer"
+      default: 2
+      help: |
+        MAIVE study-level correlation structure:
+          0 = None
+          1 = Fixed effects
+          2 = Cluster-robust (default)
+
+    maive_se:
+      type: "integer"
+      default: 1
+      help: |
+        MAIVE standard error estimation method:
+          1 = Asymptotic (default)
+          2 = Pairs cluster bootstrap
+          3 = Wild bootstrap
+          4 = Wild cluster bootstrap
+          5 = Pairs bootstrap
+
+    maive_ar:
+      type: "integer"
+      default: 0
+      help: |
+        MAIVE Anderson-Rubin confidence interval:
+          0 = Do not compute (default)
+          1 = Compute
+
+    maive_first_stage:
+      type: "integer"
+      default: 0
+      help: |
+        MAIVE first stage option (default: 0).
+
+output:
+  dir:
+    type: "character"
+    default: "auto"
+    help: |
+      Directory where analysis results (tables, graphics) are saved after each run.
+      Set to {.val auto} to use a session-specific temporary directory, or provide
+      an absolute path to save results to a fixed location on your computer.
+      When set to {.val auto}, the resolved temporary directory is persisted to
+      the options file after the first run so results remain discoverable; reset
+      this option to {.val auto} to rotate to a new temporary directory.
+
+  save_results:
+    type: "logical"
+    default: true
+    help: |
+      If `TRUE`, automatically export tables (CSV) and graphics (PNG) to the output
+      directory after each analysis run.
+
+  number_of_decimals:
+    type: "integer"
+    default: 3
+    help: |
+      The number of decimals to round the output to. Defaults to 3.
+
+cli:
+  editor:
+    type: "character"
+    allow_na: true
+    default: .na
+    help: |
+      Preferred editor command for opening options files via {.code artma::options.open()}.
+
+      Examples:
+        {cli::symbol$bullet} {.code "nano"} (terminal editor, user-friendly)
+        {cli::symbol$bullet} {.code "vim"} (Vi IMproved)
+        {cli::symbol$bullet} {.code "code -w"} (VS Code, wait until file is closed)
+        {cli::symbol$bullet} {.code "cursor -w"} (Cursor editor)
+        {cli::symbol$bullet} {.code "open -t"} (macOS TextEdit)
+
+      If not set, {.emph artma} uses this priority:
+        1. {.envvar VISUAL} environment variable
+        2. {.envvar EDITOR} environment variable
+        3. System default ({.code open -t} on macOS, {.code notepad} on Windows, {.code xdg-open} on Linux)
+
+verbose:
+  type: "integer"
+  default: 3
+  help: |
+    The verbosity level of the package.
+    The higher the number, the more verbose the package.
+    Defaults to 3.
+    Verbosity levels:
+      {cli::symbol$bullet} {.strong 1}: Errors only - only stop() conditions
+      {cli::symbol$bullet} {.strong 2}: Warnings + errors - warning() and stop() conditions
+      {cli::symbol$bullet} {.strong 3}: Info - short progress/high-level info (default)
+      {cli::symbol$bullet} {.strong 4}: Debug/trace - everything including internals
+
+cache:
+  use_cache:
+    type: "logical"
+    default: false
+    help: |
+      If `TRUE`, use caching to speed up the package.
+      If `FALSE`, do not use caching.
+
+  cache_age:
+    type: "integer"
+    default: 3600
+    help: |
+      The age of the cache in seconds.
+      Defaults to 3600 seconds (1 hour).
+      If the cache is older than this, it will be invalidated.
 
 temp:
   # A set of options that are only set at runtime but never stored in the options file.

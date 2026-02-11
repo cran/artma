@@ -1,4 +1,4 @@
-# nolint start: unused_declared_object_linter, box_usage_linter.
+# nolint start: box_usage_linter.
 
 #' @title Runtime Setup
 #' @description
@@ -13,7 +13,9 @@ runtime_setup <- function(
     options_file_name = NULL,
     options_dir = NULL) {
   if (is.null(options_file_name) && !interactive()) {
-    cli::cli_alert_warning("Running in non-interactive mode without providing an options file name. Please provide an options file name or run in interactive mode.")
+    if (getOption("artma.verbose", 3) >= 2) {
+      cli::cli_alert_warning("Running in non-interactive mode without providing an options file name. Please provide an options file name or run in interactive mode.")
+    }
     return(invisible())
   }
 
@@ -29,4 +31,4 @@ runtime_setup <- function(
   FUN()
 }
 
-# nolint end: unused_declared_object_linter, box_usage_linter.
+# nolint end: box_usage_linter.

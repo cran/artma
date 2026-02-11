@@ -12,14 +12,28 @@ ask_for_options_file_name <- function(should_clean = TRUE, prompt = NULL) {
 
   box::use(artma / options / utils[parse_options_file_name])
 
-  prompt <- prompt %||% "Please provide the name for your options file, including the .yaml suffix: "
+  if (is.null(prompt)) {
+    cli::cli_h3("Create Options File")
+    cli::cli_text("Options files store configuration for your meta-analysis, including data paths, column mappings, method parameters, and analysis settings.")
+    cli::cat_line()
+    cli::cli_text("Sample names: {.emph my_analysis}, {.emph meta_analysis_2025}, {.emph project_config}, {.emph charity_effects}")
+    cli::cat_line()
+    cli::cli_text("For detailed information, see: {.code vignette('options-files', package='artma')}")
+    cli::cat_line()
+    prompt <- "Enter a name for your options file (the .yaml extension will be added automatically): "
+  }
+
   options_file_name <- readline(prompt = prompt)
 
   if (should_clean) {
     options_file_name <- parse_options_file_name(options_file_name)
   }
 
-  return(options_file_name)
+  # Print confirmation of the entered filename
+  cli::cli_alert_success("Options file name: {.file {options_file_name}}")
+  cli::cat_line()
+
+  options_file_name
 }
 
 
@@ -39,27 +53,36 @@ ask_for_existing_options_file_name <- function(
 
   box::use(
     artma[options.list],
-    artma / libs / string[pluralize]
+    artma / libs / core / string[pluralize]
   )
 
-  file_str <- if (isTRUE(multiple)) pluralize("name") else "name" # nolint: unused_declared_object_linter.
+  file_str <- if (isTRUE(multiple)) pluralize("name") else "name"
 
-  prompt <- prompt %||% glue::glue("Please select the user options file {file_str} you would like to use.")
+  prompt <- prompt %||% sprintf("Please select the user options file %s you would like to use.", file_str)
 
   user_options_file_names <- options.list(options_dir = options_dir) # nolint: box_usage_linter.
   if (length(user_options_file_names) == 0) {
     cli::cli_abort("No existing user options files were found. Aborting...")
   }
 
-  selected_file_name <- utils::select.list(
-    title = prompt,
-    choices = user_options_file_names,
-    multiple = multiple
-  )
+  if (multiple) {
+    selected_file_name <- climenu::checkbox(
+      choices = user_options_file_names,
+      prompt = prompt,
+      return_index = FALSE,
+      allow_select_all = TRUE
+    )
+  } else {
+    selected_file_name <- climenu::select(
+      choices = user_options_file_names,
+      prompt = prompt
+    )
+  }
+
   if (rlang::is_empty(selected_file_name)) {
     cli::cli_abort("No user options file was selected. Aborting...")
   }
-  return(selected_file_name)
+  selected_file_name
 }
 
 #' @title Ask for an option value
@@ -77,7 +100,7 @@ ask_for_option_value <- function(
   box::use(
     artma / const[CONST],
     artma / options / utils[validate_option_value],
-    artma / libs / string[trim_quotes]
+    artma / libs / core / string[trim_quotes]
   )
 
   retries <- 0
@@ -100,7 +123,7 @@ ask_for_option_value <- function(
   }
 
   if (is.character(option_value)) {
-    option_value <- stringr::str_trim(option_value, side = "both")
+    option_value <- trimws(option_value, which = "both")
     option_value <- trim_quotes(option_value)
   }
 
@@ -145,7 +168,7 @@ ask_for_options_to_modify <- function() {
       cli::cli_h3("Applying the following options:")
       cli::cli_ul()
       for (opt_name in names(options_list)) {
-        opt_str <- glue::glue("{CONST$STYLES$OPTIONS$NAME(opt_name)}: {CONST$STYLES$OPTIONS$VALUE(options_list[[opt_name]])}")
+        opt_str <- paste0(CONST$STYLES$OPTIONS$NAME(opt_name), ": ", CONST$STYLES$OPTIONS$VALUE(options_list[[opt_name]]))
         cli::cli_li(opt_str)
       }
     } else {
@@ -172,7 +195,7 @@ ask_for_options_to_modify <- function() {
     if (is.null(option_value)) next
 
     options_list[[option_name]] <- option_value
-    opt_str <- glue::glue("{CONST$STYLES$OPTIONS$NAME(option_name)}: {CONST$STYLES$OPTIONS$VALUE(option_value)}") # nolint: unused_declared_object_linter.
+    opt_str <- paste0(CONST$STYLES$OPTIONS$NAME(option_name), ": ", CONST$STYLES$OPTIONS$VALUE(option_value))
     cli::cli_alert_success("Option added: {.emph {opt_str}}")
     cli::cat_line()
   }

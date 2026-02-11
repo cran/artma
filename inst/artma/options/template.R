@@ -32,9 +32,9 @@ flatten_template_options <- function(x, parent = NULL) {
     path <- if (is.null(parent)) nm else paste(parent, nm, sep = ".")
     node <- x[[nm]]
 
-    # ──► A leaf?  (= list that has a 'type' field)
+    # <U+2500><U+2500><U+25BA> A leaf?  (= list that has a 'type' field)
     if (is_option_def(node)) {
-      node$name <- path # <── add the synthetic name
+      node$name <- path # <<U+2500><U+2500> add the synthetic name
       flattened[[length(flattened) + 1L]] <- node
       next
     }
@@ -58,6 +58,33 @@ collect_leaf_paths <- function(template_path) {
   vapply(defs, `[[`, character(1), "name")
 }
 
+#' @title Get template defaults
+#' @description Returns a named list of option defaults from a template, with an optional name prefix.
+#' @param template_path *\[character\]* Path to the template YAML file.
+#' @param prefix *\[character, optional\]* Optional prefix to prepend to each option name.
+#' @return A named list with default values keyed by option name.
+get_template_defaults <- function(template_path, prefix = NULL) {
+  template <- read_template(template_path)
+  defs <- flatten_template_options(template)
+  defaults <- list()
+
+  for (opt_def in defs) {
+    key <- if (is.null(prefix)) {
+      opt_def$name
+    } else {
+      paste0(prefix, ".", opt_def$name)
+    }
+
+    if (!is.null(opt_def$default)) {
+      defaults[[key]] <- opt_def$default
+    } else if (isTRUE(opt_def$allow_na)) {
+      defaults[[key]] <- NA
+    }
+  }
+
+  defaults
+}
+
 #' @title Flatten user options
 #' @description Flattens a nested user-supplied YAML object *but* stops at template leaves
 #' @param user_options *\[list\]* A nested list returned by yaml::read_yaml()
@@ -69,7 +96,7 @@ flatten_user_options <- function(user_options, leaf_set, parent = NULL) {
   for (nm in names(user_options)) {
     path <- if (is.null(parent)) nm else paste(parent, nm, sep = ".")
 
-    # ──► If we've reached a declared template leaf, take the whole value as-is
+    # <U+2500><U+2500><U+25BA> If we've reached a declared template leaf, take the whole value as-is
     if (path %in% leaf_set || !is.list(user_options[[nm]])) {
       flat[[path]] <- user_options[[nm]]
       next
@@ -94,7 +121,7 @@ flatten_user_options <- function(user_options, leaf_set, parent = NULL) {
 get_option_defs <- function(template_path = NULL, opt_path = NULL) {
   box::use(
     artma / paths[PATHS],
-    artma / libs / validation[assert_options_template_exists, validate_opt_path]
+    artma / libs / core / validation[assert_options_template_exists, validate_opt_path]
   )
 
   validate_opt_path(opt_path)
@@ -113,16 +140,6 @@ get_option_defs <- function(template_path = NULL, opt_path = NULL) {
 }
 
 
-#' @title Print options help text
-#' @description Print options help text
-#' @param help *\[character\]* The help text to print
-#' @keywords internal
-print_options_help_text <- function(help) {
-  help_key <- cli::format_inline("{.strong Help}: ")
-  help_body <- cli::format_inline(help)
-  writeLines(paste0(help_key, help_body))
-}
-
 #' @title Resolve a fixed option
 #' @description Resolve a fixed option, either using a default value or throwing an error if no default is provided.
 #' @param opt [list] Option definition.
@@ -130,23 +147,27 @@ print_options_help_text <- function(help) {
 #' `any` The resolved value for the fixed option.
 #' @keywords internal
 resolve_fixed_option <- function(opt, user_input) {
+  box::use(
+    artma / const[CONST],
+    artma / libs / core / utils[get_verbosity]
+  )
+
   if (!is.null(user_input[[opt$name]])) {
     if (user_input[[opt$opt_name]] == opt$default) {
       return(opt$default)
     }
     # User tried to set a value for a fixed option to a non-default value
-    cli::cli_alert_warning(glue::glue(
-      "Ignoring user-provided value for fixed option '{opt_name}'."
-    ), call. = FALSE)
+    if (get_verbosity() >= 2) {
+      cli::cli_alert_warning("Ignoring user-provided value for fixed option {CONST$STYLES$OPTIONS$NAME(opt$name)}.")
+    }
   }
   if (!is.null(opt$default)) {
     return(opt$default)
-  } else if (is.null(opt_default)) {
-    cli::cli_abort(glue::glue(
-      "Required option '{opt_name}' is fixed, but no default is provided."
-    ), call. = FALSE)
+  }
+  if (is.null(opt$default)) {
+    cli::cli_abort("Required option {CONST$STYLES$OPTIONS$NAME(opt$name)} is fixed, but no default is provided.")
   } else {
-    return(NULL) # Not required, no default
+    NULL # Not required, no default
   }
 }
 
@@ -157,7 +178,8 @@ resolve_fixed_option <- function(opt, user_input) {
 prompt_user_for_option_value <- function(opt) {
   box::use(
     artma / const[CONST],
-    artma / libs / validation[assert]
+    artma / libs / core / validation[assert],
+    artma / options / utils[print_options_help_text]
   )
 
   assert(interactive(), "Running in a non-interactive mode. Cannot prompt for required option.")
@@ -169,7 +191,9 @@ prompt_user_for_option_value <- function(opt) {
     cli::cli_text("{.strong Default}: {CONST$STYLES$OPTIONS$DEFAULT(opt$default)}")
   }
 
-  if (!is.null(opt$help)) print_options_help_text(opt$help)
+  if (!is.null(opt$help) && !isTRUE(opt$suppress_help_in_prompt)) {
+    print_options_help_text(opt$help)
+  }
 
   prompt_type <- if (is.null(opt$prompt)) CONST$OPTIONS$DEFAULT_PROMPT_TYPE else opt$prompt
 
@@ -177,7 +201,7 @@ prompt_user_for_option_value <- function(opt) {
     if (is.null(opt$prompt_function)) {
       cli::cli_abort(cli::format_inline("Prompt function not provided for option {.strong {opt$name}}."))
     }
-    box_import_str <- glue::glue("box::use(prompts = artma / options / prompts[{opt$prompt_function}])")
+    box_import_str <- sprintf("box::use(prompts = artma / options / prompts[%s])", opt$prompt_function)
     tryCatch(
       {
         eval(parse(text = box_import_str))
@@ -190,25 +214,54 @@ prompt_user_for_option_value <- function(opt) {
     return(prompt_function(opt = opt))
   }
 
-  # nolint start: unused_declared_object_linter.
-  base_msg <- cli::format_inline("Enter a value for {.strong {opt$name}}")
-  choose_msg <- switch(prompt_type,
-    "file" = cli::format_inline(" (or type in {.emph {'choose'}} to select a file interactively)"),
-    "directory" = cli::format_inline(" (or type in {.emph {'choose'}} to select a directory interactively)"),
-    "readline" = "",
+  hints <- switch(prompt_type,
+    "file" = cli::format_inline("type in {.emph {'choose'}} or press {.code <Enter>} to select a file interactively"),
+    "directory" = cli::format_inline("type in {.emph {'choose'}} or press {.code <Enter>} to select a directory interactively"),
+    "readline" = character(0),
     cli::cli_abort(cli::format_inline("Invalid prompt type {.emph {prompt_type}}."))
   )
-  default_msg <- if (!is.null(opt$default)) cli::format_inline(" (or press {.code <Enter>} to accept default: {.strong {opt$default}})") else ""
-  input_val <- readline(prompt = cli::format_inline("{base_msg}{choose_msg}{default_msg}: "))
-  # nolint end: unused_declared_object_linter.
+  if (!is.null(opt$prompt_hint)) {
+    hints <- c(hints, cli::format_inline(opt$prompt_hint))
+  }
+  if (!is.null(opt$default)) {
+    hints <- c(hints, cli::format_inline("press {.code <Enter>} to accept default: {.strong {opt$default}}"))
+  }
 
-  if (input_val == "choose") {
+  hint_msg <- if (length(hints)) paste0(" (or ", paste(hints, collapse = ", "), ")") else ""
+  input_val <- readline(prompt = cli::format_inline("Enter a value for {.strong {opt$name}}{hint_msg}: "))
+
+  if (input_val == "choose" || is.na(input_val) || (!nzchar(input_val) && prompt_type %in% c("file", "directory"))) {
     input_val <- switch(prompt_type,
       file = tcltk::tk_choose.files(default = "", caption = "Select file", multi = FALSE),
       directory = tcltk::tk_choose.dir(default = getwd(), caption = "Select directory"),
       cli::cli_abort(cli::format_inline("Interactive selection is not supported for type {.emph {prompt_type}}."))
     )
     Sys.sleep(0.5) # Allow tk to print the closing message into the console
+  } else if (input_val == "mock" && prompt_type == "file") {
+    # Generate mock data and save to temp file
+    box::use(
+      artma / testing / mocks / mock_df[create_mock_df],
+      artma / libs / core / utils[get_verbosity]
+    )
+
+    if (get_verbosity() >= 3) {
+      cli::cli_alert_info("Generating mock data...")
+    }
+
+    # Create temp file in R temp directory
+    temp_file <- tempfile(pattern = "artma-mock-data-", fileext = ".csv")
+
+    # Generate mock data frame and save to temp file
+    mock_df <- create_mock_df(
+      with_file_creation = TRUE,
+      file_path = temp_file
+    )
+
+    if (get_verbosity() >= 3) {
+      cli::cli_alert_success("Mock data generated and saved to {.path {temp_file}}")
+    }
+
+    input_val <- temp_file
   }
 
   val_is_empty <- (!nzchar(input_val) || rlang::is_empty(input_val))
@@ -216,16 +269,14 @@ prompt_user_for_option_value <- function(opt) {
   if (val_is_empty) {
     if (!is.null(opt$default)) {
       return(opt$default)
-    } else if (isTRUE(opt$allow_na)) {
-      return(NA)
-    } else {
-      cli::cli_abort(cli::format_inline(
-        "Required option {CONST$STYLES$OPTIONS$NAME(opt$name)} was left blank. Aborting."
-      ), call. = FALSE)
     }
+    if (isTRUE(opt$allow_na)) {
+      return(NA)
+    }
+    cli::cli_abort("Required option {CONST$STYLES$OPTIONS$NAME(opt$name)} was left blank. Aborting.")
   }
 
-  return(input_val)
+  input_val
 }
 
 #' @title Resolve an option value
@@ -244,30 +295,23 @@ resolve_option_value <- function(
   }
 
   if (opt$name %in% names(user_input)) {
-    # 1) If user explicitly provided a value, just return it
     return(user_input[[opt$name]])
   }
 
   # 2) No user value, check default
   if (!is.null(opt$default)) {
-    # If interactive, prompt to allow override (optional)
     if (is_interactive && isTRUE(opt$confirm_default)) {
       return(prompt_user_for_option_value(opt))
-    } else {
-      # Non-interactive => silently use default
-      return(opt$default)
     }
+    return(opt$default)
   }
 
   # 3) No user value, no default
   if (is.null(opt$default)) {
     if (!is_interactive) {
-      cli::cli_abort(glue::glue(
-        "Required option '{opt$name}' not provided, and no default is available."
-      ), call. = FALSE)
-    } else {
-      return(prompt_user_for_option_value(opt))
+      cli::cli_abort("Required option {CONST$STYLES$OPTIONS$NAME(opt$name)} not provided, and no default is available.")
     }
+    return(prompt_user_for_option_value(opt))
   }
 
   cli::cli_abort("Unreachable code reached.")
@@ -281,12 +325,17 @@ resolve_option_value <- function(
 #' `any` The coerced value.
 #' @keywords internal
 coerce_option_value <- function(val, opt) {
+  box::use(
+    artma / const[CONST],
+    artma / libs / core / utils[get_verbosity]
+  )
+
   # If the value is NULL, there's nothing to coerce
   if (is.null(val)) {
     return(val)
   }
 
-  if (is.na(val) && isTRUE(opt$allow_na)) {
+  if (length(val) == 1 && is.na(val) && isTRUE(opt$allow_na)) {
     return(val)
   }
 
@@ -296,10 +345,8 @@ coerce_option_value <- function(val, opt) {
   }
 
   enforce_na_allowed <- function(val, opt) {
-    if (is.na(val) && !isTRUE(opt$allow_na)) {
-      cli::cli_abort(glue::glue(
-        "Option '{opt$name}' does not allow NA values."
-      ), call. = FALSE)
+    if (any(is.na(val)) && !isTRUE(opt$allow_na)) {
+      cli::cli_abort("Option {CONST$STYLES$OPTIONS$NAME(opt$name)} does not allow NA values.")
     }
   }
 
@@ -319,10 +366,11 @@ coerce_option_value <- function(val, opt) {
       if (isTRUE(opt$standardize) && opt$type == "character") {
         standard_val <- make.names(coerced_val)
         if (standard_val != coerced_val && !is.na(coerced_val)) {
-          box::use(artma / const[CONST])
-          cli::cli_alert_warning(
-            "Option {CONST$STYLES$OPTIONS$NAME(opt$name)} does not allow non-standard values. Standardizing from {CONST$STYLES$OPTIONS$VALUE(val)} to {CONST$STYLES$OPTIONS$VALUE(standard_val)}."
-          )
+          if (get_verbosity() >= 2) {
+            cli::cli_alert_warning(
+              "Option {CONST$STYLES$OPTIONS$NAME(opt$name)} does not allow non-standard values. Standardizing from {CONST$STYLES$OPTIONS$VALUE(val)} to {CONST$STYLES$OPTIONS$VALUE(standard_val)}."
+            )
+          }
         }
         coerced_val <- standard_val
       }
@@ -351,7 +399,8 @@ parse_options_from_template <- function(
     add_prefix = FALSE) {
   box::use(
     artma / const[CONST],
-    artma / libs / validation[assert_options_template_exists]
+    artma / libs / core / validation[assert_options_template_exists],
+    artma / options / column_preprocessing[preprocess_column_mapping]
   )
   assert_options_template_exists(path)
 
@@ -359,11 +408,32 @@ parse_options_from_template <- function(
   options_def <- flatten_template_options(raw_template_options)
 
   parsed_options <- list()
+  column_name_prefix <- "data.colnames."
+
+  # First pass: Resolve non-column-name options (especially data.source_path)
   for (opt in options_def) {
-    val <- resolve_option_value(opt, user_input)
-    val <- coerce_option_value(val, opt)
-    # We do not validate here, only after all options are parsed
-    parsed_options[[opt$name]] <- val
+    if (!startsWith(opt$name, column_name_prefix)) {
+      val <- resolve_option_value(opt, user_input)
+      val <- coerce_option_value(val, opt)
+      # We do not validate here, only after all options are parsed
+      parsed_options[[opt$name]] <- val
+
+      # Update user_input with resolved value for preprocessing
+      user_input[[opt$name]] <- val
+    }
+  }
+
+  # Now that data.source_path might be resolved, run column preprocessing
+  user_input <- preprocess_column_mapping(user_input, options_def)
+
+  # Second pass: Resolve column name options (should now be in user_input from preprocessing)
+  for (opt in options_def) {
+    if (startsWith(opt$name, column_name_prefix)) {
+      val <- resolve_option_value(opt, user_input)
+      val <- coerce_option_value(val, opt)
+      # We do not validate here, only after all options are parsed
+      parsed_options[[opt$name]] <- val
+    }
   }
 
   # Possibly add a prefix to all names
@@ -378,6 +448,7 @@ box::export(
   collect_leaf_paths,
   flatten_template_options,
   flatten_user_options,
+  get_template_defaults,
   get_option_defs,
   parse_options_from_template,
   read_template
