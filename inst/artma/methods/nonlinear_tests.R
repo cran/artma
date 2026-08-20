@@ -4,8 +4,11 @@ nonlinear_tests <- function(df) {
   box::use(
     artma / libs / core / validation[validate, validate_columns, assert],
     artma / libs / core / utils[get_verbosity],
+    artma / libs / formatting / results[print_summary_table],
     artma / econometric / nonlinear[run_nonlinear_methods],
+    artma / modules / runtime_methods[new_method_result],
     artma / options / index[get_option_group],
+    artma / options / resolver[opt_spec, resolve_options],
     artma / options / significance_marks[resolve_add_significance_marks]
   )
 
@@ -14,46 +17,45 @@ nonlinear_tests <- function(df) {
 
   opt <- get_option_group("artma.methods.nonlinear_tests")
 
-  add_marks <- resolve_add_significance_marks("artma.methods.nonlinear_tests")
+  # round_to has a bespoke default: the method's own (NA) option falls back to
+  # the global output decimals rather than a fixed literal, so it is resolved
+  # before the spec-driven block.
   round_to_opt <- opt$round_to
   if (length(round_to_opt) == 1 && is.na(round_to_opt)) {
     round_to_opt <- NULL
   }
-  round_to <- round_to_opt %||% as.integer(getOption("artma.output.number_of_decimals", 3))
-  stem_sample <- opt$stem_representative_sample %||% "medians"
-  selection_cutoffs <- opt$selection_cutoffs %||% c(1.96)
-  selection_symmetric <- opt$selection_symmetric %||% FALSE
-  selection_model <- opt$selection_model %||% "normal"
-  hierarchical_iterations <- opt$hierarchical_iterations %||% 6000L
+  round_to <- as.integer(round_to_opt %||% getOption("artma.output.number_of_decimals", 3))
+  assert(round_to >= 0, "Number of decimals must be non-negative.")
 
-  validate(
-    is.logical(add_marks),
-    is.numeric(round_to),
-    is.character(stem_sample),
-    is.numeric(selection_cutoffs),
-    is.logical(selection_symmetric),
-    is.character(selection_model),
-    is.numeric(hierarchical_iterations)
+  resolved_options <- c(
+    list(add_significance_marks = resolve_add_significance_marks(), round_to = round_to),
+    resolve_options(opt, list(
+      stem_representative_sample = opt_spec(
+        default = "medians", type = "character",
+        constraint = function(x) x %in% c("medians", "first", "all"),
+        constraint_msg = "Invalid STEM representative sample option."
+      ),
+      selection_cutoffs = opt_spec(default = c(1.96), type = "numeric"),
+      selection_symmetric = opt_spec(default = FALSE, type = "logical"),
+      selection_model = opt_spec(
+        default = "normal", type = "character",
+        constraint = function(x) x %in% c("normal", "t"),
+        constraint_msg = "Selection model must be either 'normal' or 't'."
+      ),
+      hierarchical_iterations = opt_spec(
+        default = 6000L, type = "numeric", cast = as.integer,
+        constraint = function(x) x > 0,
+        constraint_msg = "Hierarchical iterations must be positive."
+      )
+    ))
   )
 
-  round_to <- as.integer(round_to)
-  hierarchical_iterations <- as.integer(hierarchical_iterations)
-
-  assert(round_to >= 0, "Number of decimals must be non-negative.")
+  selection_cutoffs <- resolved_options$selection_cutoffs
   assert(length(selection_cutoffs) > 0, "Selection model requires at least one cutoff value.")
-  assert(all(selection_cutoffs > 0), "Selection cutoffs must be positive.")
-  assert(selection_model %in% c("normal", "t"), "Selection model must be either 'normal' or 't'.")
-  assert(hierarchical_iterations > 0, "Hierarchical iterations must be positive.")
-  assert(stem_sample %in% c("medians", "first", "all"), "Invalid STEM representative sample option.")
-
-  resolved_options <- list(
-    add_significance_marks = add_marks,
-    round_to = round_to,
-    stem_representative_sample = stem_sample,
-    selection_cutoffs = selection_cutoffs,
-    selection_symmetric = selection_symmetric,
-    selection_model = selection_model,
-    hierarchical_iterations = hierarchical_iterations
+  assert(all(is.finite(selection_cutoffs)), "Selection cutoffs must be finite numbers.")
+  assert(
+    !is.unsorted(selection_cutoffs, strictly = TRUE),
+    "Selection cutoffs must be strictly increasing, without duplicates."
   )
 
   results <- run_nonlinear_methods(df, resolved_options)
@@ -64,15 +66,7 @@ nonlinear_tests <- function(df) {
     cli::cli_h2("Non-linear model tests")
 
     if (nrow(results$summary) > 0) {
-      summary <- results$summary
-      duplicated_metric <- identical(rownames(summary), summary[[1]])
-      if (duplicated_metric) {
-        rownames(summary) <- NULL
-      }
-      lines <- utils::capture.output(
-        print(summary, row.names = !duplicated_metric) # nolint: undesirable_function_linter.
-      )
-      cli::cli_verbatim(lines)
+      print_summary_table(results$summary)
     } else {
       cli::cli_alert_warning("No non-linear models were successfully estimated.")
     }
@@ -84,18 +78,67 @@ nonlinear_tests <- function(df) {
     }
   }
 
-  invisible(results)
+  stem_plots <- results$plots$stem %||% list()
+
+  invisible(new_method_result(
+    tables = list(summary = results$summary),
+    estimates = nonlinear_tests_estimates(results$coefficients),
+    plots = list(
+      stem_funnel = stem_plots$stem_funnel,
+      stem_mse = stem_plots$stem_mse
+    ),
+    meta = list(
+      coefficients = results$coefficients,
+      skipped_models = results$skipped,
+      options = results$options
+    )
+  ))
+}
+
+#' @title Tidy estimates for the non-linear tests
+#' @description
+#' Map the per-model coefficient frame onto the shared `estimates` schema. Each
+#' non-linear estimator is a `model` and contributes an `effect` and a
+#' `publication_bias` row, plus whatever extra terms it reports (the selection
+#' model's publication probabilities, the endogenous kink's heterogeneity).
+#' `n_obs` is the count the model actually fitted on, which can be below the
+#' sample size for estimators that subset (WAAP, Top 10).
+#'
+#' The numbers are carried over verbatim; the formatted columns alongside them
+#' belong to the display table only.
+#' @param coefficients *\[data.frame\]* The coefficient frame from
+#'   `run_nonlinear_methods()`.
+#' @return *\[data.frame\]* A frame in the shared estimates schema.
+nonlinear_tests_estimates <- function(coefficients) {
+  box::use(
+    artma / modules / runtime_methods[new_estimates]
+  )
+
+  if (!is.data.frame(coefficients) || nrow(coefficients) == 0L) {
+    return(new_estimates())
+  }
+
+  new_estimates(data.frame(
+    method = "nonlinear_tests",
+    model = coefficients$model,
+    term = coefficients$term,
+    estimate = coefficients$estimate,
+    std_error = coefficients$std_error,
+    p_value = coefficients$p_value,
+    n_obs = coefficients$n_obs_model,
+    stringsAsFactors = FALSE
+  ))
 }
 
 box::use(
-  artma / libs / infrastructure / cache[cache_cli_runner],
-  artma / data / cache_signatures[build_data_cache_signature]
+  artma / modules / runtime_methods[register_runtime_method]
 )
 
-run <- cache_cli_runner(
+run <- register_runtime_method(
   nonlinear_tests,
   stage = "nonlinear_tests",
-  key_builder = function(...) build_data_cache_signature()
+  description = "Non-linear bias corrections (WAAP, Top10, STEM, selection models)",
+  required_columns = c("effect", "se", "study_id")
 )
 
-box::export(nonlinear_tests, run)
+box::export(nonlinear_tests, nonlinear_tests_estimates, run)

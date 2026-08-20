@@ -1,7 +1,176 @@
 box::use(
-  testthat[test_that, expect_named],
+  testthat[test_that, expect_equal, expect_error, expect_named, expect_true],
   withr[local_options, local_tempdir, defer]
 )
+
+test_that("topo_sort_methods orders dependencies before dependents", {
+  box::use(
+    artma / modules / runtime_methods[topo_sort_methods]
+  )
+
+  deps <- list(
+    fma = "bma",
+    best_practice_estimate = "bma"
+  )
+
+  ordered <- topo_sort_methods(
+    c("best_practice_estimate", "fma", "bma"),
+    deps
+  )
+
+  expect_true(which(ordered == "bma") < which(ordered == "fma"))
+  expect_true(which(ordered == "bma") < which(ordered == "best_practice_estimate"))
+})
+
+test_that("topo_sort_methods preserves input order for independent methods", {
+  box::use(
+    artma / modules / runtime_methods[topo_sort_methods]
+  )
+
+  ordered <- topo_sort_methods(c("c", "a", "b"), list())
+  expect_equal(ordered, c("c", "a", "b"))
+})
+
+test_that("topo_sort_methods ignores dependencies outside the requested set", {
+  box::use(
+    artma / modules / runtime_methods[topo_sort_methods]
+  )
+
+  # fma depends on bma, but bma is not requested: fma still runs standalone.
+  ordered <- topo_sort_methods(c("fma"), list(fma = "bma"))
+  expect_equal(ordered, "fma")
+})
+
+test_that("topo_sort_methods aborts on a dependency cycle", {
+  box::use(
+    artma / modules / runtime_methods[topo_sort_methods]
+  )
+
+  deps <- list(a = "b", b = "a")
+  expect_error(topo_sort_methods(c("a", "b"), deps), "[Cc]yclic")
+})
+
+test_that("missing_required_columns reports absent columns only", {
+  box::use(
+    artma / modules / runtime_methods[missing_required_columns]
+  )
+
+  df <- data.frame(effect = 1, se = 1)
+  expect_equal(missing_required_columns(df, c("effect", "se")), character())
+  expect_equal(missing_required_columns(df, c("effect", "study_id")), "study_id")
+  expect_equal(missing_required_columns(df, character()), character())
+})
+
+test_that("missing_suggested_packages uses the injected predicate", {
+  box::use(
+    artma / modules / runtime_methods[missing_suggested_packages]
+  )
+
+  is_installed <- function(pkg) pkg == "installed_pkg"
+  expect_equal(
+    missing_suggested_packages(c("installed_pkg", "absent_pkg"), is_installed),
+    "absent_pkg"
+  )
+  expect_equal(missing_suggested_packages(character(), is_installed), character())
+})
+
+test_that("register_runtime_method attaches declarative metadata", {
+  box::use(
+    artma / modules / runtime_methods[get_method_metadata, register_runtime_method]
+  )
+
+  impl <- function(df, ...) df
+  run <- register_runtime_method(
+    impl,
+    stage = "demo",
+    description = "A demo method",
+    depends_on = "bma",
+    required_columns = c("effect", "se"),
+    suggests = "BMS"
+  )
+
+  meta <- get_method_metadata(run, name = "demo")
+  expect_equal(meta$description, "A demo method")
+  expect_equal(meta$depends_on, "bma")
+  expect_equal(meta$required_columns, c("effect", "se"))
+  expect_equal(meta$suggests, "BMS")
+  expect_equal(meta$stage, "demo")
+  expect_equal(meta$opt_in, FALSE)
+})
+
+test_that("register_runtime_method leaves cheap methods uncached by default", {
+  box::use(
+    artma / modules / runtime_methods[register_runtime_method]
+  )
+
+  local_options(list(artma.cache.use_cache = TRUE))
+
+  calls <- 0L
+  impl <- function(df, ...) {
+    calls <<- calls + 1L
+    calls
+  }
+  run <- register_runtime_method(impl, stage = "cheap")
+
+  df <- data.frame(x = 1)
+  run(df = df)
+  run(df = df)
+
+  # No caching layer wraps the method, so the implementation runs every call.
+  expect_equal(calls, 2L)
+})
+
+test_that("register_runtime_method caches a method opted into caching", {
+  box::use(
+    artma / modules / runtime_methods[register_runtime_method]
+  )
+
+  local_options(list(artma.cache.use_cache = TRUE))
+
+  calls <- 0L
+  impl <- function(df, ...) {
+    calls <<- calls + 1L
+    calls
+  }
+  run <- register_runtime_method(
+    impl,
+    stage = "pricey",
+    cached = TRUE,
+    key_builder = function(...) list(fixed = TRUE),
+    cache = memoise::cache_memory()
+  )
+
+  df <- data.frame(x = 1)
+  first <- run(df = df)
+  second <- run(df = df)
+
+  # The second identical call is served from cache: the implementation ran once.
+  expect_equal(calls, 1L)
+  expect_equal(first, second)
+})
+
+test_that("register_runtime_method records the opt-in flag", {
+  box::use(
+    artma / modules / runtime_methods[get_method_metadata, register_runtime_method]
+  )
+
+  run <- register_runtime_method(function(df, ...) df, stage = "pricey", opt_in = TRUE)
+
+  expect_true(get_method_metadata(run, name = "pricey")$opt_in)
+})
+
+test_that("get_method_metadata fills defaults for methods without metadata", {
+  box::use(
+    artma / modules / runtime_methods[get_method_metadata]
+  )
+
+  meta <- get_method_metadata(function(df, ...) df, name = "bare")
+  expect_equal(meta$depends_on, character())
+  expect_equal(meta$required_columns, character())
+  expect_equal(meta$suggests, character())
+  expect_equal(meta$stage, "bare")
+  expect_equal(meta$opt_in, FALSE)
+})
 
 test_that("get_runtime_method_modules ignores helper modules", {
   box::use(
@@ -37,4 +206,112 @@ test_that("get_runtime_method_modules ignores helper modules", {
 
   modules <- get_runtime_method_modules(modules_dir = methods_dir)
   expect_named(modules, "valid_method")
+})
+
+test_that("new_method_result enforces the two skip shapes", {
+  box::use(
+    artma / modules / runtime_methods[new_method_result]
+  )
+
+  expect_equal(
+    new_method_result(meta = list(skip_reason = "package BMS is not installed"))$meta$skip_reason,
+    "package BMS is not installed"
+  )
+  expect_equal(
+    new_method_result(meta = list(skipped_models = list(fe = list(label = "FE", reason = "no clusters"))))$meta$skipped_models$fe$reason,
+    "no clusters"
+  )
+  expect_equal(new_method_result(meta = list(skipped_models = list()))$meta$skipped_models, list())
+
+  # A named list of skipped sub-models belongs under `skipped_models`; passing
+  # it as the scalar reason is what broke the HTML report (issue #414).
+  expect_error(
+    new_method_result(meta = list(skip_reason = list())),
+    "must be a single string"
+  )
+  expect_error(
+    new_method_result(meta = list(skip_reason = list(fe = list(reason = "no clusters")))),
+    "must be a single string"
+  )
+  expect_error(
+    new_method_result(meta = list(skip_reason = c("a", "b"))),
+    "must be a single string"
+  )
+  expect_error(
+    new_method_result(meta = list(skipped_models = "no clusters")),
+    "must be a named list"
+  )
+})
+
+test_that("new_estimates fills the whole schema with typed NAs", {
+  box::use(
+    artma / modules / runtime_methods[ESTIMATES_COLUMNS, new_estimates]
+  )
+
+  estimates <- new_estimates(data.frame(
+    method = "linear_tests",
+    term = c("effect", "publication_bias"),
+    estimate = c(0.0571234, -0.1289876),
+    stringsAsFactors = FALSE
+  ))
+
+  expect_named(estimates, ESTIMATES_COLUMNS)
+  expect_equal(nrow(estimates), 2L)
+  expect_equal(estimates$method, rep("linear_tests", 2L))
+  # Unfilled columns are typed NAs, not dropped and not characters.
+  expect_true(is.numeric(estimates$std_error))
+  expect_true(all(is.na(estimates$std_error)))
+  expect_true(is.integer(estimates$n_clusters))
+  expect_true(is.character(estimates$note))
+  # Values pass through untouched: no rounding anywhere on this path.
+  expect_equal(estimates$estimate, c(0.0571234, -0.1289876))
+})
+
+test_that("new_estimates returns an empty typed frame with no input", {
+  box::use(
+    artma / modules / runtime_methods[ESTIMATES_COLUMNS, new_estimates]
+  )
+
+  estimates <- new_estimates()
+
+  expect_named(estimates, ESTIMATES_COLUMNS)
+  expect_equal(nrow(estimates), 0L)
+  expect_true(is.numeric(estimates$p_value))
+  expect_true(is.character(estimates$model))
+})
+
+test_that("new_estimates coerces column types and rejects unknown columns", {
+  box::use(
+    artma / modules / runtime_methods[new_estimates]
+  )
+
+  estimates <- new_estimates(data.frame(
+    model = factor("ols"),
+    n_obs = 1000,
+    stringsAsFactors = FALSE
+  ))
+  expect_equal(estimates$model, "ols")
+  expect_true(is.integer(estimates$n_obs))
+
+  expect_error(
+    new_estimates(data.frame(term = "effect", bootstrap_lower = 0.1)),
+    "Unknown column"
+  )
+})
+
+test_that("new_method_result normalises the estimates slot", {
+  box::use(
+    artma / modules / runtime_methods[ESTIMATES_COLUMNS, new_method_result]
+  )
+
+  result <- new_method_result(
+    tables = list(summary = data.frame(a = 1)),
+    estimates = data.frame(term = "effect", estimate = 0.25)
+  )
+
+  expect_named(result$estimates, ESTIMATES_COLUMNS)
+  expect_equal(result$estimates$estimate, 0.25)
+
+  expect_equal(new_method_result()$estimates, NULL)
+  expect_error(new_method_result(estimates = "not a frame"), "must be a")
 })

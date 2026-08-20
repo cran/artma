@@ -8,8 +8,9 @@
 #'   invalid. Defaults to `FALSE`.
 #' @return *\[list\]* The fully-resolved data config.
 get_data_config <- function(
-    create_if_missing = TRUE,
-    fix_if_invalid = FALSE) {
+  create_if_missing = TRUE,
+  fix_if_invalid = FALSE
+) {
   box::use(
     artma / libs / core / validation[validate],
     artma / libs / core / utils[get_verbosity],
@@ -25,8 +26,8 @@ get_data_config <- function(
     is.logical(fix_if_invalid)
   )
 
-  # Read sparse overrides from options
-  overrides <- getOption("artma.data.config")
+  # Read sparse overrides from the unified per-column store
+  overrides <- getOption("artma.data.columns", list())
   if (!is.list(overrides)) overrides <- list()
 
   # Try to build base config from the dataframe

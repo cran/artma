@@ -20,7 +20,7 @@ data will be used directly, bypassing the data reading step.}
 
 \item{methods}{\emph{[character, optional]} A character vector of method names to run.
 Use \code{"all"} to run all available methods. If \code{NULL}, an interactive menu will
-prompt you to select methods. See \code{artma::methods.list()} for available methods.}
+prompt you to select methods. See \code{artma::methods_list()} for available methods.}
 
 \item{options}{\emph{[character, optional]} Name of the options file (with or without
 \code{.yaml} extension) to use. If \code{NULL} and running interactively, you will be
@@ -37,6 +37,10 @@ after exporting results. Defaults to \code{FALSE}.}
 \value{
 \emph{[list]} A named list containing results from each method, indexed by
 method name. The structure of each result depends on the specific method.
+Methods that fail are omitted from the list; their names and error messages
+are attached as the \code{failed_methods} attribute. The \code{run_info} attribute
+carries the run's identity: the methods requested, the effective seed, and
+the files each method wrote.
 }
 \description{
 Main entry point for the artma package. This function orchestrates the complete
@@ -74,6 +78,54 @@ directly. The data will still be preprocessed and validated according to your
 options configuration. This is useful when you already have data loaded in R or
 want to analyze data programmatically.
 }
+
+\subsection{Parallel Execution}{
+
+Methods that do not depend on one another form a dependency layer and run
+concurrently in forked workers, so a run costs roughly the slowest method per
+layer rather than the sum of all of them. Each method's CLI output is
+captured and replayed in discovery order once the layer finishes, so the
+console reads like a sequential run.
+
+Set \code{general.parallel} to \code{FALSE} in the options file to disable this.
+Execution also falls back to sequential automatically on Windows, on
+single-core machines, and in interactive sessions whose autonomy level still
+allows methods to prompt.
+
+Every method receives its own L'Ecuyer-CMRG stream derived from the
+\code{general.seed} option and the method's name, so stochastic methods
+(bootstrap, MCMC) draw the same numbers whether the run was parallel or
+sequential, and regardless of which other methods ran alongside. Setting
+\code{general.seed} to \code{NA} derives the run seed from the session RNG instead,
+so calling \code{set.seed()} before \code{artma()} governs reproducibility the way
+it does for any stochastic R function.
+}
+
+\subsection{Run Manifest}{
+
+Every run that saves results writes a \code{run.json} into its output directory:
+when it ran, the options file and data source behind it, the methods
+requested, run, skipped and failed, the effective seed, and the files it
+wrote. The file list is recorded as the files are written, so it describes
+this run rather than the accumulated contents of the directory, and it is
+what the HTML report uses to find each method's plots.
+
+The manifest is overwritten on every run into the same output directory: it
+always describes the latest run, never a history. Runs driven by different
+options files already get their own output directory, so keep a run by
+copying its directory or by pointing \code{output.dir} somewhere per-run.
+}
+
+\subsection{Method Failures}{
+
+A method that throws an error does not abort the run. The failing method is
+skipped with a warning, the remaining methods still execute, and results from
+the methods that succeeded are exported as usual. A summary of successes and
+failures is printed at the end of the run. The run itself never signals an
+error because of a method failure; when every requested method fails, a final
+warning is emitted instead. Failed method names and their error messages are
+available in the \code{failed_methods} attribute of the returned list.
+}
 }
 \examples{
 \dontrun{
@@ -104,8 +156,8 @@ funnel_result <- results$funnel_plot
 }
 \seealso{
 \itemize{
-\item \code{artma::methods.list()} - List available methods
-\item \code{artma::options.create()} - Create a new options file
+\item \code{artma::methods_list()} - List available methods
+\item \code{artma::options_create()} - Create a new options file
 \item \code{artma::prepare_data()} - Prepare data manually
 }
 }

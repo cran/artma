@@ -4,6 +4,24 @@
 #' for effect summary statistics analysis. Supports both automatic suggestion
 #' and manual variable selection with specification of split methods.
 
+#' Convert suggested variable rows into variable configurations
+#'
+#' @param suggested_vars *\[data.frame\]* Rows of accepted suggestions
+#' @return *\[list\]* Named list of per-variable split configurations
+#' @keywords internal
+suggestions_to_var_configs <- function(suggested_vars) {
+  var_configs <- list()
+  for (i in seq_len(nrow(suggested_vars))) {
+    var <- suggested_vars[i, ]
+    var_configs[[var$var_name]] <- list(
+      var_name = var$var_name,
+      split_method = var$split_method,
+      split_value = var$split_value
+    )
+  }
+  var_configs
+}
+
 #' Prompt user to select variables for effect summary statistics
 #'
 #' @description
@@ -30,7 +48,7 @@ prompt_effect_summary_var_selection <- function(df, config) {
     is.list(config)
   )
 
-  if (!should_prompt_user(required_level = 4)) {
+  if (!should_prompt_user(required_level = "autonomous")) {
     if (get_verbosity() >= 3) {
       cli::cli_inform("Autonomy level is high - using automatic variable selection")
     }
@@ -43,15 +61,7 @@ prompt_effect_summary_var_selection <- function(df, config) {
     )
     suggested_vars <- suggestions[suggestions$suggested, ]
     if (nrow(suggested_vars) > 0) {
-      var_configs <- list()
-      for (i in seq_len(nrow(suggested_vars))) {
-        var <- suggested_vars[i, ]
-        var_configs[[var$var_name]] <- list(
-          var_name = var$var_name,
-          split_method = var$split_method,
-          split_value = var$split_value
-        )
-      }
+      var_configs <- suggestions_to_var_configs(suggested_vars)
       return(update_config_with_selections(config, var_configs))
     }
     return(config)
@@ -105,7 +115,7 @@ prompt_selection_mode <- function() {
     artma / libs / core / autonomy[should_prompt_user]
   )
 
-  if (!should_prompt_user(required_level = 4)) {
+  if (!should_prompt_user(required_level = "autonomous")) {
     return("auto")
   }
 
@@ -240,16 +250,8 @@ auto_select_effect_summary_vars <- function(df, config) {
   cli::cat_line()
 
   box::use(artma / libs / core / autonomy[should_prompt_user])
-  if (!should_prompt_user(required_level = 4)) {
-    var_configs <- list()
-    for (i in seq_len(nrow(suggested_vars))) {
-      var <- suggested_vars[i, ]
-      var_configs[[var$var_name]] <- list(
-        var_name = var$var_name,
-        split_method = var$split_method,
-        split_value = var$split_value
-      )
-    }
+  if (!should_prompt_user(required_level = "autonomous")) {
+    var_configs <- suggestions_to_var_configs(suggested_vars)
     cli::cli_alert_success("Using {length(var_configs)} suggested variable{?s} (autonomy level: high)")
     return(var_configs)
   }
@@ -271,15 +273,7 @@ auto_select_effect_summary_vars <- function(df, config) {
   }
 
   # Convert suggestions to variable configurations
-  var_configs <- list()
-  for (i in seq_len(nrow(suggested_vars))) {
-    var <- suggested_vars[i, ]
-    var_configs[[var$var_name]] <- list(
-      var_name = var$var_name,
-      split_method = var$split_method,
-      split_value = var$split_value
-    )
-  }
+  var_configs <- suggestions_to_var_configs(suggested_vars)
 
   cli::cli_alert_success("Using {length(var_configs)} suggested variable{?s}")
 
@@ -311,10 +305,11 @@ auto_select_effect_summary_vars <- function(df, config) {
 manual_select_effect_summary_vars <- function(df, config) {
   box::use(
     artma / libs / core / utils[get_verbosity],
-    artma / libs / core / autonomy[should_prompt_user]
+    artma / libs / core / autonomy[should_prompt_user],
+    artma / data / utils[get_reserved_colnames]
   )
 
-  if (!should_prompt_user(required_level = 4)) {
+  if (!should_prompt_user(required_level = "autonomous")) {
     if (get_verbosity() >= 3) {
       cli::cli_inform("Autonomy level is high - skipping manual variable selection")
     }
@@ -330,8 +325,7 @@ manual_select_effect_summary_vars <- function(df, config) {
   }
 
   # Get potential variables (exclude reserved columns)
-  reserved_vars <- c("effect", "se", "study_id", "study_label", "study_size", "sample_size", "dof")
-  potential_vars <- names(config)[!names(config) %in% reserved_vars]
+  potential_vars <- names(config)[!names(config) %in% get_reserved_colnames()]
 
   # Filter to numeric/integer variables that exist in the data
   valid_vars <- character(0)
@@ -448,11 +442,15 @@ specify_variable_split <- function(var_name, df, config) {
     return(NULL)
   }
 
-  # Determine data type
-  data_type <- tryCatch(
-    determine_vector_type(var_data, CONST$DATA_CONFIG$DATA_TYPES),
-    error = function(e) "unknown"
-  )
+  # Determine data type, honoring an explicit config override
+  data_type <- if (!is.null(var_config$data_type) && !is.na(var_config$data_type)) {
+    var_config$data_type
+  } else {
+    tryCatch(
+      determine_vector_type(var_data, CONST$DATA_CONFIG$DATA_TYPES),
+      error = function(e) "unknown"
+    )
+  }
 
   # Display variable summary
   cli::cli_text("Data type: {.val {data_type}}")

@@ -3,8 +3,9 @@
 #' @param config *\[list, optional\]* The data config to check. If `NULL` (default), the data config will be retrieved from the options.
 #' @return *\[logical\]* Whether the data config is valid.
 data_config_is_valid <- function(
-    config = NULL) {
-  config <- if (is.null(config)) getOption("artma.data.config") else config
+  config = NULL
+) {
+  config <- if (is.null(config)) getOption("artma.data.columns", NULL) else config
   # There is potentially room for more checks here
   is.list(config)
 }

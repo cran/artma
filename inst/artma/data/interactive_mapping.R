@@ -27,10 +27,11 @@ format_mapping_display <- function(mapping, required_cols, all_std_cols = NULL) 
 #' @param all_std_cols *\[character\]* All standard column names
 #' @return *\[character\]* User's choice: "accept", "modify", or "skip_optional"
 present_detected_mapping <- function(
-    auto_mapping,
-    df,
-    required_cols,
-    all_std_cols = NULL) {
+  auto_mapping,
+  df,
+  required_cols,
+  all_std_cols = NULL
+) {
   box::use(artma / libs / core / utils[get_verbosity])
 
   if (length(auto_mapping) == 0) {
@@ -131,7 +132,7 @@ interactive_column_mapping <- function(df, auto_mapping = list(), required_only 
   # Track missing required columns
   missing_required <- setdiff(required_cols, names(auto_mapping))
 
-  if (!should_prompt_user(required_level = 4)) {
+  if (!should_prompt_user(required_level = "autonomous")) {
     if (get_verbosity() >= 3) {
       cli::cli_inform("Autonomy level is high - using auto-detected column mappings")
     }
@@ -457,49 +458,6 @@ confirm_column_mapping <- function(mapping, required_cols) {
 }
 
 
-#' @title Save column mapping to options
-#' @description Save the confirmed mapping to the artma options
-#' @param mapping *\[list\]* The column mapping (std_col -> data_col)
-#' @param options_file_name *\[character, optional\]* Options file name
-#' @return *\[invisible\]* NULL
-save_column_mapping_to_options <- function(mapping, options_file_name = NULL) {
-  box::use(artma / libs / core / utils[get_verbosity])
-
-  if (get_verbosity() >= 4) {
-    cli::cli_inform("Saving column mapping to options")
-  }
-
-  # Convert mapping to options format (artma.data.colnames.*)
-  user_input <- list()
-  for (std_col in names(mapping)) {
-    opt_key <- paste0("data.colnames.", std_col)
-    user_input[[opt_key]] <- mapping[[std_col]]
-  }
-
-  # Update options
-  if (!is.null(options_file_name)) {
-    artma::options.modify(
-      user_input = user_input,
-      options_file_name = options_file_name
-    )
-  } else {
-    # Set in current session
-    for (key in names(user_input)) {
-      opt_name <- paste0("artma.", key)
-      options_list <- list()
-      options_list[[opt_name]] <- user_input[[key]]
-      do.call(options, options_list)
-    }
-  }
-
-  if (get_verbosity() >= 3) {
-    cli::cli_alert_success("Column mapping saved")
-  }
-
-  invisible(NULL)
-}
-
-
 #' @title Full interactive column mapping workflow
 #' @description Complete workflow: recognize, interact, confirm, save
 #' @param df *\[data.frame\]* The data frame
@@ -509,17 +467,19 @@ save_column_mapping_to_options <- function(mapping, options_file_name = NULL) {
 #' @param force_interactive *\[logical\]* Force interactive mapping even if all columns recognized
 #' @return *\[list\]* Final column mapping
 column_mapping_workflow <- function(
-    df,
-    auto_mapping = NULL,
-    options_file_name = NULL,
-    min_confidence = 0.7,
-    force_interactive = FALSE) {
+  df,
+  auto_mapping = NULL,
+  options_file_name = NULL,
+  min_confidence = 0.7,
+  force_interactive = FALSE
+) {
   box::use(
     artma / data / column_recognition[
       recognize_columns,
       check_mapping_completeness,
       get_required_column_names
     ],
+    artma / data_config / column_mapping[save_column_mapping_to_options],
     artma / libs / core / utils[get_verbosity]
   )
 
@@ -587,7 +547,6 @@ column_mapping_workflow <- function(
 box::export(
   interactive_column_mapping,
   confirm_column_mapping,
-  save_column_mapping_to_options,
   column_mapping_workflow,
   present_detected_mapping,
   format_mapping_display

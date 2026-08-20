@@ -1,10 +1,11 @@
 box::use(
-  artma / data / compute[compute_optional_columns]
+  testthat[expect_equal, expect_message, expect_no_message, expect_true, test_that]
 )
 
-test_that <- getFromNamespace("test_that", "testthat")
-expect_equal <- getFromNamespace("expect_equal", "testthat")
-expect_true <- getFromNamespace("expect_true", "testthat")
+box::use(
+  artma / data / compute[compute_optional_columns],
+  artma / data / utils[get_reserved_colnames]
+)
 
 computed_config_overrides <- list(
   obs_id = list(var_name = "obs_id", is_computed = TRUE),
@@ -16,22 +17,32 @@ computed_config_overrides <- list(
   precision = list(var_name = "precision", is_computed = TRUE)
 )
 
+# Options every compute_optional_columns test needs: mark the optional columns
+# as computed, skip result persistence, and fix the precision definition.
+local_compute_options <- function(.env = parent.frame()) {
+  withr::local_options(list(
+    "artma.data.columns" = computed_config_overrides,
+    "artma.output.save_results" = FALSE,
+    "artma.calc.precision_type" = "1/SE",
+    "artma.verbose" = 1
+  ), .local_envir = .env)
+}
 
-test_that("compute_optional_columns preserves study labels while normalizing study_id", {
-  df <- data.frame(
+# A three-row frame with a repeated study id (rows 1 and 3 share a study).
+sample_study_df <- function() {
+  data.frame(
     study_id = c("Albeigh (2008)", "Baker (2009)", "Albeigh (2008)"),
     effect = c(0.2, 0.5, 0.1),
     se = c(0.1, 0.2, 0.1),
     n_obs = c(120, 150, 120),
     stringsAsFactors = FALSE
   )
+}
 
-  withr::local_options(list(
-    "artma.data.config" = computed_config_overrides,
-    "artma.output.save_results" = FALSE,
-    "artma.calc.precision_type" = "1/SE",
-    "artma.verbose" = 1
-  ))
+
+test_that("compute_optional_columns preserves study labels while normalizing study_id", {
+  df <- sample_study_df()
+  local_compute_options()
 
   result <- compute_optional_columns(df)
 
@@ -55,12 +66,7 @@ test_that("compute_optional_columns overwrites conflicting existing study_label"
     stringsAsFactors = FALSE
   )
 
-  withr::local_options(list(
-    "artma.data.config" = computed_config_overrides,
-    "artma.output.save_results" = FALSE,
-    "artma.calc.precision_type" = "1/SE",
-    "artma.verbose" = 1
-  ))
+  local_compute_options()
 
   result <- compute_optional_columns(df)
 
@@ -68,3 +74,154 @@ test_that("compute_optional_columns overwrites conflicting existing study_label"
   expect_equal(result$study_id, c(1L, 2L, 1L))
 })
 
+
+test_that("compute_optional_columns takes study_label from a legible study name column when study keys are numeric", {
+  df <- data.frame(
+    study_id = c(1L, 2L, 1L, 3L),
+    study = c("Albeigh (2008)", "Baker (2009)", "Albeigh (2008)", "Clark (2010)"),
+    effect = c(0.2, 0.5, 0.1, 0.3),
+    se = c(0.1, 0.2, 0.1, 0.2),
+    n_obs = c(120, 150, 120, 130),
+    stringsAsFactors = FALSE
+  )
+  local_compute_options()
+
+  result <- compute_optional_columns(df)
+
+  expect_equal(
+    result$study_label,
+    c("Albeigh (2008)", "Baker (2009)", "Albeigh (2008)", "Clark (2010)")
+  )
+  expect_equal(result$study_id, c(1L, 2L, 1L, 3L))
+})
+
+
+test_that("compute_optional_columns keeps numeric study labels when the name column does not align with study ids", {
+  df <- data.frame(
+    study_id = c(1L, 1L, 2L),
+    # Two different names within study 1: not a usable study label source
+    study = c("Albeigh (2008)", "Albeigh (2009)", "Baker (2009)"),
+    effect = c(0.2, 0.5, 0.1),
+    se = c(0.1, 0.2, 0.1),
+    n_obs = c(120, 150, 120),
+    stringsAsFactors = FALSE
+  )
+  local_compute_options()
+
+  result <- compute_optional_columns(df)
+
+  expect_equal(result$study_label, c("1", "1", "2"))
+})
+
+
+test_that("compute_optional_columns ignores legible columns whose names do not look like study names", {
+  df <- data.frame(
+    study_id = c(1L, 2L, 3L),
+    grp_reward = c("cash (low)", "voucher (mid)", "praise (high)"),
+    effect = c(0.2, 0.5, 0.1),
+    se = c(0.1, 0.2, 0.1),
+    n_obs = c(120, 150, 120),
+    stringsAsFactors = FALSE
+  )
+  local_compute_options()
+
+  result <- compute_optional_columns(df)
+
+  expect_equal(result$study_label, c("1", "2", "3"))
+})
+
+
+test_that("compute_optional_columns preserves a user-supplied legible study_label over numeric keys", {
+  df <- data.frame(
+    study_id = c(1L, 2L, 1L),
+    study_label = c("Albeigh (2008)", "Baker (2009)", "Albeigh (2008)"),
+    effect = c(0.2, 0.5, 0.1),
+    se = c(0.1, 0.2, 0.1),
+    n_obs = c(120, 150, 120),
+    stringsAsFactors = FALSE
+  )
+  local_compute_options()
+  withr::local_options(list("artma.verbose" = 2))
+
+  result <- NULL
+  expect_no_message(result <- compute_optional_columns(df))
+
+  expect_equal(
+    result$study_label,
+    c("Albeigh (2008)", "Baker (2009)", "Albeigh (2008)")
+  )
+})
+
+
+test_that("compute_optional_columns recomputes a user-supplied precision column when winsorization is active", {
+  df <- data.frame(
+    study_id = c("Albeigh (2008)", "Baker (2009)", "Albeigh (2008)"),
+    effect = c(0.2, 0.5, 0.1),
+    se = c(0.1, 0.2, 0.1),
+    n_obs = c(120, 150, 120),
+    precision = c(999, 999, 999),
+    stringsAsFactors = FALSE
+  )
+
+  withr::local_options(list("artma.data.winsorization_level" = 0.01))
+  local_compute_options()
+
+  result <- compute_optional_columns(df)
+
+  expect_equal(result$precision, 1 / result$se)
+})
+
+
+test_that("compute_optional_columns keeps a user-supplied precision column when winsorization is disabled", {
+  df <- data.frame(
+    study_id = c("Albeigh (2008)", "Baker (2009)", "Albeigh (2008)"),
+    effect = c(0.2, 0.5, 0.1),
+    se = c(0.1, 0.2, 0.1),
+    n_obs = c(120, 150, 120),
+    precision = c(999, 999, 999),
+    stringsAsFactors = FALSE
+  )
+
+  local_compute_options()
+
+  result <- compute_optional_columns(df)
+
+  expect_equal(result$precision, c(999, 999, 999))
+})
+
+
+test_that("compute_optional_columns does not warn about study_id for valid string labels", {
+  df <- sample_study_df()
+  local_compute_options()
+  withr::local_options(list("artma.verbose" = 2))
+
+  expect_no_message(compute_optional_columns(df))
+})
+
+
+test_that("compute_optional_columns warns about study_id only for genuinely missing values", {
+  df <- data.frame(
+    study_id = c("Study A", NA, "", "Study B"),
+    effect = c(0.2, 0.5, 0.1, 0.3),
+    se = c(0.1, 0.2, 0.1, 0.2),
+    n_obs = c(120, 150, 120, 130),
+    stringsAsFactors = FALSE
+  )
+  local_compute_options()
+  withr::local_options(list("artma.verbose" = 2))
+
+  expect_message(compute_optional_columns(df), "Found 2 invalid or missing study IDs")
+})
+
+
+test_that("get_reserved_colnames covers every column compute_optional_columns can add", {
+  df <- sample_study_df()
+  local_compute_options()
+
+  cols_before <- names(df)
+  result <- compute_optional_columns(df)
+  cols_added <- setdiff(names(result), cols_before)
+
+  expect_true(length(cols_added) > 0)
+  expect_true(all(cols_added %in% get_reserved_colnames()))
+})

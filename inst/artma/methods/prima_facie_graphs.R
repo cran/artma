@@ -7,12 +7,14 @@ prima_facie_graphs <- function(df) {
   box::use(
     artma / data_config / read[get_data_config],
     artma / libs / core / utils[get_verbosity],
-    artma / libs / core / validation[assert, validate, validate_columns],
+    artma / libs / core / validation[validate, validate_columns],
     artma / libs / core / autonomy[should_prompt_user],
+    artma / modules / runtime_methods[new_method_result],
     artma / options / index[get_option_group],
+    artma / options / resolver[opt_spec, resolve_options],
     artma / variable / detection[detect_variable_groups],
     artma / visualization / options[get_visualization_options],
-    artma / visualization / export[save_plot, build_export_filename, ensure_export_dir]
+    artma / visualization / export[export_named_plots, preview_plot]
   )
 
   validate(is.data.frame(df))
@@ -26,25 +28,29 @@ prima_facie_graphs <- function(df) {
   opt <- get_option_group("artma.methods.prima_facie_graphs")
   vis <- get_visualization_options()
 
-  graph_type <- opt$type %||% "automatic"
-  hide_outliers <- opt$hide_outliers %||% TRUE
-  n_bins <- opt$n_bins %||% 80L
-  legend_font_size <- opt$legend_font_size %||% 14
+  resolved <- resolve_options(opt, list(
+    graph_type = opt_spec(
+      default = "automatic", type = "character", from = "type",
+      constraint = function(x) x %in% c("density", "histogram", "automatic"),
+      constraint_msg = "type must be one of: density, histogram, automatic"
+    ),
+    hide_outliers = opt_spec(default = TRUE, type = "logical"),
+    n_bins = opt_spec(
+      default = 80L, type = "numeric",
+      constraint = function(x) x > 0,
+      constraint_msg = "n_bins must be positive"
+    ),
+    legend_font_size = opt_spec(default = 14, type = "numeric")
+  ))
+
+  graph_type <- resolved$graph_type
+  hide_outliers <- resolved$hide_outliers
+  n_bins <- resolved$n_bins
+  legend_font_size <- resolved$legend_font_size
   theme_name <- vis$theme
   export_graphics <- vis$export_graphics
   export_path <- vis$export_path
   graph_scale <- vis$graph_scale
-
-  validate(
-    is.character(graph_type),
-    is.logical(hide_outliers),
-    is.numeric(n_bins), n_bins > 0,
-    is.numeric(legend_font_size)
-  )
-  assert(
-    graph_type %in% c("density", "histogram", "automatic"),
-    "type must be one of: density, histogram, automatic"
-  )
 
   groups <- resolve_groups(df, config, opt)
 
@@ -54,7 +60,7 @@ prima_facie_graphs <- function(df) {
         "No suitable variable groups found for prima facie graphs. Skipping."
       )
     }
-    return(invisible(list(plots = list(), groups = character(0))))
+    return(invisible(new_method_result(meta = list(groups = character(0)))))
   }
 
   plots <- list()
@@ -94,7 +100,7 @@ prima_facie_graphs <- function(df) {
     if (get_verbosity() >= 2) {
       cli::cli_alert_warning("No prima facie graphs could be created.")
     }
-    return(invisible(list(plots = list(), groups = character(0))))
+    return(invisible(new_method_result(meta = list(groups = character(0)))))
   }
 
   if (get_verbosity() >= 3) {
@@ -105,22 +111,26 @@ prima_facie_graphs <- function(df) {
           "Displaying plot {i}/{length(plots)}: {.field {names(plots)[i]}}"
         )
       }
-      suppressWarnings(print(plots[[i]])) # nolint: undesirable_function_linter.
+      preview_plot(plots[[i]])
     }
   }
 
   if (export_graphics) {
-    export_prima_facie_plots(
+    export_named_plots(
       plots = plots,
-      group_names = group_names,
+      base_name = "prima_facie",
       export_path = export_path,
-      graph_scale = graph_scale
+      graph_scale = graph_scale,
+      names = group_names,
+      width = 800,
+      height = 666
     )
   }
 
-  result <- list(plots = plots, groups = group_names)
-  class(result) <- c("artma_prima_facie_graphs", class(result))
-  invisible(result)
+  invisible(new_method_result(
+    plots = plots,
+    meta = list(groups = group_names)
+  ))
 }
 
 
@@ -178,7 +188,7 @@ resolve_groups <- function(df, config, opt) {
   }
 
   # Interactive selection at low autonomy levels
-  if (should_prompt_user(required_level = 3) && length(group_descriptors) > 1) {
+  if (should_prompt_user(required_level = "balanced") && length(group_descriptors) > 1) {
     box::use(artma / interactive / prima_facie_graphs[prompt_group_selection])
     selected_ids <- prompt_group_selection(df, config, group_descriptors)
     group_descriptors <- Filter(
@@ -218,12 +228,16 @@ build_group_column <- function(df, group_vars, config) {
 
   # Filter to variables that exist in df
   group_vars <- intersect(group_vars, names(df))
-  if (length(group_vars) == 0) return(NULL)
+  if (length(group_vars) == 0) {
+    return(NULL)
+  }
 
   get_verbose <- function(var_name) {
     if (!is.null(config) && var_name %in% names(config)) {
       vn <- config[[var_name]]$var_name_verbose
-      if (!is.null(vn) && nzchar(vn)) return(vn)
+      if (!is.null(vn) && nzchar(vn)) {
+        return(vn)
+      }
     }
     gsub("_", " ", var_name)
   }
@@ -231,10 +245,12 @@ build_group_column <- function(df, group_vars, config) {
   if (length(group_vars) > 1) {
     # Multiple columns (dummy group): pick the column name with max value per row
     var_data <- df[, group_vars, drop = FALSE]
-    if (!all(vapply(var_data, is.numeric, logical(1)))) return(NULL)
+    if (!all(vapply(var_data, is.numeric, logical(1)))) {
+      return(NULL)
+    }
     verbose_names <- vapply(group_vars, get_verbose, character(1))
     colnames(var_data) <- verbose_names
-    group_col <- apply(var_data, 1, function(x) names(x)[which.max(x)])
+    group_col <- colnames(var_data)[max.col(as.matrix(var_data), ties.method = "first")]
     return(group_col)
   }
 
@@ -252,7 +268,7 @@ build_group_column <- function(df, group_vars, config) {
       return(paste(verbose_name, "=", as.integer(col)))
     }
     med <- stats::median(col, na.rm = TRUE)
-    direction <- vapply(col, function(x) if (x >= med) ">=" else "<", character(1))
+    direction <- c("<", ">=")[(col >= med) + 1L]
     return(paste(verbose_name, direction, round(med, 2)))
   }
 
@@ -339,48 +355,15 @@ create_prima_facie_plot <- function(df, group_col, group_name, graph_type,
 }
 
 
-#' Export prima facie plots to files
-#'
-#' @param plots *\[list\]* Named list of ggplot objects
-#' @param group_names *\[character\]* Vector of group base names
-#' @param export_path *\[character\]* Directory path
-#' @param graph_scale *\[numeric\]* Scale factor
-#'
-#' @return NULL (invisibly)
-#' @keywords internal
-export_prima_facie_plots <- function(plots, group_names, export_path, graph_scale) {
-  box::use(
-    artma / visualization / export[save_plot, build_export_filename, ensure_export_dir]
-  )
-
-  ensure_export_dir(export_path)
-
-  for (i in seq_along(plots)) {
-    filename <- build_export_filename("prima_facie", group_names[i])
-    full_path <- file.path(export_path, filename)
-
-    save_plot(
-      plot = plots[[i]],
-      path = full_path,
-      width = 800,
-      height = 666,
-      scale = graph_scale
-    )
-  }
-
-  invisible(NULL)
-}
-
-
 box::use(
-  artma / libs / infrastructure / cache[cache_cli_runner],
-  artma / data / cache_signatures[build_data_cache_signature]
+  artma / modules / runtime_methods[register_runtime_method]
 )
 
-run <- cache_cli_runner(
+run <- register_runtime_method(
   prima_facie_graphs,
   stage = "prima_facie_graphs",
-  key_builder = function(...) build_data_cache_signature()
+  description = "Density and histogram overlays of the effect by detected category",
+  required_columns = "effect"
 )
 
 box::export(prima_facie_graphs, run)

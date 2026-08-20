@@ -7,6 +7,387 @@ box::use(
 # Modules can opt out of runtime registration by setting this flag to FALSE.
 RUNTIME_METHOD_MARKER <- ".__runtime_method__"
 
+#' @title Estimates schema
+#' @description
+#' The fixed column set of the `estimates` slot, in export order. Every runtime
+#' method that reports numbers uses this one schema, so a downstream consumer
+#' can bind results across methods without knowing which method produced them.
+ESTIMATES_COLUMNS <- c(
+  "method", "model", "term", "estimate", "std_error", "statistic",
+  "p_value", "conf_low", "conf_high", "n_obs", "n_clusters", "note"
+)
+
+# The cast applied to each schema column, which doubles as the source of its
+# typed `NA` when a method does not fill the column.
+ESTIMATES_CASTS <- list(
+  method = as.character,
+  model = as.character,
+  term = as.character,
+  estimate = as.numeric,
+  std_error = as.numeric,
+  statistic = as.numeric,
+  p_value = as.numeric,
+  conf_low = as.numeric,
+  conf_high = as.numeric,
+  n_obs = as.integer,
+  n_clusters = as.integer,
+  note = as.character
+)
+
+#' @title Build a tidy estimates frame
+#' @description
+#' Normalise a method's numeric results into the shared long-format schema of
+#' the `estimates` slot. Columns a method does not fill are added as typed
+#' `NA`s, and the columns come back in the canonical order.
+#'
+#' The schema is:
+#'
+#' * `method`: the runtime method name (`"linear_tests"`).
+#' * `model`: the sub-model within the method (`"ols"`, `"fixed_effects"`), or
+#'   `NA` for a method with a single model.
+#' * `term`: what is being estimated (`"effect"`, `"publication_bias"`).
+#' * `estimate`, `std_error`, `statistic`, `p_value`: the point estimate and
+#'   its inference, all unrounded.
+#' * `conf_low`, `conf_high`: the confidence interval bounds, unrounded.
+#' * `n_obs`, `n_clusters`: the observation and cluster counts behind the row.
+#' * `note`: a short free-text caveat (`NA` when there is nothing to flag).
+#'
+#' Values are never rounded or formatted here: rounding is a display concern
+#' and belongs to the `tables` slot alone.
+#'
+#' @param ... Either a single `data.frame` holding a subset of the schema
+#'   columns, or named vectors passed as `data.frame()` arguments (scalars are
+#'   recycled). Columns outside the schema are an error; put method-specific
+#'   extras in `meta`.
+#' @return *\[data.frame\]* A frame with exactly the schema columns, in order.
+new_estimates <- function(...) {
+  args <- list(...)
+
+  if (length(args) == 0L) {
+    df <- data.frame()
+  } else if (length(args) == 1L && is.data.frame(args[[1L]])) {
+    df <- args[[1L]]
+  } else {
+    df <- data.frame(..., stringsAsFactors = FALSE)
+  }
+
+  unknown <- setdiff(names(df), ESTIMATES_COLUMNS)
+  if (length(unknown) > 0L) {
+    cli::cli_abort(c(
+      "Unknown column{?s} in an {.field estimates} frame: {.val {unknown}}.",
+      "i" = "The schema is fixed: {.val {ESTIMATES_COLUMNS}}.",
+      "i" = "Anything outside it belongs in {.field meta}."
+    ))
+  }
+
+  n_rows <- nrow(df)
+  columns <- lapply(ESTIMATES_COLUMNS, function(column) {
+    cast <- ESTIMATES_CASTS[[column]]
+    values <- df[[column]]
+    if (is.null(values)) rep(cast(NA), n_rows) else cast(values)
+  })
+  names(columns) <- ESTIMATES_COLUMNS
+
+  as.data.frame(columns, stringsAsFactors = FALSE, row.names = NULL)
+}
+
+#' @title Standard runtime method return contract
+#' @description
+#' Build the value every runtime method returns. The contract has four slots:
+#'
+#' * `tables`: a named list of `data.frame`s destined for export. These are the
+#'   display artifacts: rounded, formatted, laid out for a human reader. The
+#'   exporter walks this list; keys become filename suffixes (see
+#'   `export_method_result`).
+#' * `estimates`: a single long-format `data.frame` of the method's unrounded
+#'   numbers, in the shared schema built by `new_estimates()`. This is the
+#'   machine-readable artifact, exported as `<method>.csv`; whatever is passed
+#'   here is normalised through `new_estimates()`. `NULL` for a method that
+#'   reports no estimates (a plot-only method).
+#' * `plots`: a named list of plot objects (for example `ggplot`s) for
+#'   programmatic access and printing. Graphics files are written by the method
+#'   during execution, not by this contract.
+#' * `meta`: a named list of anything else a downstream consumer needs (the BMA
+#'   model, fit parameters, skip reasons, auxiliary frames, and so on).
+#'
+#' Two `meta` keys are reserved, and they mean different things:
+#'
+#' * `skip_reason`: a single, non-empty string saying why the method as a whole
+#'   did not run (a missing optional package, too few observations). Absent or
+#'   `NULL` means the method ran. Consumers such as the HTML report render the
+#'   whole section as skipped when it is present, so never use it for a partial
+#'   skip.
+#' * `skipped_models`: a named list of sub-models the method could not fit,
+#'   each a `list(label =, reason =)`. The method itself still ran, so this
+#'   never suppresses the section. Use `NULL` or `list()` when nothing was
+#'   skipped.
+#'
+#' @param tables *\[list\]* Named list of `data.frame`s to export.
+#' @param plots *\[list\]* Named list of plot objects.
+#' @param meta *\[list\]* Named list of method-specific extras. `skip_reason`
+#'   and `skipped_models`, when present, must follow the shapes above.
+#' @param estimates *\[data.frame, optional\]* The method's unrounded numbers in
+#'   the shared schema (see `new_estimates()`), or `NULL`.
+#' @param class *\[character, optional\]* Extra S3 class(es) to prepend, used by
+#'   methods that ship a bespoke print method.
+#' @return *\[list\]* A list with `tables`, `estimates`, `plots`, and `meta`
+#'   elements.
+new_method_result <- function(tables = list(), plots = list(), meta = list(),
+                              estimates = NULL, class = NULL) {
+  if (!is.list(tables) || !is.list(plots) || !is.list(meta)) {
+    cli::cli_abort("`tables`, `plots`, and `meta` must all be lists.")
+  }
+
+  if (!is.null(estimates)) {
+    if (!is.data.frame(estimates)) {
+      cli::cli_abort(c(
+        "`estimates` must be a {.cls data.frame} in the shared schema, or `NULL`.",
+        "i" = "Build it with {.fn new_estimates}."
+      ))
+    }
+    estimates <- new_estimates(estimates)
+  }
+
+  skip_reason <- meta$skip_reason
+  if (!is.null(skip_reason) &&
+    (!is.character(skip_reason) || length(skip_reason) != 1L || is.na(skip_reason))) {
+    cli::cli_abort(c(
+      "`meta$skip_reason` must be a single string, or `NULL` when the method ran.",
+      "i" = "Use `meta$skipped_models` for a named list of skipped sub-models."
+    ))
+  }
+
+  skipped_models <- meta$skipped_models
+  if (!is.null(skipped_models) && !is.list(skipped_models)) {
+    cli::cli_abort(c(
+      "`meta$skipped_models` must be a named list of `list(label =, reason =)`, or `NULL`.",
+      "i" = "Use `meta$skip_reason` for a scalar reason the whole method was skipped."
+    ))
+  }
+
+  result <- list(tables = tables, estimates = estimates, plots = plots, meta = meta)
+
+  if (!is.null(class)) {
+    class(result) <- c(class, class(result))
+  }
+
+  result
+}
+
+#' @title Runtime method metadata attribute
+#' @description Name of the attribute that carries a method's declarative
+#'   metadata on its exported `run` wrapper.
+METHOD_META_ATTR <- "artma_method_meta"
+
+#' @title Register a runtime method
+#' @description
+#' Wrap a method implementation in the shared caching layer, attach the method's
+#' declarative metadata, and return the `run` function every method file
+#' exports. This replaces the per-file registration trailer that previously
+#' duplicated the `cache_cli_runner` wiring across all method modules.
+#'
+#' The metadata drives the orchestrator in `invoke_runtime_methods()`, and,
+#' together with `description`, the table printed by `artma::methods_list()`:
+#'
+#' * `description`: a one-line summary of what the method does, shown by
+#'   `artma::methods_list()`. Every method registers one.
+#' * `depends_on`: names of methods that must run before this one. The
+#'   orchestrator topologically sorts by these edges and passes each upstream
+#'   result to the dependent as a `<dependency>_result` argument (for example
+#'   a `depends_on = "bma"` method receives `bma_result`).
+#' * `required_columns`: columns that must be present in the data frame. A
+#'   method whose columns are missing is skipped with an explanation instead of
+#'   aborting the run.
+#' * `suggests`: optional packages the method needs. A method whose suggested
+#'   packages are not installed is skipped (with an interactive install offer);
+#'   this is the single, declarative gate for optional-package dependencies.
+#' * `opt_in`: when `TRUE`, the method is left out of `methods = "all"` and must
+#'   be requested by name. Use it for methods too expensive to run by default.
+#'
+#' Disk caching is opt-in. Only the expensive stages (BMA, RoBMA) set
+#' `cached = TRUE`; the Elliott simulation keeps its own narrow cache in
+#' `calc/methods/elliott_cache.R`. Every other method runs uncached: for a
+#' method that recomputes in well under a second, building the cache signature
+#' (a fingerprint of the whole `inst/artma` source tree plus the full option
+#' group) and revalidating recorded output files costs more than the
+#' recomputation it would save.
+#'
+#' @param impl *\[function\]* The method implementation (its `run` worker).
+#' @param stage *\[character\]* Stage label used for cache keys and the cache
+#'   hit notice. Conventionally matches the implementation's name.
+#' @param description *\[character, optional\]* One-line summary of what the
+#'   method does, shown by `artma::methods_list()`. Keep it to a single line;
+#'   the printed table truncates it to the console width.
+#' @param depends_on *\[character, optional\]* Names of methods this one depends
+#'   on. Defaults to no dependencies.
+#' @param required_columns *\[character, optional\]* Columns the method needs in
+#'   the data frame. Defaults to none.
+#' @param suggests *\[character, optional\]* Optional packages the method needs.
+#'   Defaults to none.
+#' @param opt_in *\[logical, optional\]* If `TRUE`, exclude the method from
+#'   `methods = "all"`; it then runs only when named explicitly. Defaults to
+#'   `FALSE`.
+#' @param cached *\[logical, optional\]* If `TRUE`, wrap the method in the full
+#'   disk-caching stack (memoise, cache signature, package source fingerprint,
+#'   output-file revalidation). Defaults to `FALSE`, which returns the
+#'   implementation unwrapped so cheap methods carry no caching overhead.
+#' @param label *\[character, optional\]* Human-readable display label. Defaults
+#'   to `stage`.
+#' @param key_builder *\[function, optional\]* Cache signature builder, used only
+#'   when `cached = TRUE`. Defaults to the standard data cache signature.
+#'   Whatever it returns, the method's own source hash is appended, so editing a
+#'   method file invalidates that method's cache without disturbing the others.
+#' @param ... *\[any\]* Extra arguments forwarded to `cache_cli_runner` when
+#'   `cached = TRUE`; ignored otherwise.
+#' @return *\[function\]* The `run` wrapper (cached when `cached = TRUE`, the bare
+#'   implementation otherwise), carrying the method metadata in its
+#'   `artma_method_meta` attribute.
+register_runtime_method <- function(impl, stage,
+                                    description = NA_character_,
+                                    depends_on = character(),
+                                    required_columns = character(),
+                                    suggests = character(),
+                                    opt_in = FALSE,
+                                    cached = FALSE,
+                                    label = NULL,
+                                    key_builder = NULL, ...) {
+  if (isTRUE(cached)) {
+    box::use(
+      artma / libs / infrastructure / cache[cache_cli_runner],
+      artma / libs / infrastructure / source_fingerprint[method_source_hash],
+      artma / data / cache_signatures[build_data_cache_signature]
+    )
+
+    base_key_builder <- key_builder
+    if (is.null(base_key_builder)) {
+      base_key_builder <- function(...) build_data_cache_signature()
+    }
+
+    # The data frame and any upstream `<dependency>_result` reach the cache key
+    # as ordinary call arguments, which `memoise` hashes; the signature adds the
+    # inputs that are not arguments (options, data source, package source).
+    signature_builder <- function(...) {
+      signature <- base_key_builder(...)
+      if (!is.list(signature)) {
+        signature <- list(value = signature)
+      }
+      c(signature, list(method_source = method_source_hash(stage)))
+    }
+
+    run <- cache_cli_runner(impl, stage = stage, key_builder = signature_builder, ...)
+  } else {
+    # Cheap methods run uncached: the bare implementation is the `run` wrapper.
+    run <- impl
+  }
+
+  attr(run, METHOD_META_ATTR) <- list(
+    stage = stage,
+    label = if (is.null(label)) stage else label,
+    description = as.character(description)[1L],
+    depends_on = as.character(depends_on),
+    required_columns = as.character(required_columns),
+    suggests = as.character(suggests),
+    opt_in = isTRUE(opt_in)
+  )
+
+  run
+}
+
+#' @title Read a runtime method's declarative metadata
+#' @description Return the metadata attached to a method's `run` wrapper,
+#'   filling in defaults for methods that predate declarative registration.
+#' @param run_fn *\[function\]* A method's exported `run` wrapper.
+#' @param name *\[character, optional\]* Method name, used as the default stage
+#'   and label when the wrapper carries no metadata.
+#' @return *\[list\]* A list with `stage`, `label`, `description`,
+#'   `depends_on`, `required_columns`, `suggests`, and `opt_in`.
+get_method_metadata <- function(run_fn, name = NULL) {
+  meta <- attr(run_fn, METHOD_META_ATTR, exact = TRUE)
+  if (is.null(meta)) {
+    meta <- list()
+  }
+
+  defaults <- list(
+    stage = name %||% NA_character_,
+    label = name %||% NA_character_,
+    description = NA_character_,
+    depends_on = character(),
+    required_columns = character(),
+    suggests = character(),
+    opt_in = FALSE
+  )
+
+  utils::modifyList(defaults, meta)
+}
+
+#' @title Topologically sort methods by their declared dependencies
+#' @description
+#' Order `method_names` so that every method runs after the methods it depends
+#' on. Dependencies pointing outside `method_names` are ignored (the dependent
+#' runs standalone). Ties preserve the input order, keeping the sort stable.
+#' Aborts when the dependency graph contains a cycle.
+#' @param method_names *\[character\]* Methods to order (in their base order).
+#' @param deps *\[list, optional\]* Named list mapping a method name to the
+#'   character vector of methods it depends on.
+#' @return *\[character\]* `method_names` in dependency-respecting order.
+topo_sort_methods <- function(method_names, deps = list()) {
+  ordered <- character()
+  remaining <- method_names
+
+  while (length(remaining) > 0L) {
+    progressed <- FALSE
+    for (name in remaining) {
+      prereqs <- intersect(deps[[name]] %||% character(), method_names)
+      if (all(prereqs %in% ordered)) {
+        ordered <- c(ordered, name)
+        remaining <- remaining[remaining != name]
+        progressed <- TRUE
+        break
+      }
+    }
+    if (!progressed) {
+      cli::cli_abort(c(
+        "x" = "Cyclic method dependencies detected.",
+        "i" = "Methods involved in the cycle: {.val {remaining}}"
+      ))
+    }
+  }
+
+  ordered
+}
+
+#' @title Columns a method requires but the data frame lacks
+#' @param df *\[data.frame\]* The prepared data frame.
+#' @param required_columns *\[character\]* Columns the method declares it needs.
+#' @return *\[character\]* The missing column names (empty when all are present).
+missing_required_columns <- function(df, required_columns) {
+  if (length(required_columns) == 0L) {
+    return(character())
+  }
+  setdiff(as.character(required_columns), colnames(df))
+}
+
+#' @title Suggested packages a method needs but are not installed
+#' @param suggests *\[character\]* Optional packages the method declares.
+#' @param is_installed *\[function, optional\]* Predicate testing whether a
+#'   package is installed. Injectable for testing; defaults to
+#'   `requireNamespace`.
+#' @return *\[character\]* The missing package names (empty when all present).
+missing_suggested_packages <- function(suggests, is_installed = NULL) {
+  if (length(suggests) == 0L) {
+    return(character())
+  }
+  if (is.null(is_installed)) {
+    # suppressMessages: requireNamespace(quietly = TRUE) still lets through
+    # namespace-loading messages from a suggested package's own dependencies
+    # (e.g. RoBMA lazily loading runjags), which have no user-actionable
+    # content and only fire once per session anyway.
+    is_installed <- function(pkg) suppressMessages(requireNamespace(pkg, quietly = TRUE))
+  }
+  suggests <- as.character(suggests)
+  suggests[!vapply(suggests, function(pkg) isTRUE(is_installed(pkg)), logical(1))]
+}
+
 module_has_run <- function(module) {
   is.function(module[["run"]])
 }
@@ -45,9 +426,10 @@ module_should_be_runtime_method <- function(module, module_name = NULL, marker =
 }
 
 gather_runtime_modules <- function(
-    modules,
-    include_predicate,
-    excluded_modules = NULL) {
+  modules,
+  include_predicate,
+  excluded_modules = NULL
+) {
   if (length(modules) == 0) {
     return(list(runtime = modules, skipped = character()))
   }
@@ -74,9 +456,10 @@ gather_runtime_modules <- function(
 }
 
 get_runtime_method_modules <- function(
-    modules_dir = PATHS$DIR_METHODS,
-    include_predicate = module_should_be_runtime_method,
-    excluded_modules = NULL) {
+  modules_dir = PATHS$DIR_METHODS,
+  include_predicate = module_should_be_runtime_method,
+  excluded_modules = NULL
+) {
   modules <- crawl_and_import_modules(modules_dir)
   split_modules <- gather_runtime_modules(modules, include_predicate, excluded_modules)
   runtime_modules <- split_modules$runtime
@@ -93,7 +476,16 @@ get_runtime_method_modules <- function(
 }
 
 box::export(
+  ESTIMATES_COLUMNS,
+  get_method_metadata,
   get_runtime_method_modules,
+  METHOD_META_ATTR,
+  missing_required_columns,
+  missing_suggested_packages,
   module_should_be_runtime_method,
-  RUNTIME_METHOD_MARKER
+  new_estimates,
+  new_method_result,
+  register_runtime_method,
+  RUNTIME_METHOD_MARKER,
+  topo_sort_methods
 )

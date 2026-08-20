@@ -6,10 +6,12 @@
 funnel_plot <- function(df) {
   box::use(
     artma / libs / core / utils[get_verbosity],
-    artma / libs / core / validation[assert, validate, validate_columns],
+    artma / libs / core / validation[validate, validate_columns],
+    artma / modules / runtime_methods[new_method_result],
     artma / options / index[get_option_group],
+    artma / options / resolver[opt_spec, resolve_options],
     artma / visualization / options[get_visualization_options],
-    artma / visualization / export[save_plot, build_export_filename, ensure_export_dir]
+    artma / visualization / export[export_named_plots, preview_plot]
   )
 
   validate(is.data.frame(df))
@@ -22,32 +24,31 @@ funnel_plot <- function(df) {
   opt <- get_option_group("artma.methods.funnel_plot")
   vis <- get_visualization_options()
 
-  effect_proximity <- opt$effect_proximity %||% 0.2
-  maximum_precision <- opt$maximum_precision %||% 0.2
-  precision_to_log <- opt$precision_to_log %||% FALSE
-  use_study_medians <- opt$use_study_medians %||% FALSE
-  add_zero <- opt$add_zero %||% TRUE
+  resolved <- resolve_options(opt, list(
+    effect_proximity = opt_spec(
+      default = 0.2, type = "numeric",
+      constraint = function(x) x >= 0 && x <= 1,
+      constraint_msg = "effect_proximity must be between 0 and 1"
+    ),
+    maximum_precision = opt_spec(
+      default = 0.2, type = "numeric",
+      constraint = function(x) x >= 0 && x <= 1,
+      constraint_msg = "maximum_precision must be between 0 and 1"
+    ),
+    precision_to_log = opt_spec(default = FALSE, type = "logical"),
+    use_study_medians = opt_spec(default = FALSE, type = "logical"),
+    add_zero = opt_spec(default = TRUE, type = "logical")
+  ))
+
+  effect_proximity <- resolved$effect_proximity
+  maximum_precision <- resolved$maximum_precision
+  precision_to_log <- resolved$precision_to_log
+  use_study_medians <- resolved$use_study_medians
+  add_zero <- resolved$add_zero
   theme_name <- vis$theme
   export_graphics <- vis$export_graphics
   export_path <- vis$export_path
   graph_scale <- vis$graph_scale
-
-  validate(
-    is.numeric(effect_proximity),
-    is.numeric(maximum_precision),
-    is.logical(precision_to_log),
-    is.logical(use_study_medians),
-    is.logical(add_zero)
-  )
-
-  assert(
-    effect_proximity >= 0 && effect_proximity <= 1,
-    "effect_proximity must be between 0 and 1"
-  )
-  assert(
-    maximum_precision >= 0 && maximum_precision <= 1,
-    "maximum_precision must be between 0 and 1"
-  )
 
   if (use_study_medians) {
     validate_columns(df, c("study_id"))
@@ -61,17 +62,29 @@ funnel_plot <- function(df) {
 
   filtered_df <- filter_result$data
   n_outliers <- filter_result$n_outliers
+  n_total <- nrow(df)
+  pct_filtered <- if (n_total > 0) round(100 * n_outliers / n_total) else 0L
 
   if (nrow(filtered_df) == 0) {
     if (get_verbosity() >= 2) {
-      cli::cli_alert_warning("All observations filtered as outliers. Skipping funnel plot.")
+      cli::cli_alert_warning("All {n_total} observations filtered as outliers. Skipping funnel plot.")
     }
-    return(invisible(list(
-      plot = NULL,
-      n_points = 0L,
-      n_outliers_removed = n_outliers,
-      used_study_medians = use_study_medians
+    return(invisible(new_method_result(
+      plots = list(funnel_plot = NULL),
+      meta = list(
+        n_points = 0L,
+        n_outliers_removed = n_outliers,
+        pct_filtered = pct_filtered,
+        used_study_medians = use_study_medians
+      ),
+      class = "artma_funnel_plot"
     )))
+  }
+
+  if (n_outliers > 0 && get_verbosity() >= 2) {
+    cli::cli_alert_info(
+      "{n_outliers} of {n_total} observations ({pct_filtered}%) filtered as outliers"
+    )
   }
 
   plot_data <- if (use_study_medians) {
@@ -87,38 +100,47 @@ funnel_plot <- function(df) {
     theme_name = theme_name
   )
 
+  subtitle_text <- if (n_outliers > 0) {
+    sprintf("%d of %d observations filtered as outliers (%d%%)", n_outliers, n_total, pct_filtered)
+  } else {
+    NULL
+  }
+
   plot <- create_funnel_plot(
     df = plot_data,
     tick_info = tick_info,
     theme_name = theme_name,
     precision_to_log = precision_to_log,
-    use_study_medians = use_study_medians
+    use_study_medians = use_study_medians,
+    subtitle_text = subtitle_text
   )
 
   if (get_verbosity() >= 3) {
     cli::cli_h3("Funnel Plot: Effect vs Precision")
-    if (n_outliers > 0) {
-      cli::cli_alert_info("{n_outliers} outlier{?s} removed")
-    }
-    suppressWarnings(print(plot)) # nolint: undesirable_function_linter.
+    preview_plot(plot)
   }
 
   if (export_graphics) {
-    export_funnel_plot(
-      plot = plot,
+    export_named_plots(
+      plots = list(effect_precision = plot),
+      base_name = "funnel_plot",
       export_path = export_path,
-      graph_scale = graph_scale
+      graph_scale = graph_scale,
+      width = 800,
+      height = 736
     )
   }
 
-  result <- list(
-    plot = plot,
-    n_points = nrow(plot_data),
-    n_outliers_removed = n_outliers,
-    used_study_medians = use_study_medians
-  )
-  class(result) <- c("artma_funnel_plot", class(result))
-  invisible(result)
+  invisible(new_method_result(
+    plots = list(funnel_plot = plot),
+    meta = list(
+      n_points = nrow(plot_data),
+      n_outliers_removed = n_outliers,
+      pct_filtered = pct_filtered,
+      used_study_medians = use_study_medians
+    ),
+    class = "artma_funnel_plot"
+  ))
 }
 
 
@@ -187,13 +209,14 @@ aggregate_study_medians <- function(df) {
   validate("study_id" %in% names(df))
 
   studies <- unique(df$study_id)
+  study_rows <- unname(split(seq_len(nrow(df)), match(df$study_id, studies)))
 
-  result <- lapply(studies, function(sid) {
-    study_data <- df[df$study_id == sid, , drop = FALSE]
-    median_effect <- stats::median(study_data$effect, na.rm = TRUE)
+  result <- lapply(study_rows, function(rows) {
+    study_effects <- df$effect[rows]
+    median_effect <- stats::median(study_effects, na.rm = TRUE)
 
-    closest_idx <- which.min(abs(study_data$effect - median_effect))
-    median_precision <- study_data$precision[closest_idx]
+    closest_idx <- which.min(abs(study_effects - median_effect))
+    median_precision <- df$precision[rows][closest_idx]
 
     data.frame(
       effect = median_effect,
@@ -220,7 +243,10 @@ aggregate_study_medians <- function(df) {
 #' @return *\[list\]* With elements: ticks (numeric), tick_colors (character)
 #' @keywords internal
 generate_funnel_ticks <- function(bounds, mean_effect, add_zero, theme_name) {
-  box::use(artma / visualization / colors[get_vline_color])
+  box::use(
+    artma / visualization / colors[get_vline_color],
+    artma / visualization / ticks[resolve_tick_interval, generate_regular_ticks]
+  )
 
   lower_bound <- bounds[1]
   upper_bound <- bounds[2]
@@ -232,22 +258,22 @@ generate_funnel_ticks <- function(bounds, mean_effect, add_zero, theme_name) {
     ticks <- c(ticks, 0)
   }
 
-  interval <- determine_tick_interval(range_size)
+  interval <- resolve_tick_interval(
+    range_size,
+    breakpoints = c(1, 5, 20, 50, 100),
+    intervals = c(0.2, 1, 5, 10, 20),
+    fallback = 50
+  )
   min_distance <- interval / 5
 
-  start_tick <- ceiling(lower_bound / interval) * interval
-
-  current_tick <- start_tick
-  while (current_tick < upper_bound) {
-    far_from_lower <- abs(current_tick - lower_bound) >= min_distance
-    far_from_upper <- abs(current_tick - upper_bound) >= min_distance
-    not_duplicate <- !(current_tick %in% ticks)
-
-    if (far_from_lower && far_from_upper && not_duplicate) {
-      ticks <- c(ticks, current_tick)
-    }
-    current_tick <- current_tick + interval
-  }
+  regular_ticks <- generate_regular_ticks(
+    lower = lower_bound,
+    upper = upper_bound,
+    interval = interval,
+    edge_distance = min_distance,
+    upper_inclusive = FALSE
+  )
+  ticks <- c(ticks, regular_ticks)
 
   ticks <- sort(unique(c(ticks, mean_effect)))
 
@@ -265,31 +291,6 @@ generate_funnel_ticks <- function(bounds, mean_effect, add_zero, theme_name) {
 }
 
 
-#' Determine appropriate tick interval based on data range
-#'
-#' @param range_size *\[numeric\]* The range of data values
-#' @return *\[numeric\]* Appropriate tick interval
-#' @keywords internal
-determine_tick_interval <- function(range_size) {
-  if (range_size <= 1) {
-    return(0.2)
-  }
-  if (range_size <= 5) {
-    return(1)
-  }
-  if (range_size <= 20) {
-    return(5)
-  }
-  if (range_size <= 50) {
-    return(10)
-  }
-  if (range_size <= 100) {
-    return(20)
-  }
-  50
-}
-
-
 #' Create a single funnel plot
 #'
 #' @description
@@ -300,13 +301,16 @@ determine_tick_interval <- function(range_size) {
 #' @param theme_name *\[character\]* Theme name
 #' @param precision_to_log *\[logical\]* Whether to log-transform precision
 #' @param use_study_medians *\[logical\]* For axis label text
+#' @param subtitle_text *\[character, optional\]* Subtitle noting filtered observations
 #'
 #' @return *\[ggplot\]* The plot object
 #' @keywords internal
-create_funnel_plot <- function(df, tick_info, theme_name, precision_to_log, use_study_medians) {
+create_funnel_plot <- function(df, tick_info, theme_name, precision_to_log, use_study_medians,
+                               subtitle_text = NULL) {
   box::use(
     artma / visualization / colors[get_colors, get_vline_color],
-    artma / visualization / theme[get_theme]
+    artma / visualization / theme[get_theme],
+    artma / visualization / ticks[format_colored_tick_labels]
   )
 
   point_color <- get_colors(theme_name, "funnel_plot")
@@ -349,6 +353,7 @@ create_funnel_plot <- function(df, tick_info, theme_name, precision_to_log, use_
     ) +
     ggplot2::labs(
       title = NULL,
+      subtitle = subtitle_text,
       x = x_label,
       y = y_label
     ) +
@@ -362,92 +367,15 @@ create_funnel_plot <- function(df, tick_info, theme_name, precision_to_log, use_
 }
 
 
-#' Format tick values as integers or decimals appropriately
-#'
-#' @description
-#' Displays integer values without decimal points and floats with
-#' minimal necessary precision for cleaner axis labels.
-#'
-#' @param x *\[numeric\]* Tick values
-#' @return *\[character\]* Formatted labels
-#' @keywords internal
-format_tick_labels <- function(x) {
-  vapply(x, function(val) {
-    if (is.na(val)) {
-      return(NA_character_)
-    }
-    if (val == floor(val)) {
-      as.character(as.integer(val))
-    } else {
-      format(round(val, 2), nsmall = 0, trim = TRUE)
-    }
-  }, character(1))
-}
-
-
-#' Format tick labels with HTML color spans
-#'
-#' @description
-#' Wraps tick labels in HTML span elements with color styling for use with
-#' ggtext::element_markdown(). This enables per-tick coloring (e.g., highlighting
-#' the mean tick in a different color).
-#'
-#' @param ticks *\[numeric\]* Tick values
-#' @param colors *\[character\]* Color for each tick (same length as ticks)
-#'
-#' @return *\[character\]* HTML-formatted labels
-#' @keywords internal
-format_colored_tick_labels <- function(ticks, colors) {
-  labels <- format_tick_labels(ticks)
-
-  mapply(function(label, color) { # nolint: undesirable_function_linter.
-    if (is.na(label)) {
-      return(NA_character_)
-    }
-    sprintf("<span style='color:%s'>%s</span>", color, label)
-  }, labels, colors, USE.NAMES = FALSE)
-}
-
-
-#' Export funnel plot to file
-#'
-#' @param plot *\[ggplot\]* The plot to export
-#' @param export_path *\[character\]* Directory path
-#' @param graph_scale *\[numeric\]* Scale factor
-#'
-#' @return NULL (invisibly)
-#' @keywords internal
-export_funnel_plot <- function(plot, export_path, graph_scale) {
-  box::use(
-    artma / visualization / export[save_plot, build_export_filename, ensure_export_dir]
-  )
-
-  ensure_export_dir(export_path)
-
-  filename <- build_export_filename("funnel_plot", "effect_precision")
-  full_path <- file.path(export_path, filename)
-
-  save_plot(
-    plot = plot,
-    path = full_path,
-    width = 800,
-    height = 736,
-    scale = graph_scale
-  )
-
-  invisible(NULL)
-}
-
-
 box::use(
-  artma / libs / infrastructure / cache[cache_cli_runner],
-  artma / data / cache_signatures[build_data_cache_signature]
+  artma / modules / runtime_methods[register_runtime_method]
 )
 
-run <- cache_cli_runner(
+run <- register_runtime_method(
   funnel_plot,
   stage = "funnel_plot",
-  key_builder = function(...) build_data_cache_signature()
+  description = "Funnel plot of the effect against precision, for spotting asymmetry",
+  required_columns = c("effect", "precision")
 )
 
 box::export(funnel_plot, run)

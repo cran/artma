@@ -1,0 +1,482 @@
+# Layered, optionally parallel execution of runtime methods.
+#
+# The orchestrator in `R/artma.R` topologically sorts methods by their declared
+# `depends_on` metadata. This module turns that order into dependency *layers*
+# (every method in a layer has all of its in-graph dependencies satisfied by
+# earlier layers) and runs each layer either sequentially or concurrently via
+# `parallel::mclapply`.
+#
+# Two properties are preserved regardless of how many workers are used:
+#
+#   * Output reaches the console in discovery order. Forked methods have their
+#     CLI output captured and replayed after the layer joins, so concurrent
+#     output never interleaves; a sequential layer is already in order and
+#     writes straight to the console. That distinction matters: a sunk method
+#     cannot prompt, because the menu renders into the capture buffer while the
+#     method blocks on a keypress nobody can see.
+#   * Each method runs on a pre-assigned L'Ecuyer-CMRG stream, so a run is
+#     reproducible given the seed whether it executed in parallel or not.
+
+box::use(
+  artma / libs / core / autonomy[get_autonomy_level, get_default_autonomy_level],
+  artma / libs / core / utils[opt_or],
+  artma / libs / core / validation[assert],
+  artma / libs / infrastructure / output_files[
+    begin_output_file_capture, end_output_file_capture
+  ],
+  artma / visualization / fork_safety[
+    graphics_survive_fork, in_forked_worker, with_forked_worker_flag, with_single_threaded_blas
+  ]
+)
+
+#' @title Group methods into dependency layers
+#' @description
+#' Split `method_names` into successive layers such that every method in a
+#' layer depends only on methods placed in earlier layers. Dependencies
+#' pointing outside `method_names` are ignored (the dependent runs standalone),
+#' matching `topo_sort_methods()`. Within a layer the input order is preserved.
+#' Aborts when the dependency graph contains a cycle.
+#' @param method_names *\[character\]* Methods to group, in their base order.
+#' @param deps *\[list, optional\]* Named list mapping a method name to the
+#'   character vector of methods it depends on.
+#' @return *\[list\]* A list of character vectors, one per layer.
+group_methods_into_layers <- function(method_names, deps = list()) {
+  method_names <- as.character(method_names)
+  if (length(method_names) == 0L) {
+    return(list())
+  }
+
+  layers <- list()
+  placed <- character()
+  remaining <- method_names
+
+  while (length(remaining) > 0L) {
+    ready <- vapply(
+      remaining,
+      function(name) {
+        prereqs <- intersect(deps[[name]] %||% character(), method_names)
+        all(prereqs %in% placed)
+      },
+      logical(1)
+    )
+
+    if (!any(ready)) {
+      cli::cli_abort(c(
+        "x" = "Cyclic method dependencies detected.",
+        "i" = "Methods involved in the cycle: {.val {remaining}}"
+      ))
+    }
+
+    layers[[length(layers) + 1L]] <- remaining[ready]
+    placed <- c(placed, remaining[ready])
+    remaining <- remaining[!ready]
+  }
+
+  layers
+}
+
+#' @title Hard ceiling on simultaneous forked workers
+#' @description
+#' `R CMD check` refuses a run that spawns more than two simultaneous processes
+#' (it sets `_R_CHECK_LIMIT_CORES_`), and `mc.cores` is the conventional way for
+#' a user to cap concurrency. Both are respected here so a layer never spawns
+#' more workers than the environment allows.
+#' @return *\[numeric\]* The ceiling, or `Inf` when unconstrained.
+#' @keywords internal
+max_parallel_workers <- function() {
+  check_limit <- Sys.getenv("_R_CHECK_LIMIT_CORES_", "")
+  if (nzchar(check_limit) && !identical(tolower(check_limit), "false")) {
+    return(2L)
+  }
+
+  mc_cores <- getOption("mc.cores", NULL)
+  if (is.numeric(mc_cores) && length(mc_cores) == 1L && !is.na(mc_cores)) {
+    return(max(1L, as.integer(mc_cores)))
+  }
+
+  Inf
+}
+
+#' @title Number of workers to use for a layer
+#' @description
+#' Decide how many forked workers a layer of `n_tasks` methods may use. Returns
+#' `1` (sequential execution) whenever forking is unavailable or unsafe:
+#' on Windows, on single-core machines, when the `artma.general.parallel`
+#' option is `FALSE`, when already running inside a forked worker (nested
+#' forking is unsafe), or in an interactive session whose autonomy level still
+#' allows methods to prompt (forked children cannot prompt).
+#' @param n_tasks *\[integer\]* Number of methods in the layer.
+#' @param is_interactive *\[logical, optional\]* Whether the session is
+#'   interactive. Injectable for testing; defaults to `interactive()`.
+#' @param os_type *\[character, optional\]* Platform OS type. Injectable for
+#'   testing; defaults to `.Platform$OS.type`.
+#' @param n_cores *\[integer, optional\]* Detected core count. Injectable for
+#'   testing; defaults to `parallel::detectCores()`.
+#' @param max_workers *\[numeric, optional\]* Hard ceiling on the worker count.
+#'   Injectable for testing; defaults to `max_parallel_workers()`.
+#' @param graphics_fork_safe *\[logical, optional\]* Whether a forked worker can
+#'   write a plot on this platform. Injectable for testing; defaults to
+#'   `graphics_survive_fork()`.
+#' @return *\[integer\]* The number of workers, at least `1`.
+resolve_worker_count <- function(n_tasks,
+                                 is_interactive = NULL,
+                                 os_type = NULL,
+                                 n_cores = NULL,
+                                 max_workers = NULL,
+                                 graphics_fork_safe = NULL) {
+  n_tasks <- as.integer(n_tasks)
+  if (is.na(n_tasks) || n_tasks < 2L) {
+    return(1L)
+  }
+
+  # A layer's methods can themselves call back into this orchestrator (e.g. a
+  # method invoking sub-methods). Forking again from inside an already-forked
+  # worker is unsafe on most platforms, so stay sequential in that case.
+  if (in_forked_worker()) {
+    return(1L)
+  }
+
+  if (!isTRUE(opt_or("artma.general.parallel", TRUE))) {
+    return(1L)
+  }
+
+  os_type <- os_type %||% .Platform$OS.type
+  if (identical(os_type, "windows")) {
+    return(1L)
+  }
+
+  is_interactive <- is_interactive %||% interactive()
+  autonomy_level <- get_autonomy_level() %||% get_default_autonomy_level()
+  if (isTRUE(is_interactive) && !identical(autonomy_level, "autonomous")) {
+    # Methods may still prompt at these autonomy levels, and a forked child
+    # cannot read from the console.
+    return(1L)
+  }
+
+  # Exporting graphics means opening a raster device in the child. Where that
+  # would abort the worker and no fork-safe device exists, run sequentially
+  # rather than lose the methods that draw.
+  graphics_fork_safe <- graphics_fork_safe %||% graphics_survive_fork()
+  if (isTRUE(getOption("artma.visualization.export_graphics", TRUE)) && !isTRUE(graphics_fork_safe)) {
+    return(1L)
+  }
+
+  if (is.null(n_cores)) {
+    n_cores <- tryCatch(parallel::detectCores(), error = function(err) NA_integer_)
+  }
+  if (!is.numeric(n_cores) || length(n_cores) != 1L || is.na(n_cores) || n_cores < 2L) {
+    return(1L)
+  }
+
+  max_workers <- max_workers %||% max_parallel_workers()
+
+  as.integer(min(n_tasks, max(1L, as.integer(n_cores) - 1L), max_workers))
+}
+
+#' @title Seed for a single method's RNG stream
+#' @description
+#' Fold a method's name into the run seed with a polynomial string hash, so
+#' the stream a method receives depends only on the run seed and its own name.
+#' Deriving streams positionally instead would tie a method's draws (and any
+#' disk-cached result built from them) to which other methods happened to be
+#' requested alongside it.
+#' @param seed *\[integer\]* The run seed.
+#' @param method_name *\[character\]* The method the stream is for.
+#' @return *\[integer\]* A deterministic seed for the method's stream.
+#' @keywords internal
+method_stream_seed <- function(seed, method_name) {
+  modulus <- 2147483647 # 2^31 - 1, keeps every intermediate exact in doubles
+  hash <- as.numeric(seed) %% modulus
+  for (char in utf8ToInt(method_name)) {
+    hash <- (hash * 31 + char) %% modulus
+  }
+  as.integer(hash)
+}
+
+#' @title Pre-assign an RNG stream to every method
+#' @description
+#' Derive one L'Ecuyer-CMRG stream per method from `seed` and the method's
+#' name, so a stochastic method draws the same numbers whether it ran in a
+#' fork or in the parent process, and regardless of which other methods were
+#' part of the run. Per-name seeding of L'Ecuyer-CMRG (period 2^191) stands in
+#' for `parallel::nextRNGStream()` chaining, which would make a method's
+#' stream depend on its position in the requested set. The caller's RNG kind
+#' and seed are restored before returning.
+#' @param method_names *\[character\]* Methods to assign streams to.
+#' @param seed *\[integer\]* The run seed. Must be a single non-missing number;
+#'   resolving an unset seed is the caller's responsibility.
+#' @return *\[list\]* A named list of `.Random.seed` vectors.
+build_rng_streams <- function(method_names, seed) {
+  assert(
+    is.numeric(seed) && length(seed) == 1L && !is.na(seed),
+    "`seed` must be a single non-missing number."
+  )
+
+  method_names <- as.character(method_names)
+  if (length(method_names) == 0L) {
+    return(list())
+  }
+
+  had_seed <- exists(".Random.seed", envir = globalenv(), inherits = FALSE)
+  old_seed <- if (had_seed) get(".Random.seed", envir = globalenv()) else NULL
+  old_kind <- RNGkind()
+
+  on.exit(
+    {
+      RNGkind(old_kind[[1L]], old_kind[[2L]], old_kind[[3L]])
+      if (had_seed) {
+        assign(".Random.seed", old_seed, envir = globalenv()) # nolint: object_name_linter.
+      } else if (exists(".Random.seed", envir = globalenv(), inherits = FALSE)) {
+        rm(".Random.seed", envir = globalenv())
+      }
+    },
+    add = TRUE
+  )
+
+  RNGkind("L'Ecuyer-CMRG")
+
+  streams <- lapply(method_names, function(method_name) {
+    set.seed(method_stream_seed(seed, method_name))
+    get(".Random.seed", envir = globalenv())
+  })
+
+  stats::setNames(streams, method_names)
+}
+
+#' @title Evaluate an expression with all of its CLI output captured
+#' @description
+#' Route everything `expr` prints into a single text connection, so nothing
+#' reaches the console until the caller replays it: printed output via a sink,
+#' and messages and warnings (which is how `cli` emits almost everything) via
+#' calling handlers, keeping the two streams in the order they were produced.
+#' `cli` normally strips colour when it detects a sink; the console's colour
+#' count and width are pinned for the duration so the captured text keeps its
+#' formatting when replayed.
+#'
+#' Warnings raised by `expr` are recorded as text rather than re-signalled: a
+#' forked worker's warnings would otherwise surface at an arbitrary point in
+#' the parent's output.
+#' @param expr *\[any\]* The expression to evaluate. Errors are caught, not
+#'   propagated.
+#' @return *\[list\]* A list with `value`, `error` (a message or `NULL`), and
+#'   `output` (a character vector of captured lines).
+with_captured_output <- function(expr) {
+  captured <- NULL
+  con <- textConnection("captured", open = "w", local = TRUE)
+
+  old_opts <- options(
+    cli.num_colors = cli::num_ansi_colors(),
+    cli.width = cli::console_width(),
+    cli.dynamic = FALSE
+  )
+
+  base_out <- sink.number()
+  on.exit(
+    {
+      while (sink.number() > base_out) sink() # nolint: undesirable_function_linter.
+      options(old_opts)
+    },
+    add = TRUE
+  )
+
+  sink(con, type = "output") # nolint: undesirable_function_linter.
+
+  result <- tryCatch(
+    withCallingHandlers(
+      list(value = expr, error = NULL),
+      message = function(cond) {
+        msg <- conditionMessage(cond)
+        # base::message() ends with a newline, cli conditions do not; without
+        # one, consecutive captured cli lines concatenate on replay.
+        if (!grepl("\n$", msg)) {
+          msg <- paste0(msg, "\n")
+        }
+        cat(msg, file = con, sep = "") # nolint: undesirable_function_linter.
+        invokeRestart("muffleMessage")
+      },
+      warning = function(cond) {
+        cat(sprintf("Warning: %s\n", conditionMessage(cond)), file = con, sep = "") # nolint: undesirable_function_linter.
+        invokeRestart("muffleWarning")
+      }
+    ),
+    error = function(err) list(value = NULL, error = conditionMessage(err))
+  )
+
+  sink(type = "output") # nolint: undesirable_function_linter.
+  close(con)
+
+  list(value = result$value, error = result$error, output = captured %||% character())
+}
+
+#' @title Evaluate an expression, trapping errors but leaving output alone
+#' @description
+#' The sequential counterpart of `with_captured_output()`: the same
+#' `list(value, error, output)` shape, but nothing is sunk, so whatever `expr`
+#' prints goes straight to the console and a method that prompts stays visible
+#' and answerable. `output` is always empty, since the console has already seen
+#' it; the caller's replay step is then a no-op.
+#'
+#' Warnings are left to signal normally rather than being folded into the
+#' output text. In the parent process they surface where R would put them
+#' anyway, which is not true of a forked worker.
+#' @param expr *\[any\]* The expression to evaluate. Errors are caught, not
+#'   propagated.
+#' @return *\[list\]* A list with `value`, `error` (a message or `NULL`), and an
+#'   empty `output`.
+without_captured_output <- function(expr) {
+  result <- tryCatch(
+    list(value = expr, error = NULL),
+    error = function(err) list(value = NULL, error = conditionMessage(err))
+  )
+
+  list(value = result$value, error = result$error, output = character())
+}
+
+#' @title Replay captured CLI output
+#' @description Write previously captured lines to the console verbatim,
+#'   preserving any ANSI formatting they carry.
+#' @param output *\[character\]* Lines captured by `with_captured_output()`.
+#' @return `NULL`, invisibly.
+replay_captured_output <- function(output) {
+  if (length(output) == 0L) {
+    return(invisible(NULL))
+  }
+  cat(output, sep = "\n") # nolint: undesirable_function_linter.
+  cat("\n") # nolint: undesirable_function_linter.
+  invisible(NULL)
+}
+
+#' @title Describe a forked worker that returned no usable outcome
+#' @description
+#' `parallel::mclapply()` signals a child that terminated abnormally either with
+#' a `try-error` or, when the child was killed outright, with `NULL`. The latter
+#' carries no message at all, so the reported failure would otherwise be an
+#' empty string. Turn both into a diagnostic that names the method and points at
+#' the sequential fallback, which reproduces the fault in the parent where the
+#' real error is visible.
+#' @param outcome *\[any\]* Whatever `mclapply()` returned for the method.
+#' @param method_name *\[character\]* The method that was being run.
+#' @return *\[character\]* A single-line description of the failure.
+#' @keywords internal
+describe_dead_worker <- function(outcome, method_name) {
+  detail <- trimws(paste(as.character(outcome), collapse = " "))
+
+  if (nzchar(detail)) {
+    return(sprintf(
+      "the forked worker running '%s' terminated abnormally: %s", method_name, detail
+    ))
+  }
+
+  sprintf(
+    paste0(
+      "the forked worker running '%s' died without reporting an error ",
+      "(the child process was killed, e.g. by a crash in compiled code or the OS). ",
+      "Re-run with options(artma.general.parallel = FALSE) to see the underlying failure."
+    ),
+    method_name
+  )
+}
+
+#' @title Run one layer of methods
+#' @description
+#' Execute every method in `method_names` through `run_one`, capturing output
+#' and errors per method. With more than one worker the methods run
+#' concurrently via `parallel::mclapply`; results come back in the input order
+#' either way, so the caller can replay output and record outcomes in discovery
+#' order.
+#' @param method_names *\[character\]* Methods in this layer, in discovery order.
+#' @param run_one *\[function\]* Called with a single method name; returns that
+#'   method's result or throws.
+#' @param streams *\[list, optional\]* Named list of RNG streams keyed by method
+#'   name, as built by `build_rng_streams()`.
+#' @param workers *\[integer, optional\]* Number of forked workers. `1` runs
+#'   sequentially in the current process.
+#' @return *\[list\]* One `list(value, error, output, files)` per method, in
+#'   input order. `files` holds the paths the method wrote, which is the only
+#'   way the parent learns about them when the method ran in a fork. `output`
+#'   is empty for a sequential layer, whose output has already reached the
+#'   console.
+execute_method_layer <- function(method_names, run_one, streams = list(), workers = 1L) {
+  assert(is.function(run_one), "`run_one` must be a function.")
+  method_names <- as.character(method_names)
+  if (length(method_names) == 0L) {
+    return(list())
+  }
+
+  # Capturing exists to keep concurrent output from interleaving, so a
+  # sequential layer skips it: it is already in order, and sinking it would
+  # make any prompt the method raises invisible and unanswerable.
+  # `resolve_worker_count()` never returns more than one worker for a session
+  # whose autonomy level still lets methods prompt, so the two line up.
+  run_captured <- workers > 1L
+
+  run_task <- function(method_name) {
+    stream <- streams[[method_name]]
+    if (!is.null(stream)) {
+      assign(".Random.seed", stream, envir = globalenv()) # nolint: object_name_linter.
+    }
+    # Bracket the method so its output files come back with its outcome. A
+    # forked worker records into its own copy of the capture stack, which dies
+    # with the child, so the paths have to travel back in the return value.
+    capture_id <- begin_output_file_capture()
+    on.exit(end_output_file_capture(capture_id), add = TRUE)
+    outcome <- if (run_captured) {
+      with_captured_output(run_one(method_name))
+    } else {
+      without_captured_output(run_one(method_name))
+    }
+    outcome$files <- end_output_file_capture(capture_id)
+    outcome
+  }
+
+  if (workers > 1L) {
+    # mc.set.seed = TRUE makes each child scrub the RNG state it inherited
+    # from the fork (for a non-L'Ecuyer parent kind it simply removes
+    # `.Random.seed`, leaving the next draw time-and-pid seeded). That scrub
+    # is irrelevant here: `run_task` installs the method's pre-assigned
+    # stream as its first action in the child, before any draw can happen,
+    # so the draws are deterministic either way.
+    outcomes <- with_single_threaded_blas(parallel::mclapply(
+      method_names,
+      function(method_name) with_forked_worker_flag(run_task(method_name)),
+      mc.cores = workers,
+      mc.preschedule = FALSE,
+      mc.set.seed = TRUE
+    ))
+    # A worker that dies outright rather than signalling an R error comes back
+    # as a try-error, or as NULL when the child was killed before it could
+    # answer at all. Neither carries a usable message, so describe what
+    # happened instead of reporting an empty failure.
+    outcomes <- Map(
+      function(outcome, method_name) {
+        if (is.list(outcome) && !inherits(outcome, "try-error")) {
+          return(outcome)
+        }
+        list(
+          value = NULL,
+          error = describe_dead_worker(outcome, method_name),
+          output = character(),
+          files = character()
+        )
+      },
+      outcomes,
+      method_names
+    )
+    return(outcomes)
+  }
+
+  lapply(method_names, run_task)
+}
+
+box::export(
+  build_rng_streams,
+  describe_dead_worker,
+  execute_method_layer,
+  group_methods_into_layers,
+  max_parallel_workers,
+  method_stream_seed,
+  replay_captured_output,
+  resolve_worker_count,
+  with_captured_output,
+  without_captured_output
+)

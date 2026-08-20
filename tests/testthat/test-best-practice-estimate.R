@@ -1,0 +1,569 @@
+box::use(
+  testthat[
+    expect_equal,
+    expect_error,
+    expect_named,
+    expect_false,
+    expect_gt,
+    expect_lt,
+    expect_setequal,
+    expect_true,
+    skip_if_not_installed,
+    test_that
+  ],
+  withr[local_options, local_tempdir]
+)
+
+box::use(ggplot2[is_ggplot])
+
+box::use(
+  artma / methods / bma[bma],
+  artma / methods / best_practice_estimate[best_practice_estimate],
+  artma / econometric / bma[get_bma_data],
+  artma / econometric / best_practice_estimate[
+    infer_bpe_recommendation,
+    format_bpe_recommendation
+  ]
+)
+
+make_bpe_demo_data <- function() {
+  set.seed(321)
+  n_studies <- 16L
+  rows_per_study <- 4L
+  n <- n_studies * rows_per_study
+
+  study_id <- rep(seq_len(n_studies), each = rows_per_study)
+  citations <- stats::runif(n, min = 5, max = 150)
+  top_journal <- stats::rbinom(n, size = 1, prob = 0.35)
+  first_lag_instrument <- stats::rbinom(n, size = 1, prob = 0.5)
+  se <- stats::runif(n, min = 0.05, max = 0.2)
+
+  effect <- 0.1 +
+    0.08 * top_journal -
+    0.12 * first_lag_instrument +
+    0.02 * scale(citations)[, 1] +
+    stats::rnorm(n, sd = 0.08)
+
+  data.frame(
+    study_id = study_id,
+    study_label = paste0("Study_", study_id),
+    effect = effect,
+    se = se,
+    citations = citations,
+    top_journal = top_journal,
+    first_lag_instrument = first_lag_instrument,
+    stringsAsFactors = FALSE
+  )
+}
+
+make_bpe_demo_config <- function() {
+  list(
+    effect = list(var_name = "effect", var_name_verbose = "Effect", bma = FALSE, bpe = NA),
+    se = list(var_name = "se", var_name_verbose = "SE", bma = TRUE, bpe = NA),
+    citations = list(var_name = "citations", var_name_verbose = "Citations", bma = TRUE, bpe = NA),
+    top_journal = list(var_name = "top_journal", var_name_verbose = "Top Journal", bma = TRUE, bpe = NA),
+    first_lag_instrument = list(
+      var_name = "first_lag_instrument",
+      var_name_verbose = "First Lag Instrument",
+      bma = TRUE,
+      bpe = NA
+    )
+  )
+}
+
+test_that("best_practice_estimate uses provided BMA result and returns structured output", {
+  skip_if_not_installed("BMS")
+
+  df <- make_bpe_demo_data()
+
+  local_options(list(
+    artma.verbose = 0,
+    artma.autonomy.level = "autonomous",
+    artma.data.columns = make_bpe_demo_config(),
+    artma.visualization.export_graphics = FALSE,
+    artma.methods.bma.burn = 50L,
+    artma.methods.bma.iter = 300L,
+    artma.methods.bma.nmodel = 20L,
+    artma.methods.bma.g = "UIP",
+    artma.methods.bma.mprior = "uniform",
+    artma.methods.bma.mcmc = "bd",
+    artma.methods.best_practice_estimate.include_study_rows = FALSE
+  ))
+
+  bma_result <- bma(df)
+  result <- best_practice_estimate(df, bma_result = bma_result)
+
+  expect_named(result, c("tables", "estimates", "plots", "meta"))
+  expect_named(
+    result$tables,
+    c("summary", "economic_significance", "summary_by_factor"),
+    ignore.order = TRUE
+  )
+  expect_named(
+    result$meta,
+    c("formula", "overrides", "bma_formula", "bma_source", "autonomy_level"),
+    ignore.order = TRUE
+  )
+  expect_equal(result$meta$bma_source, "provided")
+  expect_true(is.data.frame(result$tables$summary))
+  expect_true(nrow(result$tables$summary) >= 1)
+  expect_true("estimate" %in% colnames(result$tables$summary))
+  expect_true(is.data.frame(result$meta$overrides))
+
+  overrides <- stats::setNames(result$meta$overrides$override, result$meta$overrides$variable)
+  expect_equal(overrides[["se"]], "0")
+  expect_equal(overrides[["citations"]], "max")
+  expect_equal(overrides[["first_lag_instrument"]], "0")
+
+  econ_sig <- result$tables$economic_significance
+  expect_true(is.data.frame(econ_sig))
+  expect_named(
+    econ_sig,
+    c("variable", "var_label", "pip", "sd_change", "sd_change_pct", "range_change", "range_change_pct")
+  )
+  expect_equal(sort(econ_sig$variable), sort(c("citations", "first_lag_instrument", "se", "top_journal")))
+})
+
+test_that("best_practice_estimate filters economic significance by PIP threshold", {
+  skip_if_not_installed("BMS")
+
+  df <- make_bpe_demo_data()
+
+  local_options(list(
+    artma.verbose = 0,
+    artma.autonomy.level = "autonomous",
+    artma.data.columns = make_bpe_demo_config(),
+    artma.visualization.export_graphics = FALSE,
+    artma.methods.bma.burn = 50L,
+    artma.methods.bma.iter = 300L,
+    artma.methods.bma.nmodel = 20L,
+    artma.methods.bma.g = "UIP",
+    artma.methods.bma.mprior = "uniform",
+    artma.methods.bma.mcmc = "bd",
+    artma.methods.best_practice_estimate.include_study_rows = FALSE,
+    artma.methods.best_practice_estimate.economic_significance_pip_threshold = 0.999
+  ))
+
+  bma_result <- bma(df)
+  result <- best_practice_estimate(df, bma_result = bma_result)
+
+  econ_sig <- result$tables$economic_significance
+  expect_true(nrow(econ_sig) <= 4L)
+  expect_true(all(econ_sig$pip >= 0.999))
+})
+
+test_that("best_practice_estimate fails early when BMA is missing and auto-run is disabled", {
+  skip_if_not_installed("BMS")
+
+  df <- make_bpe_demo_data()
+
+  local_options(list(
+    artma.verbose = 0,
+    artma.autonomy.level = "autonomous",
+    artma.data.columns = make_bpe_demo_config(),
+    artma.methods.best_practice_estimate.run_bma_if_missing = FALSE
+  ))
+
+  expect_error(
+    best_practice_estimate(df, bma_result = NULL),
+    "requires a BMA result"
+  )
+})
+
+test_that("best_practice_estimate accepts logical BPE overrides from config", {
+  skip_if_not_installed("BMS")
+
+  df <- make_bpe_demo_data()
+  config <- make_bpe_demo_config()
+  config$top_journal$bpe <- TRUE
+  config$first_lag_instrument$bpe <- FALSE
+
+  local_options(list(
+    artma.verbose = 0,
+    artma.autonomy.level = "ask_more",
+    artma.data.columns = config,
+    artma.visualization.export_graphics = FALSE,
+    artma.methods.bma.burn = 50L,
+    artma.methods.bma.iter = 300L,
+    artma.methods.bma.nmodel = 20L,
+    artma.methods.bma.g = "UIP",
+    artma.methods.bma.mprior = "uniform",
+    artma.methods.bma.mcmc = "bd",
+    artma.methods.best_practice_estimate.include_study_rows = FALSE
+  ))
+
+  bma_result <- bma(df)
+  result <- best_practice_estimate(df, bma_result = bma_result)
+
+  overrides <- stats::setNames(result$meta$overrides$override, result$meta$overrides$variable)
+  expect_equal(overrides[["top_journal"]], "1")
+  expect_equal(overrides[["first_lag_instrument"]], "0")
+  expect_false(is.na(overrides[["se"]]))
+})
+
+test_that("best_practice_estimate produces a sorted scatter plot highlighting the author's BPE", {
+  skip_if_not_installed("BMS")
+
+  df <- make_bpe_demo_data()
+
+  local_options(list(
+    artma.verbose = 0,
+    artma.autonomy.level = "autonomous",
+    artma.data.columns = make_bpe_demo_config(),
+    artma.visualization.export_graphics = FALSE,
+    artma.methods.bma.burn = 50L,
+    artma.methods.bma.iter = 300L,
+    artma.methods.bma.nmodel = 20L,
+    artma.methods.bma.g = "UIP",
+    artma.methods.bma.mprior = "uniform",
+    artma.methods.bma.mcmc = "bd"
+  ))
+
+  bma_result <- bma(df)
+  result <- best_practice_estimate(df, bma_result = bma_result)
+
+  expect_true("bpe_scatter" %in% names(result$plots))
+  expect_true(is_ggplot(result$plots$bpe_scatter))
+})
+
+test_that("best_practice_estimate produces per-factor density plots for bpe_sum_stats variables", {
+  skip_if_not_installed("BMS")
+
+  df <- make_bpe_demo_data()
+  config <- make_bpe_demo_config()
+  config$top_journal$bpe_sum_stats <- TRUE
+
+  local_options(list(
+    artma.verbose = 0,
+    artma.autonomy.level = "autonomous",
+    artma.data.columns = config,
+    artma.visualization.export_graphics = FALSE,
+    artma.methods.bma.burn = 50L,
+    artma.methods.bma.iter = 300L,
+    artma.methods.bma.nmodel = 20L,
+    artma.methods.bma.g = "UIP",
+    artma.methods.bma.mprior = "uniform",
+    artma.methods.bma.mcmc = "bd"
+  ))
+
+  bma_result <- bma(df)
+  result <- best_practice_estimate(df, bma_result = bma_result)
+
+  expect_true("bpe_density_top_journal" %in% names(result$plots))
+  expect_true(is_ggplot(result$plots$bpe_density_top_journal))
+})
+
+test_that("best_practice_estimate skips plots that would need no flagged BPE grouping variables", {
+  skip_if_not_installed("BMS")
+
+  df <- make_bpe_demo_data()
+  config <- make_bpe_demo_config()
+
+  local_options(list(
+    artma.verbose = 0,
+    artma.autonomy.level = "autonomous",
+    artma.data.columns = config,
+    artma.visualization.export_graphics = FALSE,
+    artma.methods.bma.burn = 50L,
+    artma.methods.bma.iter = 300L,
+    artma.methods.bma.nmodel = 20L,
+    artma.methods.bma.g = "UIP",
+    artma.methods.bma.mprior = "uniform",
+    artma.methods.bma.mcmc = "bd"
+  ))
+
+  bma_result <- bma(df)
+  result <- best_practice_estimate(df, bma_result = bma_result)
+
+  expect_false(any(grepl("^bpe_density_", names(result$plots))))
+})
+
+test_that("best_practice_estimate groups the factor summary table by bpe_equal/bpe_gltl", {
+  skip_if_not_installed("BMS")
+
+  df <- make_bpe_demo_data()
+  config <- make_bpe_demo_config()
+  config$top_journal$bpe_equal <- 1
+  config$citations$bpe_gltl <- "median"
+
+  local_options(list(
+    artma.verbose = 0,
+    artma.autonomy.level = "autonomous",
+    artma.data.columns = config,
+    artma.visualization.export_graphics = FALSE,
+    artma.methods.bma.burn = 50L,
+    artma.methods.bma.iter = 300L,
+    artma.methods.bma.nmodel = 20L,
+    artma.methods.bma.g = "UIP",
+    artma.methods.bma.mprior = "uniform",
+    artma.methods.bma.mcmc = "bd"
+  ))
+
+  bma_result <- bma(df)
+  result <- best_practice_estimate(df, bma_result = bma_result)
+
+  factor_summary <- result$tables$summary_by_factor
+  expect_true(is.data.frame(factor_summary))
+  expect_named(
+    factor_summary,
+    c("scope", "study_id", "study_label", "estimate", "standard_error", "ci_lower", "ci_upper", "n_obs")
+  )
+  expect_true(all(factor_summary$scope == "factor"))
+  expect_true(any(grepl("^Top Journal = 1$", factor_summary$study_label)))
+  expect_true(any(grepl("^Citations >=", factor_summary$study_label)))
+  expect_true(any(grepl("^Citations <", factor_summary$study_label)))
+})
+
+test_that("best_practice_estimate auto-detects dummy predictors for the factor summary by default", {
+  skip_if_not_installed("BMS")
+
+  # Regression test for #403: on a fully auto-detected data config (no
+  # bpe_sum_stats/bpe_equal/bpe_gltl set anywhere), the factor summary must
+  # still populate for the model's own dummy predictors instead of shipping
+  # header-only.
+  df <- make_bpe_demo_data()
+
+  local_options(list(
+    artma.verbose = 0,
+    artma.autonomy.level = "autonomous",
+    artma.data.columns = make_bpe_demo_config(),
+    artma.visualization.export_graphics = FALSE,
+    artma.methods.bma.burn = 50L,
+    artma.methods.bma.iter = 300L,
+    artma.methods.bma.nmodel = 20L,
+    artma.methods.bma.g = "UIP",
+    artma.methods.bma.mprior = "uniform",
+    artma.methods.bma.mcmc = "bd"
+  ))
+
+  bma_result <- bma(df)
+  result <- best_practice_estimate(df, bma_result = bma_result)
+
+  factor_summary <- result$tables$summary_by_factor
+  expect_true(is.data.frame(factor_summary))
+  expect_gt(nrow(factor_summary), 0L)
+  expect_true(any(grepl("^Top Journal = ", factor_summary$study_label)))
+  expect_true(any(grepl("^First Lag Instrument = ", factor_summary$study_label)))
+})
+
+test_that("best_practice_estimate skips the factor summary table when nothing resolves to a grouping", {
+  skip_if_not_installed("BMS")
+
+  df <- make_bpe_demo_data()
+
+  local_options(list(
+    artma.verbose = 0,
+    artma.autonomy.level = "autonomous",
+    artma.data.columns = make_bpe_demo_config(),
+    artma.visualization.export_graphics = FALSE,
+    artma.methods.bma.burn = 50L,
+    artma.methods.bma.iter = 300L,
+    artma.methods.bma.nmodel = 20L,
+    artma.methods.bma.g = "UIP",
+    artma.methods.bma.mprior = "uniform",
+    artma.methods.bma.mcmc = "bd",
+    artma.methods.best_practice_estimate.factor_summary_auto_detect = FALSE
+  ))
+
+  bma_result <- bma(df)
+  result <- best_practice_estimate(df, bma_result = bma_result)
+
+  expect_false("summary_by_factor" %in% names(result$tables))
+})
+
+test_that("get_bma_data records scaling metadata and keeps NA dummies binary", {
+  df <- data.frame(
+    effect = c(0.1, 0.2, 0.3, 0.4),
+    se = c(0.05, 0.10, 0.15, 0.20),
+    dummy = c(0, 1, NA, 1)
+  )
+  var_list <- data.frame(
+    var_name = c("effect", "se", "dummy"),
+    var_name_verbose = c("Effect", "SE", "Dummy"),
+    bma = c(TRUE, TRUE, TRUE),
+    to_log_for_bma = c(FALSE, FALSE, FALSE),
+    bma_reference_var = c(FALSE, FALSE, FALSE),
+    stringsAsFactors = FALSE
+  )
+
+  scaled <- get_bma_data(
+    df, var_list,
+    variable_info = c("effect", "se", "dummy"),
+    scale_data = TRUE, from_vector = TRUE, include_reference_groups = FALSE
+  )
+
+  centers <- attr(scaled, "bpe_scale_centers")
+  scales <- attr(scaled, "bpe_scale_scales")
+  expect_equal(centers[["effect"]], mean(df$effect))
+  expect_equal(scales[["se"]], stats::sd(df$se))
+  # A 0/1 dummy with an NA must not be z-scored (NA is not a third level).
+  expect_equal(centers[["dummy"]], 0)
+  expect_equal(scales[["dummy"]], 1)
+  expect_equal(sort(unique(stats::na.omit(scaled$dummy))), c(0, 1))
+})
+
+test_that("bpe applies the se = 0 correction on the raw effect scale", {
+  skip_if_not_installed("BMS")
+
+  # Strong publication-bias DGP: effect = 0.1 + 1.0 * se + small noise. The
+  # naive mean is ~0.28; the best-practice estimate at se = 0 must land near
+  # the bias-free 0.1. Before the scaling fix the override "0" plugged in the
+  # SAMPLE MEAN of se (standardized zero) and the output stayed on the
+  # z-scored effect scale, reporting ~0 here.
+  set.seed(99)
+  n_studies <- 16L
+  rows_per_study <- 6L
+  n <- n_studies * rows_per_study
+  se <- stats::runif(n, min = 0.05, max = 0.3)
+  moderator <- stats::rnorm(n)
+  df <- data.frame(
+    study_id = rep(seq_len(n_studies), each = rows_per_study),
+    effect = 0.1 + 1.0 * se + 0.05 * moderator + stats::rnorm(n, sd = 0.02),
+    se = se,
+    moderator = moderator,
+    stringsAsFactors = FALSE
+  )
+
+  local_options(list(
+    artma.verbose = 0,
+    artma.autonomy.level = "autonomous",
+    artma.data.columns = list(
+      effect = list(var_name = "effect", var_name_verbose = "Effect", bma = FALSE, bpe = NA),
+      se = list(var_name = "se", var_name_verbose = "SE", bma = TRUE, bpe = 0),
+      moderator = list(var_name = "moderator", var_name_verbose = "Moderator", bma = TRUE, bpe = "mean")
+    ),
+    artma.visualization.export_graphics = FALSE,
+    artma.methods.bma.burn = 100L,
+    artma.methods.bma.iter = 1000L,
+    artma.methods.bma.nmodel = 20L,
+    artma.methods.bma.g = "UIP",
+    artma.methods.bma.mprior = "uniform",
+    artma.methods.bma.mcmc = "bd",
+    artma.methods.best_practice_estimate.include_study_rows = FALSE
+  ))
+
+  bma_result <- bma(df)
+  result <- best_practice_estimate(df, bma_result = bma_result)
+  author <- result$tables$summary[result$tables$summary$scope == "author", ]
+
+  expect_gt(author$estimate, 0.03)
+  expect_lt(author$estimate, 0.2)
+  expect_true(is.finite(author$standard_error))
+  expect_gt(author$standard_error, 0)
+})
+
+test_that("infer_bpe_recommendation returns NA (no recommendation) for unmatched variables", {
+  expect_equal(infer_bpe_recommendation("se"), 0)
+  expect_equal(infer_bpe_recommendation("citations"), "max")
+  expect_true(is.na(infer_bpe_recommendation("gdp_growth_rate_at_purchase")))
+  expect_true(is.na(infer_bpe_recommendation("x1")))
+})
+
+test_that("format_bpe_recommendation reports no recommendation explicitly instead of default(mean)", {
+  expect_equal(format_bpe_recommendation(NA, FALSE), "no recommendation")
+  expect_equal(format_bpe_recommendation(0, TRUE), "0")
+  expect_equal(format_bpe_recommendation(NA, TRUE), "default(mean)")
+})
+
+test_that("best_practice_estimate reports has_recommendation explicitly in the overrides table", {
+  skip_if_not_installed("BMS")
+
+  df <- make_bpe_demo_data()
+
+  local_options(list(
+    artma.verbose = 0,
+    artma.autonomy.level = "autonomous",
+    artma.data.columns = make_bpe_demo_config(),
+    artma.visualization.export_graphics = FALSE,
+    artma.methods.bma.burn = 50L,
+    artma.methods.bma.iter = 300L,
+    artma.methods.bma.nmodel = 20L,
+    artma.methods.bma.g = "UIP",
+    artma.methods.bma.mprior = "uniform",
+    artma.methods.bma.mcmc = "bd",
+    artma.methods.best_practice_estimate.include_study_rows = FALSE
+  ))
+
+  bma_result <- bma(df)
+  result <- best_practice_estimate(df, bma_result = bma_result)
+
+  overrides <- result$meta$overrides
+  expect_true(all(c("recommended", "has_recommendation") %in% colnames(overrides)))
+  # Every demo predictor matches a keyword rule, so all have a genuine recommendation.
+  expect_true(all(overrides$has_recommendation))
+  expect_false(any(overrides$recommended == "no recommendation"))
+})
+
+test_that("best_practice_estimate pins its full table/meta/plot contract on fixture data", {
+  skip_if_not_installed("BMS")
+
+  df <- make_bpe_demo_data()
+  config <- make_bpe_demo_config()
+  config$top_journal$bpe_sum_stats <- TRUE
+
+  local_options(list(
+    artma.verbose = 0,
+    artma.autonomy.level = "autonomous",
+    artma.data.columns = config,
+    artma.visualization.export_graphics = FALSE,
+    artma.methods.bma.burn = 50L,
+    artma.methods.bma.iter = 300L,
+    artma.methods.bma.nmodel = 20L,
+    artma.methods.bma.g = "UIP",
+    artma.methods.bma.mprior = "uniform",
+    artma.methods.bma.mcmc = "bd"
+  ))
+
+  bma_result <- bma(df)
+  result <- best_practice_estimate(df, bma_result = bma_result)
+
+  expect_named(result, c("tables", "estimates", "plots", "meta"))
+  expect_setequal(names(result$tables), c("summary", "economic_significance", "summary_by_factor"))
+  expect_setequal(
+    names(result$meta),
+    c("formula", "overrides", "bma_formula", "bma_source", "autonomy_level")
+  )
+  expect_setequal(names(result$plots), c("bpe_scatter", "bpe_density_top_journal"))
+  expect_true(all(vapply(result$plots, is_ggplot, logical(1))))
+
+  expect_true(is.character(result$meta$formula) && length(result$meta$formula) == 1L)
+  expect_true(nzchar(result$meta$formula))
+  expect_true(inherits(result$meta$bma_formula, "formula"))
+  expect_equal(result$meta$autonomy_level, "autonomous")
+})
+
+test_that("best_practice_estimate writes one PNG per plot when export is enabled", {
+  skip_if_not_installed("BMS")
+
+  df <- make_bpe_demo_data()
+  dir <- local_tempdir()
+
+  local_options(list(
+    artma.verbose = 0,
+    artma.autonomy.level = "autonomous",
+    artma.data.columns = make_bpe_demo_config(),
+    artma.output.save_results = FALSE,
+    artma.visualization.export_graphics = FALSE,
+    artma.methods.bma.burn = 50L,
+    artma.methods.bma.iter = 300L,
+    artma.methods.bma.nmodel = 20L,
+    artma.methods.bma.g = "UIP",
+    artma.methods.bma.mprior = "uniform",
+    artma.methods.bma.mcmc = "bd",
+    artma.methods.best_practice_estimate.include_study_rows = TRUE
+  ))
+
+  bma_result <- bma(df)
+
+  local_options(list(
+    artma.visualization.export_graphics = TRUE,
+    artma.visualization.export_path = dir
+  ))
+
+  result <- best_practice_estimate(df, bma_result = bma_result)
+
+  expect_setequal(
+    list.files(dir),
+    paste0("best_practice_estimate_", names(result$plots), ".png")
+  )
+})

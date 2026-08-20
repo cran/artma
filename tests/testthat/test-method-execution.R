@@ -1,0 +1,477 @@
+box::use(
+  testthat[
+    expect_equal,
+    expect_error,
+    expect_false,
+    expect_length,
+    expect_match,
+    expect_null,
+    expect_output,
+    expect_true,
+    skip_if,
+    skip_if_not_installed,
+    test_that
+  ]
+)
+
+# `resolve_worker_count()` reads its environment; pin every input so the
+# assertions hold regardless of the machine, and lift the R CMD check core cap
+# (`_R_CHECK_LIMIT_CORES_`) that would otherwise clamp the result to 2.
+worker_count <- function(n_tasks, is_interactive = FALSE, os_type = "unix", n_cores = 8L) {
+  box::use(artma / modules / method_execution[resolve_worker_count])
+
+  resolve_worker_count(
+    n_tasks,
+    is_interactive = is_interactive,
+    os_type = os_type,
+    n_cores = n_cores,
+    max_workers = Inf,
+    graphics_fork_safe = TRUE
+  )
+}
+
+can_fork <- function() {
+  cores <- tryCatch(parallel::detectCores(), error = function(err) NA_integer_)
+  !identical(.Platform$OS.type, "windows") && is.numeric(cores) && !is.na(cores) && cores >= 2L
+}
+
+test_that("group_methods_into_layers puts independent methods in one layer", {
+  box::use(artma / modules / method_execution[group_methods_into_layers])
+
+  layers <- group_methods_into_layers(c("a", "b", "c"), list())
+
+  expect_length(layers, 1L)
+  expect_equal(layers[[1L]], c("a", "b", "c"))
+})
+
+test_that("group_methods_into_layers separates dependents into later layers", {
+  box::use(artma / modules / method_execution[group_methods_into_layers])
+
+  layers <- group_methods_into_layers(
+    c("bma", "funnel_plot", "best_practice_estimate"),
+    list(best_practice_estimate = "bma")
+  )
+
+  expect_length(layers, 2L)
+  expect_equal(layers[[1L]], c("bma", "funnel_plot"))
+  expect_equal(layers[[2L]], "best_practice_estimate")
+})
+
+test_that("group_methods_into_layers chains transitive dependencies", {
+  box::use(artma / modules / method_execution[group_methods_into_layers])
+
+  layers <- group_methods_into_layers(
+    c("a", "b", "c"),
+    list(b = "a", c = "b")
+  )
+
+  expect_equal(layers, list("a", "b", "c"))
+})
+
+test_that("group_methods_into_layers ignores dependencies outside the requested set", {
+  box::use(artma / modules / method_execution[group_methods_into_layers])
+
+  layers <- group_methods_into_layers(c("fma"), list(fma = "bma"))
+
+  expect_equal(layers, list("fma"))
+})
+
+test_that("group_methods_into_layers handles the empty case and aborts on cycles", {
+  box::use(artma / modules / method_execution[group_methods_into_layers])
+
+  expect_equal(group_methods_into_layers(character(), list()), list())
+  expect_error(
+    group_methods_into_layers(c("a", "b"), list(a = "b", b = "a")),
+    "Cyclic"
+  )
+})
+
+test_that("group_methods_into_layers flattens to a valid topological order", {
+  box::use(
+    artma / modules / method_execution[group_methods_into_layers],
+    artma / modules / runtime_methods[topo_sort_methods]
+  )
+
+  names <- c("bma", "fma", "best_practice_estimate")
+  deps <- list(best_practice_estimate = "bma", fma = "bma")
+
+  flattened <- unlist(group_methods_into_layers(topo_sort_methods(names, deps), deps))
+
+  expect_true(which(flattened == "bma") < which(flattened == "fma"))
+  expect_true(which(flattened == "bma") < which(flattened == "best_practice_estimate"))
+})
+
+test_that("resolve_worker_count falls back to sequential execution", {
+  withr::local_options(list(artma.general.parallel = TRUE))
+
+  # A single task never forks.
+  expect_equal(worker_count(1L, n_cores = 8L), 1L)
+  # Windows has no fork().
+  expect_equal(worker_count(4L, os_type = "windows", n_cores = 8L), 1L)
+  # A single core leaves nothing to parallelise over.
+  expect_equal(worker_count(4L, n_cores = 1L), 1L)
+  # An unknown core count is treated as unusable.
+  expect_equal(worker_count(4L, n_cores = NA_integer_), 1L)
+})
+
+test_that("resolve_worker_count honours the artma.general.parallel flag", {
+  withr::local_options(list(artma.general.parallel = FALSE))
+  expect_equal(worker_count(4L, n_cores = 8L), 1L)
+
+  withr::local_options(list(artma.general.parallel = TRUE))
+  expect_equal(worker_count(4L, n_cores = 8L), 4L)
+  expect_equal(worker_count(9L, n_cores = 4L), 3L)
+})
+
+test_that("resolve_worker_count stays sequential when methods may still prompt", {
+  withr::local_options(list(artma.general.parallel = TRUE, artma.autonomy.level = "balanced"))
+  expect_equal(worker_count(4L, is_interactive = TRUE, n_cores = 8L), 1L)
+
+  withr::local_options(list(artma.autonomy.level = "autonomous"))
+  expect_equal(worker_count(4L, is_interactive = TRUE, n_cores = 8L), 4L)
+})
+
+test_that("resolve_worker_count respects the environment's process ceiling", {
+  box::use(artma / modules / method_execution[max_parallel_workers, resolve_worker_count])
+
+  withr::local_options(list(artma.general.parallel = TRUE))
+
+  # R CMD check refuses more than two simultaneous processes.
+  withr::local_envvar(list("_R_CHECK_LIMIT_CORES_" = "TRUE"))
+  expect_equal(max_parallel_workers(), 2L)
+  expect_equal(
+    resolve_worker_count(
+      8L,
+      is_interactive = FALSE, os_type = "unix", n_cores = 16L, graphics_fork_safe = TRUE
+    ),
+    2L
+  )
+
+  # Outside a check, mc.cores is the user-facing cap.
+  withr::local_envvar(list("_R_CHECK_LIMIT_CORES_" = NA))
+  withr::local_options(list(mc.cores = 3L))
+  expect_equal(max_parallel_workers(), 3L)
+  expect_equal(
+    resolve_worker_count(
+      8L,
+      is_interactive = FALSE, os_type = "unix", n_cores = 16L, graphics_fork_safe = TRUE
+    ),
+    3L
+  )
+})
+
+test_that("without_captured_output lets output through and still traps errors", {
+  box::use(artma / modules / method_execution[without_captured_output])
+
+  expect_output(
+    outcome <- without_captured_output({
+      cat("to stdout\n")
+      "value"
+    }),
+    "to stdout"
+  )
+  expect_equal(outcome$value, "value")
+  expect_null(outcome$error)
+  expect_equal(outcome$output, character())
+
+  failed <- without_captured_output(stop("boom"))
+  expect_null(failed$value)
+  expect_match(failed$error, "boom")
+})
+
+test_that("a sequential layer leaves output on the console so prompts stay visible", {
+  box::use(artma / modules / method_execution[execute_method_layer])
+
+  # A method that prompts renders its menu with cat()/cli. Sinking that output
+  # hid the menu while the method blocked on a keypress, hanging the run.
+  expect_output(
+    outcomes <- execute_method_layer(
+      "asks",
+      run_one = function(name) {
+        cat("Do you want to run BMA first?\n")
+        name
+      },
+      workers = 1L
+    ),
+    "Do you want to run BMA first?",
+    fixed = TRUE
+  )
+
+  expect_equal(outcomes[[1L]]$value, "asks")
+  expect_equal(outcomes[[1L]]$output, character())
+})
+
+test_that("with_captured_output captures output instead of printing it", {
+  box::use(artma / modules / method_execution[with_captured_output])
+
+  outcome <- testthat::expect_silent(
+    with_captured_output({
+      cat("to stdout\n")
+      message("to stderr")
+      "value"
+    })
+  )
+
+  expect_equal(outcome$value, "value")
+  expect_null(outcome$error)
+  expect_true(any(grepl("to stdout", outcome$output, fixed = TRUE)))
+  expect_true(any(grepl("to stderr", outcome$output, fixed = TRUE)))
+})
+
+test_that("with_captured_output keeps cli formatting intact", {
+  box::use(artma / modules / method_execution[with_captured_output])
+
+  withr::local_options(list(cli.num_colors = 256L))
+
+  outcome <- with_captured_output(cli::cli_alert_success("all {.strong good}"))
+  captured <- paste(outcome$output, collapse = "\n")
+
+  expect_match(captured, "all")
+  # ANSI escapes survive the capture, so replaying reproduces the styling.
+  expect_true(grepl("\033[", captured, fixed = TRUE))
+})
+
+test_that("with_captured_output keeps consecutive cli messages on separate lines", {
+  box::use(artma / modules / method_execution[with_captured_output])
+
+  # cli condition messages carry no trailing newline (unlike base::message()),
+  # so without an explicit newline they concatenate into one line (issue #321).
+  outcome <- with_captured_output({
+    cli::cli_inform("first line")
+    cli::cli_inform("second line")
+  })
+
+  first_idx <- grep("first line", outcome$output)
+  second_idx <- grep("second line", outcome$output)
+  expect_equal(length(first_idx), 1L)
+  expect_equal(length(second_idx), 1L)
+  expect_false(identical(first_idx, second_idx))
+})
+
+test_that("with_captured_output records errors and restores the sinks", {
+  box::use(artma / modules / method_execution[with_captured_output])
+
+  sinks_before <- sink.number()
+  outcome <- with_captured_output(stop("boom"))
+
+  expect_null(outcome$value)
+  expect_equal(outcome$error, "boom")
+  expect_equal(sink.number(), sinks_before)
+})
+
+test_that("build_rng_streams derives distinct, reproducible streams", {
+  box::use(artma / modules / method_execution[build_rng_streams])
+
+  streams <- build_rng_streams(c("a", "b"), seed = 42L)
+
+  expect_equal(names(streams), c("a", "b"))
+  expect_false(identical(streams$a, streams$b))
+  expect_equal(streams, build_rng_streams(c("a", "b"), seed = 42L))
+  expect_false(identical(streams, build_rng_streams(c("a", "b"), seed = 7L)))
+})
+
+test_that("build_rng_streams leaves the caller's RNG state untouched", {
+  box::use(artma / modules / method_execution[build_rng_streams])
+
+  set.seed(123)
+  before_kind <- RNGkind()
+  before_seed <- .Random.seed
+
+  build_rng_streams(c("a", "b", "c"), seed = 1L)
+
+  expect_equal(RNGkind(), before_kind)
+  expect_equal(.Random.seed, before_seed)
+})
+
+test_that("build_rng_streams gives a method the same stream regardless of the requested set", {
+  box::use(artma / modules / method_execution[build_rng_streams])
+
+  alone <- build_rng_streams("a", seed = 42L)
+  paired <- build_rng_streams(c("a", "b"), seed = 42L)
+  reversed <- build_rng_streams(c("b", "a"), seed = 42L)
+
+  # A cached stochastic result must not go stale just because a later run
+  # requests a different combination of methods, so the stream is a function
+  # of the seed and the method's name only.
+  expect_equal(paired$a, alone$a)
+  expect_equal(reversed$a, paired$a)
+  expect_equal(reversed$b, paired$b)
+})
+
+test_that("method_stream_seed folds the seed and name deterministically", {
+  box::use(artma / modules / method_execution[method_stream_seed])
+
+  expect_equal(method_stream_seed(42L, "bma"), method_stream_seed(42L, "bma"))
+  expect_false(method_stream_seed(42L, "bma") == method_stream_seed(42L, "fma"))
+  expect_false(method_stream_seed(42L, "bma") == method_stream_seed(7L, "bma"))
+  expect_true(is.integer(method_stream_seed(20240101, "bma")))
+})
+
+test_that("build_rng_streams rejects a missing seed", {
+  box::use(artma / modules / method_execution[build_rng_streams])
+
+  expect_error(build_rng_streams("a", seed = NA), "single non-missing number")
+})
+
+test_that("execute_method_layer returns results in input order", {
+  box::use(artma / modules / method_execution[execute_method_layer])
+
+  outcomes <- execute_method_layer(c("c", "a", "b"), run_one = function(name) toupper(name))
+
+  expect_equal(vapply(outcomes, function(o) o$value, character(1)), c("C", "A", "B"))
+})
+
+test_that("execute_method_layer isolates failures from the rest of the layer", {
+  box::use(artma / modules / method_execution[execute_method_layer])
+
+  run_one <- function(name) {
+    if (identical(name, "b")) stop("b exploded")
+    name
+  }
+
+  for (workers in c(1L, 2L)) {
+    skip_if(workers > 1L && !can_fork(), "forking is unavailable")
+
+    outcomes <- execute_method_layer(c("a", "b", "c"), run_one = run_one, workers = workers)
+
+    expect_equal(outcomes[[1L]]$value, "a")
+    expect_null(outcomes[[2L]]$value)
+    expect_match(outcomes[[2L]]$error, "b exploded")
+    expect_equal(outcomes[[3L]]$value, "c")
+  }
+})
+
+test_that("execute_method_layer gives identical results in parallel and sequentially", {
+  box::use(artma / modules / method_execution[build_rng_streams, execute_method_layer])
+
+  skip_if(!can_fork(), "forking is unavailable")
+
+  names <- c("a", "b", "c")
+  streams <- build_rng_streams(names, seed = 99L)
+  run_one <- function(name) list(name = name, draws = stats::runif(3))
+
+  sequential <- execute_method_layer(names, run_one, streams = streams, workers = 1L)
+  concurrent <- execute_method_layer(names, run_one, streams = streams, workers = 2L)
+
+  expect_equal(
+    lapply(sequential, function(o) o$value),
+    lapply(concurrent, function(o) o$value)
+  )
+})
+
+test_that("describe_dead_worker never reports an empty error", {
+  box::use(artma / modules / method_execution[describe_dead_worker])
+
+  # `mclapply()` yields NULL for a child that was killed outright, which used to
+  # collapse to an empty failure message.
+  silent <- describe_dead_worker(NULL, "bma")
+  expect_true(nzchar(silent))
+  expect_match(silent, "bma", fixed = TRUE)
+  expect_match(silent, "artma.general.parallel", fixed = TRUE)
+
+  detailed <- describe_dead_worker("boom", "funnel_plot")
+  expect_match(detailed, "funnel_plot", fixed = TRUE)
+  expect_match(detailed, "boom", fixed = TRUE)
+})
+
+test_that("execute_method_layer explains a worker that died without an error", {
+  box::use(artma / modules / method_execution[execute_method_layer])
+
+  skip_if(!can_fork(), "forking is unavailable")
+
+  # Guard the kill on actually being in a forked child: signalling the current
+  # process would take down the testthat subprocess running this file.
+  parent_pid <- Sys.getpid()
+  outcomes <- suppressWarnings(execute_method_layer(
+    c("a", "b"),
+    run_one = function(name) {
+      if (identical(name, "b") && !identical(Sys.getpid(), parent_pid)) {
+        tools::pskill(Sys.getpid())
+      }
+      name
+    },
+    workers = 2L
+  ))
+
+  expect_equal(outcomes[[1L]]$value, "a")
+  expect_null(outcomes[[2L]]$value)
+  expect_true(nzchar(outcomes[[2L]]$error))
+  expect_match(outcomes[[2L]]$error, "b", fixed = TRUE)
+})
+
+test_that("execute_method_layer pins BLAS/OpenMP to one thread only while forking", {
+  box::use(artma / modules / method_execution[execute_method_layer])
+
+  skip_if(!can_fork(), "forking is unavailable")
+  skip_if_not_installed("RhpcBLASctl")
+  # RhpcBLASctl reports NA for every OpenMP query when R itself was not built
+  # with OpenMP support (common on macOS toolchains); there is nothing to
+  # verify restored in that case, but the layer must still run correctly.
+  has_omp <- !is.na(RhpcBLASctl::omp_get_max_threads())
+
+  if (has_omp) {
+    RhpcBLASctl::omp_set_num_threads(2L)
+    withr::defer(RhpcBLASctl::omp_set_num_threads(RhpcBLASctl::omp_get_num_procs()))
+  }
+
+  outcomes <- execute_method_layer(
+    c("a", "b"),
+    run_one = function(name) name,
+    workers = 2L
+  )
+
+  expect_equal(vapply(outcomes, function(o) o$value, character(1)), c("a", "b"))
+  if (has_omp) {
+    # The pin-and-restore happens around `mclapply()` in the parent process,
+    # so the parent's own thread count is unaffected once the layer returns.
+    expect_equal(RhpcBLASctl::omp_get_max_threads(), 2L)
+  }
+})
+
+test_that("execute_method_layer captures output from forked workers", {
+  box::use(artma / modules / method_execution[execute_method_layer])
+
+  skip_if(!can_fork(), "forking is unavailable")
+
+  outcomes <- testthat::expect_silent(
+    execute_method_layer(
+      c("a", "b"),
+      run_one = function(name) {
+        cli::cli_alert_info("running {name}")
+        name
+      },
+      workers = 2L
+    )
+  )
+
+  expect_true(any(grepl("running a", outcomes[[1L]]$output, fixed = TRUE)))
+  expect_true(any(grepl("running b", outcomes[[2L]]$output, fixed = TRUE)))
+})
+
+test_that("execute_method_layer returns the files each method wrote", {
+  box::use(
+    artma / libs / infrastructure / output_files[record_output_file],
+    artma / modules / method_execution[execute_method_layer]
+  )
+
+  work <- withr::local_tempdir()
+
+  run_one <- function(name) {
+    path <- file.path(work, paste0(name, ".png"))
+    file.create(path)
+    record_output_file(path)
+    name
+  }
+
+  # Sequentially and in forks alike: a forked child records into its own copy
+  # of the capture stack, so the paths only reach the parent through the
+  # outcome, and the run manifest would otherwise miss every parallel method.
+  for (workers in c(1L, 2L)) {
+    skip_if(workers > 1L && !can_fork(), "forking is unavailable")
+
+    outcomes <- execute_method_layer(c("a", "b"), run_one = run_one, workers = workers)
+
+    expect_equal(basename(outcomes[[1L]]$files), "a.png")
+    expect_equal(basename(outcomes[[2L]]$files), "b.png")
+  }
+})

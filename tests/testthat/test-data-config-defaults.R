@@ -7,62 +7,44 @@ box::use(
     expect_error,
     test_that,
     expect_length
-  ],
-  withr[local_options]
+  ]
 )
-
-test_that <- getFromNamespace("test_that", "testthat")
-expect_equal <- getFromNamespace("expect_equal", "testthat")
-expect_null <- getFromNamespace("expect_null", "testthat")
-expect_true <- getFromNamespace("expect_true", "testthat")
-expect_false <- getFromNamespace("expect_false", "testthat")
-expect_error <- getFromNamespace("expect_error", "testthat")
-expect_length <- getFromNamespace("expect_length", "testthat")
 
 # ── identical_or_both_na ─────────────────────────────────────────────────────
 
-test_that("identical_or_both_na: both NA returns TRUE", {
+# Each case is list(a, b, expected); NULL and NA operands survive as list
+# elements. TRUE when both sides are NA, both NULL, or identical; FALSE for any
+# mismatch, including NA-vs-value, NULL-vs-value, and NULL-vs-NA.
+test_that("identical_or_both_na equates both-NA and both-NULL, rejects mismatches", {
   box::use(artma / data_config / defaults[identical_or_both_na])
-  expect_true(identical_or_both_na(NA, NA))
-})
 
-test_that("identical_or_both_na: both NULL returns TRUE", {
-  box::use(artma / data_config / defaults[identical_or_both_na])
-  expect_true(identical_or_both_na(NULL, NULL))
-})
+  cases <- list(
+    list(NA, NA, TRUE),
+    list(NULL, NULL, TRUE),
+    list(TRUE, TRUE, TRUE),
+    list(FALSE, FALSE, TRUE),
+    list("hello", "hello", TRUE),
+    list(42, 42, TRUE),
+    list(TRUE, FALSE, FALSE),
+    list("a", "b", FALSE),
+    list(1, 2, FALSE),
+    list(NA, TRUE, FALSE),
+    list(TRUE, NA, FALSE),
+    list(NA, "hello", FALSE),
+    list(NULL, TRUE, FALSE),
+    list("a", NULL, FALSE),
+    list(NULL, NA, FALSE),
+    list(NA, NULL, FALSE)
+  )
 
-test_that("identical_or_both_na: identical values return TRUE", {
-  box::use(artma / data_config / defaults[identical_or_both_na])
-  expect_true(identical_or_both_na(TRUE, TRUE))
-  expect_true(identical_or_both_na(FALSE, FALSE))
-  expect_true(identical_or_both_na("hello", "hello"))
-  expect_true(identical_or_both_na(42, 42))
-})
-
-test_that("identical_or_both_na: different values return FALSE", {
-  box::use(artma / data_config / defaults[identical_or_both_na])
-  expect_false(identical_or_both_na(TRUE, FALSE))
-  expect_false(identical_or_both_na("a", "b"))
-  expect_false(identical_or_both_na(1, 2))
-})
-
-test_that("identical_or_both_na: NA vs non-NA returns FALSE", {
-  box::use(artma / data_config / defaults[identical_or_both_na])
-  expect_false(identical_or_both_na(NA, TRUE))
-  expect_false(identical_or_both_na(TRUE, NA))
-  expect_false(identical_or_both_na(NA, "hello"))
-})
-
-test_that("identical_or_both_na: NULL vs non-NULL returns FALSE", {
-  box::use(artma / data_config / defaults[identical_or_both_na])
-  expect_false(identical_or_both_na(NULL, TRUE))
-  expect_false(identical_or_both_na("a", NULL))
-})
-
-test_that("identical_or_both_na: NULL vs NA returns FALSE", {
-  box::use(artma / data_config / defaults[identical_or_both_na])
-  expect_false(identical_or_both_na(NULL, NA))
-  expect_false(identical_or_both_na(NA, NULL))
+  for (i in seq_along(cases)) {
+    case <- cases[[i]]
+    expect_equal(
+      identical_or_both_na(case[[1]], case[[2]]),
+      case[[3]],
+      info = sprintf("case %d", i)
+    )
+  }
 })
 
 # ── build_default_config_entry ────────────────────────────────────────────────
@@ -70,17 +52,12 @@ test_that("identical_or_both_na: NULL vs NA returns FALSE", {
 test_that("build_default_config_entry: numeric column", {
   box::use(artma / data_config / defaults[build_default_config_entry])
 
-  withr::local_options(list(
-    "artma.data.na_handling" = "remove"
-  ))
-
   col_data <- c(1.5, 2.3, 3.7)
   entry <- build_default_config_entry("my_var", col_data)
 
   expect_equal(entry$var_name, "my_var")
   expect_equal(entry$var_name_verbose, entry$var_name_description)
   expect_true(entry$variable_summary)
-  expect_equal(entry$na_handling, "remove")
   expect_true(is.na(entry$bma))
   expect_true(is.na(entry$effect_sum_stats))
   expect_true(is.na(entry$equal))
@@ -91,10 +68,6 @@ test_that("build_default_config_entry: numeric column", {
 test_that("build_default_config_entry: character column sets variable_summary FALSE", {
   box::use(artma / data_config / defaults[build_default_config_entry])
 
-  withr::local_options(list(
-    "artma.data.na_handling" = "remove"
-  ))
-
   col_data <- c("a", "b", "c")
   entry <- build_default_config_entry("category", col_data)
 
@@ -102,31 +75,43 @@ test_that("build_default_config_entry: character column sets variable_summary FA
   expect_false(entry$variable_summary)
 })
 
-test_that("build_default_config_entry: entry has all 17 expected fields", {
+test_that("build_default_config_entry: entry has all expected fields", {
   box::use(artma / data_config / defaults[build_default_config_entry])
-
-  withr::local_options(list(
-    "artma.data.na_handling" = "remove"
-  ))
 
   entry <- build_default_config_entry("x", c(1, 2, 3))
   expected_fields <- c(
+    "source_name", "drop_conflicting_raw", "is_computed",
     "var_name", "var_name_verbose", "var_name_description",
-    "data_type", "group_category", "na_handling", "variable_summary",
+    "data_type", "group_category", "variable_summary",
     "effect_sum_stats", "equal", "gltl", "bma", "bma_reference_var",
-    "bma_to_log", "bpe", "bpe_sum_stats", "bpe_equal", "bpe_gltl"
+    "bma_to_log", "bma_allow_derived", "bpe", "bpe_sum_stats",
+    "bpe_equal", "bpe_gltl"
   )
   expect_equal(sort(names(entry)), sort(expected_fields))
+})
+
+test_that("build_default_config_entry: source_name defaults to the column's own name", {
+  box::use(artma / data_config / defaults[build_default_config_entry, extract_overrides])
+
+  entry <- build_default_config_entry("x", c(1, 2, 3))
+  expect_equal(entry$source_name, "x")
+
+  # An identity source_name is stripped by the sparse diff; a genuine rename
+  # survives it.
+  default <- build_default_config_entry("effect", c(1, 2, 3))
+  identity_entry <- default
+  expect_null(extract_overrides(identity_entry, default))
+
+  renamed_entry <- default
+  renamed_entry$source_name <- "effect_size"
+  result <- extract_overrides(renamed_entry, default)
+  expect_equal(result$source_name, "effect_size")
 })
 
 # ── build_base_config ─────────────────────────────────────────────────────────
 
 test_that("build_base_config: creates entry for each column", {
   box::use(artma / data_config / defaults[build_base_config])
-
-  withr::local_options(list(
-    "artma.data.na_handling" = "remove"
-  ))
 
   df <- data.frame(
     age = c(25, 30, 35),
@@ -147,10 +132,6 @@ test_that("build_base_config: creates entry for each column", {
 
 test_that("build_base_config: keys are make.names of column names", {
   box::use(artma / data_config / defaults[build_base_config])
-
-  withr::local_options(list(
-    "artma.data.na_handling" = "remove"
-  ))
 
   df <- data.frame(
     a = 1,
@@ -222,9 +203,9 @@ test_that("extract_overrides: detects change from NA to value", {
 test_that("extract_overrides: detects change from value to different value", {
   box::use(artma / data_config / defaults[extract_overrides])
 
-  default <- list(var_name = "x", na_handling = "remove")
-  entry <- list(var_name = "x", na_handling = "impute")
+  default <- list(var_name = "x", gltl = "mean")
+  entry <- list(var_name = "x", gltl = "median")
 
   result <- extract_overrides(entry, default)
-  expect_equal(result$na_handling, "impute")
+  expect_equal(result$gltl, "median")
 })

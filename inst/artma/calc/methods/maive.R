@@ -1,7 +1,22 @@
+# 0.2.5 is the first release that returns unrounded estimates; older versions
+# round beta, SE, and Egger terms to 3 decimals, distorting the p-values and
+# CIs derived from them and zeroing out standard errors below 0.0005.
+# DESCRIPTION pins only the newest CRAN release so dependency resolution
+# works; this constant enforces the real floor at runtime.
+MAIVE_MIN_VERSION <- "0.2.5"
+
+#' @title Check whether the installed MAIVE version meets the minimum requirement
+#' @param installed_version *[character]* Version string to check, e.g. from `packageVersion("MAIVE")`.
+#' @param min_version *[character]* Minimum required version.
+#' @return *[logical]* TRUE if `installed_version >= min_version`.
+maive_version_ok <- function(installed_version, min_version = MAIVE_MIN_VERSION) {
+  package_version(installed_version) >= package_version(min_version)
+}
+
 #' @title MAIVE wrapper
 #' @description
 #' Wrapper for the MAIVE (Meta-Analysis Instrumental Variable Estimator) method
-#' from the PetrCala/maive GitHub package. This estimator addresses publication
+#' from the CRAN package \pkg{MAIVE}. This estimator addresses publication
 #' bias and p-hacking in meta-analysis using instrumental variables.
 #' @param dat *[data.frame]* Data with columns: bs (estimates), sebs (std errors),
 #'   Ns (sample sizes), studyid (study IDs, optional).
@@ -9,13 +24,15 @@
 #' @param weight *[integer]* Weighting scheme: 0=none (default), 1=weights, 2=adjusted.
 #' @param instrument *[integer]* Instrument SEs: 0=no, 1=yes (default).
 #' @param studylevel *[integer]* Study-level correlation: 0=none, 1=fixed, 2=cluster (default).
-#' @param SE *[integer]* SE estimation: 1=Asymptotic, 2=Pairs cluster boot, 3=Wild boot (default),
-#'   4=Wild cluster boot, 5=Pairs boot.
-#' @param AR *[integer]* Anderson-Rubin CI: 0=no, 1=yes (default).
+#' @param SE *[integer]* SE estimation: 0=CR0, 1=CR1 (default), 2=CR2,
+#'   3=wild cluster bootstrap.
+#' @param AR *[integer]* Anderson-Rubin CI: 0=no (default), 1=yes.
 #' @param first_stage *[integer]* First stage option (default 0).
+#' @param seed *[integer]* RNG seed for the wild cluster bootstrap (SE = 3), so
+#'   repeated runs on the same data reproduce identical results (default 123).
 #' @return *[list]* MAIVE output with beta, SE, F-test, Hausman test, etc.
 maive <- function(dat, method = 3L, weight = 0L, instrument = 1L, studylevel = 2L,
-                  SE = 1L, AR = 0L, first_stage = 0L) {
+                  SE = 1L, AR = 0L, first_stage = 0L, seed = 123L) {
   box::use(
     artma / libs / core / validation[validate, assert]
   )
@@ -25,14 +42,23 @@ maive <- function(dat, method = 3L, weight = 0L, instrument = 1L, studylevel = 2
     is.numeric(method),
     is.numeric(weight),
     is.numeric(instrument),
-    is.numeric(studylevel)
+    is.numeric(studylevel),
+    is.numeric(seed)
   )
 
   # Check if MAIVE package is available
   if (!requireNamespace("MAIVE", quietly = TRUE)) {
     cli::cli_abort(c(
       "Package {.pkg MAIVE} is required for MAIVE estimation.",
-      "i" = "Install with: devtools::install_github('PetrCala/maive@0.0.2.11')"
+      "i" = "Install with: install.packages('MAIVE')"
+    ))
+  }
+
+  installed_version <- as.character(utils::packageVersion("MAIVE"))
+  if (!maive_version_ok(installed_version)) {
+    cli::cli_abort(c(
+      "Package {.pkg MAIVE} {MAIVE_MIN_VERSION} or higher is required for MAIVE estimation.",
+      "i" = "Installed version: {installed_version}. Upgrade with: install.packages('MAIVE')"
     ))
   }
 
@@ -43,9 +69,13 @@ maive <- function(dat, method = 3L, weight = 0L, instrument = 1L, studylevel = 2
     cli::cli_abort("Missing required columns for MAIVE: {.field {missing_cols}}")
   }
 
-  # Call the MAIVE package function
+  # Call the MAIVE package function. MAIVE's own warnings are suppressed:
+  # the weak-instrument warning duplicates the diagnostic maive.R (the
+  # econometric wrapper) already re-derives and reports via cli_alert_warning,
+  # and clubSandwich's first-load "Registered S3 method overwritten" message
+  # is session noise with no user-actionable content.
   result <- tryCatch(
-    MAIVE::maive(
+    suppressWarnings(suppressMessages(MAIVE::maive(
       dat = dat,
       method = as.integer(method),
       weight = as.integer(weight),
@@ -53,8 +83,9 @@ maive <- function(dat, method = 3L, weight = 0L, instrument = 1L, studylevel = 2
       studylevel = as.integer(studylevel),
       SE = as.integer(SE),
       AR = as.integer(AR),
-      first_stage = as.integer(first_stage)
-    ),
+      first_stage = as.integer(first_stage),
+      seed = as.integer(seed)
+    ))),
     error = function(e) {
       cli::cli_abort(c(
         "MAIVE estimation failed: {e$message}",
@@ -66,4 +97,4 @@ maive <- function(dat, method = 3L, weight = 0L, instrument = 1L, studylevel = 2
   result
 }
 
-box::export(maive)
+box::export(maive, maive_version_ok, MAIVE_MIN_VERSION)

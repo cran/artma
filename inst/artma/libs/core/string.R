@@ -8,14 +8,18 @@ box::use(artma / libs / core / validation[validate, assert])
 pluralize <- function(word, count = NULL) {
   validate(is.character(word))
 
-  if (is.null(count)) {
+  apply_plural <- function(word) {
     if (grepl("[sxz]$", word) || grepl("[sc]h$", word)) {
       return(paste0(word, "es"))
     }
     if (grepl("[^aeiou]y$", word)) {
       return(sub("y$", "ies", word))
     }
-    return(paste0(word, "s"))
+    paste0(word, "s")
+  }
+
+  if (is.null(count)) {
+    return(apply_plural(word))
   }
 
   validate(is.numeric(count))
@@ -24,30 +28,32 @@ pluralize <- function(word, count = NULL) {
     return(word)
   }
 
-  if (grepl("[sxz]$", word) || grepl("[sc]h$", word)) {
-    return(paste0(word, "es"))
-  }
-  if (grepl("[^aeiou]y$", word)) {
-    return(sub("y$", "ies", word))
-  }
-  paste0(word, "s")
+  apply_plural(word)
 }
-#' Find a string in a vector of strings using a substring
-#'
-#' @param vector_of_strings *\[character\]* The vector of strings to search
-#' @param substring *\[character\]* The substring to search for
-#' `character` The string that contains the substring
-find_string_using_substring <- function(vector_of_strings, substring) {
-  assert(is.character(substring), "The substring must be a character")
-  assert(is.vector(vector_of_strings), "The vector of strings must be a character vector")
-  match_bool <- grepl(substring, vector_of_strings)
-  if (sum(match_bool) == 0) {
-    cli::cli_abort("Could not find the substring", substring, "in the vector of strings.")
+#' @title Describe counts, leaving the zeros out
+#' @description Turn named counts into readable phrases: `c(table = 2, plot = 0)`
+#'   becomes `"2 tables"`. A count of zero is dropped rather than reported, so a
+#'   message never tells the reader about something that did not happen. The
+#'   result is a character vector, which `cli` collapses into "a, b and c" when
+#'   interpolated; an all-zero input yields an empty vector, which the caller
+#'   uses to pick a "nothing happened" wording instead.
+#' @param counts *\[numeric\]* Counts, named by the singular noun each belongs to.
+#' @return *\[character\]* One phrase per non-zero count, in the given order.
+count_phrases <- function(counts) {
+  counts <- unlist(counts)
+  if (length(counts) == 0) {
+    return(character())
   }
-  if (sum(match_bool) > 1) {
-    cli::cli_abort("Found multiple matches for the substring", substring, "in the vector of strings.")
-  }
-  vector_of_strings[match_bool]
+
+  validate(is.numeric(counts))
+  assert(!is.null(names(counts)), "`counts` must be named by the noun each count describes.")
+
+  counts <- counts[!is.na(counts) & counts > 0]
+  vapply(
+    seq_along(counts),
+    function(i) paste(counts[[i]], pluralize(names(counts)[[i]], counts[[i]])),
+    character(1)
+  )
 }
 
 #' @title Trim quotes
@@ -55,29 +61,6 @@ find_string_using_substring <- function(vector_of_strings, substring) {
 #' @param s *\[character\]* The string to trim quotes for.
 trim_quotes <- function(s) gsub("^(\"|')+|(\"|')+$", "", s)
 
-
-#' Clean a string by removing special characters and converting to lowercase
-#'
-#' @param input_string *\[character\]* The string to clean
-#' `character` The cleaned string
-clean_string <- function(input_string) {
-  box::use(artma / libs / infrastructure / polyfills[str_replace_all, str_trim])
-
-  # Remove special characters
-  str_out <- str_replace_all(input_string, "[^a-zA-Z0-9]", "_")
-
-  # Convert to lowercase
-  str_out <- tolower(str_out)
-
-  # Remove leading or trailing underscores
-  str_out <- str_trim(str_out, side = "both")
-  str_out <- str_replace_all(str_out, "^_+|_+$", "")
-
-  # Remove quotes
-  str_out <- trim_quotes(str_out)
-
-  str_out
-}
 
 #' Make a verbose name
 #'
@@ -94,8 +77,7 @@ make_verbose_name <- function(input_str) {
 }
 
 box::export(
-  clean_string,
-  find_string_using_substring,
+  count_phrases,
   make_verbose_name,
   pluralize,
   trim_quotes

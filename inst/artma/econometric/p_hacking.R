@@ -1,13 +1,14 @@
 #' @title P-hacking test helpers
 #' @description
 #' Helper functions for comprehensive p-hacking detection tests.
-#' Includes Caliper tests (Gerber & Malhotra, 2008), Elliott tests (2022),
-#' and MAIVE estimator (Irsova et al., 2023).
+#' Includes Caliper tests (Gerber & Malhotra, 2008) and Elliott tests (2022).
+#' The MAIVE estimator lives in its own module (`artma/econometric/maive`).
 NULL
 
 box::use(
-  stats[pchisq, ecdf, lm, coef],
+  stats[pchisq, ecdf, coef],
   artma / libs / core / validation[validate, assert],
+  artma / libs / core / log[is_info_enabled],
   artma / libs / formatting / results[
     format_number,
     format_se,
@@ -15,99 +16,254 @@ box::use(
     significance_mark
   ],
   artma / calc / methods / elliott[
-    simulate_cdfs_parallel,
     binomial_test,
     lcm_test,
     fisher_test,
     run_discontinuity_test,
-    cox_shi_test
+    cox_shi_test,
+    skipped_result
   ],
-  artma / calc / methods / maive[maive]
+  artma / calc / methods / elliott_cache[simulate_cdfs_cached]
 )
+
+#' @title Extract the skip reason attached to a `skipped_result()` value
+#' @param value *[numeric]* A test result, possibly a `skipped_result()`.
+#' @return *[character or NULL]* The reason, or `NULL` if `value` is not a skip.
+skip_reason <- function(value) {
+  attr(value, "reason")
+}
+
+DEFAULT_ELLIOTT_SUPPORTS <- c(0.05, 0.1)
+
+#' @title Result-list key suffix for an Elliott support upper bound
+#' @param p_max *[numeric]* Support upper bound, e.g. `0.05`.
+#' @return *[character]* Suffix such as `"005"` (0.05) or `"01"` (0.1).
+support_key <- function(p_max) {
+  gsub(".", "", format(p_max), fixed = TRUE)
+}
+
+#' @title Display label for an Elliott support upper bound
+#' @param p_max *[numeric]* Support upper bound, e.g. `0.1`.
+#' @return *[character]* Label such as `"0.10"`, always with two decimals.
+support_label <- function(p_max) {
+  format(p_max, nsmall = 2)
+}
+
+#' @title Interval label for an Elliott support upper bound
+#' @param p_max *[numeric]* Support upper bound, e.g. `0.05`.
+#' @return *[character]* Label such as `"[0, 0.05]"`.
+support_interval_label <- function(p_max) {
+  paste0("[0, ", support_label(p_max), "]")
+}
 
 # Caliper tests (Gerber & Malhotra, 2008) ---------------------------------
 
+CALIPER_TAILS <- c("auto", "positive", "negative", "absolute")
+
+#' @title Resolve which tail the caliper should inspect
+#' @description
+#' The canonical Gerber and Malhotra (2008) caliper is one-sided, applied in
+#' the direction the literature has an incentive to push its estimates. Signed
+#' t-statistics compared against positive-only thresholds therefore inspect the
+#' wrong tail whenever the literature is dominated by negative effects, where
+#' the reporting incentive sits at `t < -1.96` rather than `t > 1.96`.
+#'
+#' `"auto"` (the default) picks the tail carrying the majority of the
+#' t-statistics. `"positive"` and `"negative"` force one tail; `"absolute"`
+#' pools both tails by taking `|t|`, which is the right choice only when the
+#' literature genuinely reports both signs as findings.
+#' @param t_stats *[numeric]* T-statistics.
+#' @param tail *[character]* One of `"auto"`, `"positive"`, `"negative"`, `"absolute"`.
+#' @return *[character]* The resolved tail, never `"auto"`.
+resolve_caliper_tail <- function(t_stats, tail = "auto") {
+  validate(is.character(tail), length(tail) == 1L)
+  assert(tail %in% CALIPER_TAILS, paste0("tail must be one of: ", paste(CALIPER_TAILS, collapse = ", ")))
+
+  if (!identical(tail, "auto")) {
+    return(tail)
+  }
+
+  usable <- t_stats[is.finite(t_stats) & t_stats != 0]
+  if (length(usable) == 0) {
+    return("positive")
+  }
+
+  if (mean(usable > 0) >= 0.5) "positive" else "negative"
+}
+
+#' @title Orient t-statistics so the tested tail is the upper one
+#' @param t_stats *[numeric]* T-statistics.
+#' @param tail *[character]* A resolved tail (not `"auto"`).
+#' @return *[numeric]* Oriented t-statistics.
+orient_t_stats <- function(t_stats, tail) {
+  switch(tail,
+    positive = t_stats,
+    negative = -t_stats,
+    absolute = abs(t_stats),
+    t_stats
+  )
+}
+
+#' @title Cluster-robust test that a window share equals one half
+#' @description
+#' `stats::binom.test` treats every estimate in the caliper window as an
+#' independent draw, which overstates significance when a handful of studies
+#' contribute most of the window (a single study reporting eight estimates just
+#' above the threshold is one decision, not eight). This computes the same
+#' share but tests it with a cluster-robust score statistic: the score residual
+#' `y_i - 0.5` is summed within each study, and the variance of the share comes
+#' from the between-study spread of those sums, referred to `t(G - 1)`.
+#'
+#' Falls back to the exact binomial test when clustering is not identified
+#' (fewer than two studies, or zero between-study variance).
+#' @param above *[logical]* Whether each window observation lies above the threshold.
+#' @param study_id *[vector or NULL]* Study identifiers for the window observations.
+#' @return *[list]* Contains p_value, n_studies, and cluster_method.
+cluster_robust_share_test <- function(above, study_id = NULL) {
+  n_total <- length(above)
+  n_above <- sum(above)
+
+  exact <- function(n_studies, reason) {
+    list(
+      p_value = stats::binom.test(n_above, n_total, p = 0.5)$p.value,
+      n_studies = n_studies,
+      cluster_method = reason
+    )
+  }
+
+  if (is.null(study_id)) {
+    return(exact(NA_integer_, "none"))
+  }
+
+  assert(length(study_id) == n_total, "study_id must be the same length as the window observations")
+
+  clusters <- split(above, as.character(study_id))
+  n_studies <- length(clusters)
+  if (n_studies < 2L) {
+    return(exact(n_studies, "none"))
+  }
+
+  # Score residuals under H0: share = 0.5, summed within each study.
+  cluster_scores <- vapply(clusters, function(y) sum(y - 0.5), numeric(1))
+  variance <- (n_studies / (n_studies - 1)) * sum(cluster_scores^2) / n_total^2
+
+  if (!is.finite(variance) || variance <= 0) {
+    return(exact(n_studies, "none"))
+  }
+
+  z <- ((n_above / n_total) - 0.5) / sqrt(variance)
+
+  list(
+    p_value = 2 * stats::pt(-abs(z), df = n_studies - 1L),
+    n_studies = n_studies,
+    cluster_method = "study"
+  )
+}
+
+#' @title Describe which side of the threshold carries the excess mass
+#' @param share_above *[numeric]* Share of window observations above the threshold.
+#' @return *[character]* `"above"`, `"below"`, `"balanced"`, or `NA`.
+caliper_direction <- function(share_above) {
+  if (!is.finite(share_above)) {
+    return(NA_character_)
+  }
+  if (share_above > 0.5) {
+    "above"
+  } else if (share_above < 0.5) {
+    "below"
+  } else {
+    "balanced"
+  }
+}
+
 #' @title Run single Caliper test
 #' @description
-#' Performs a Caliper test to detect selective reporting around significance thresholds.
+#' Performs the Gerber and Malhotra (2008) Caliper test to detect selective
+#' reporting around a significance threshold: within a narrow window around
+#' the threshold, the share of observations just above the threshold is tested
+#' against 50%. The window is taken on t-statistics oriented towards the tail
+#' the literature has an incentive to report (see [resolve_caliper_tail()]),
+#' and the share is tested with a study-clustered statistic when `study_id` is
+#' supplied (see [cluster_robust_share_test()]).
 #' @param t_stats *[numeric]* T-statistics.
-#' @param study_id *[vector]* Study identifiers for clustering.
 #' @param threshold *[numeric]* T-statistic threshold (default 1.96).
 #' @param width *[numeric]* Caliper interval width (default 0.05).
-#' @param add_significance_marks *[logical]* Whether to add significance asterisks.
-#' @return *[list]* Contains estimate, SE, n_above, n_below.
-run_single_caliper <- function(t_stats, study_id, threshold = 1.96, width = 0.05, add_significance_marks = TRUE) {
+#' @param study_id *[vector, optional]* Study identifiers, one per element of `t_stats`.
+#' @param tail *[character, optional]* Tail to inspect; see [resolve_caliper_tail()].
+#' @return *[list]* Contains share_above, p_value, n_above, n_below, n_studies,
+#'   direction, tail, and cluster_method.
+run_single_caliper <- function(t_stats, threshold = 1.96, width = 0.05,
+                               study_id = NULL, tail = "auto") {
   validate(
     is.numeric(t_stats),
     is.numeric(threshold),
     is.numeric(width)
   )
+  assert(
+    is.null(study_id) || length(study_id) == length(t_stats),
+    "study_id must be the same length as t_stats"
+  )
 
-  # Identify significant observations
-  significant_obs <- if (threshold >= 0) {
-    t_stats > threshold
-  } else {
-    t_stats < threshold
-  }
+  resolved_tail <- resolve_caliper_tail(t_stats, tail)
+  oriented <- orient_t_stats(t_stats, resolved_tail)
 
   # Subset to caliper interval
-  lower_bound <- t_stats > (threshold - width)
-  upper_bound <- t_stats < (threshold + width)
+  lower_bound <- oriented > (threshold - width)
+  upper_bound <- oriented < (threshold + width)
   in_interval <- lower_bound & upper_bound
+  in_interval[is.na(in_interval)] <- FALSE
 
-  if (sum(in_interval) == 0) {
+  window <- oriented[in_interval]
+  above <- window > threshold
+  n_above <- sum(above)
+  n_below <- sum(window < threshold)
+  n_total <- n_above + n_below
+
+  if (n_total == 0) {
     return(list(
-      estimate = NA_real_,
-      std_error = NA_real_,
+      share_above = NA_real_,
+      p_value = NA_real_,
       n_above = 0,
-      n_below = 0
+      n_below = 0,
+      n_studies = 0L,
+      direction = NA_character_,
+      tail = resolved_tail,
+      cluster_method = "none"
     ))
   }
 
-  # Prepare data for regression
-  df_subset <- data.frame(
-    significant = as.numeric(significant_obs[in_interval]),
-    t_stat = t_stats[in_interval],
-    study_id = study_id[in_interval]
-  )
-
-  # Run regression (suppress clubSandwich override messages)
-  model <- stats::lm(significant ~ t_stat - 1, data = df_subset)
-  model_coefs <- suppressPackageStartupMessages(suppressMessages({
-    tryCatch(
-      {
-        lmtest::coeftest(model, vcov = sandwich::vcovHC(model, type = "const", cluster = df_subset$study_id))
-      },
-      error = function(e) {
-        lmtest::coeftest(model, vcov = sandwich::vcovHC(model, type = "const"))
-      }
-    )
-  }))
-
-  estimate <- model_coefs["t_stat", "Estimate"]
-  std_error <- model_coefs["t_stat", "Std. Error"]
-  n_above <- sum(t_stats[in_interval] > threshold)
-  n_below <- sum(t_stats[in_interval] < threshold)
+  window_studies <- if (is.null(study_id)) NULL else study_id[in_interval]
+  test <- cluster_robust_share_test(above, window_studies)
+  share_above <- n_above / n_total
 
   list(
-    estimate = estimate,
-    std_error = std_error,
+    share_above = share_above,
+    p_value = test$p_value,
     n_above = n_above,
-    n_below = n_below
+    n_below = n_below,
+    n_studies = test$n_studies,
+    direction = caliper_direction(share_above),
+    tail = resolved_tail,
+    cluster_method = test$cluster_method
   )
 }
 
 #' @title Run Caliper tests across multiple thresholds and widths
 #' @param t_stats *[numeric]* T-statistics.
-#' @param study_id *[vector]* Study identifiers.
 #' @param thresholds *[numeric]* Vector of thresholds to test.
 #' @param widths *[numeric]* Vector of caliper widths to test.
+#' @param study_id *[vector, optional]* Study identifiers, one per element of `t_stats`.
+#' @param tail *[character, optional]* Tail to inspect; see [resolve_caliper_tail()].
 #' @param add_significance_marks *[logical]* Whether to add significance marks.
 #' @param round_to *[integer]* Number of decimal places.
 #' @param show_progress *[logical]* Whether to show progress indicator.
-#' @return *[data.frame]* Caliper test results.
-run_caliper_tests <- function(t_stats, study_id, thresholds = c(0, 1.96, 2.58),
-                              widths = c(0.05, 0.1, 0.2),
+#' @return *[list]* One entry per threshold-width pair. `share_above` and
+#'   `p_value` hold the unrounded numbers; `share_above_formatted` and
+#'   `p_value_formatted` hold the rounded, starred strings the summary table
+#'   prints.
+run_caliper_tests <- function(t_stats, thresholds = c(1.645, 1.96, 2.58),
+                              widths = c(0.05, 0.1, 0.2), study_id = NULL,
+                              tail = "auto",
                               add_significance_marks = TRUE, round_to = 3L,
                               show_progress = TRUE) {
   validate(
@@ -116,25 +272,15 @@ run_caliper_tests <- function(t_stats, study_id, thresholds = c(0, 1.96, 2.58),
     is.numeric(widths)
   )
 
-  # Preload packages to suppress clubSandwich S3 override messages
-  # clubSandwich is loaded when sandwich is loaded and overrides methods
-  invisible(suppressPackageStartupMessages({
-    suppressMessages({
-      requireNamespace("sandwich", quietly = TRUE)
-      requireNamespace("lmtest", quietly = TRUE)
-      # Force clubSandwich to load if available (so override happens quietly)
-      if (requireNamespace("clubSandwich", quietly = TRUE)) {
-        loadNamespace("clubSandwich")
-      }
-    })
-  }))
+  # Dedupe so each threshold-width pair is computed (and later looked up) once
+  thresholds <- unique(thresholds)
+  widths <- unique(widths)
 
   results <- list()
   total_tests <- length(thresholds) * length(widths)
 
   # Show progress bar if requested and verbosity allows
-  verbosity <- getOption("artma.verbose", 3)
-  show_pb <- show_progress && verbosity >= 3 && total_tests >= 3
+  show_pb <- show_progress && is_info_enabled() && total_tests >= 3
 
   if (show_pb) {
     cli::cli_progress_bar(
@@ -144,29 +290,29 @@ run_caliper_tests <- function(t_stats, study_id, thresholds = c(0, 1.96, 2.58),
     )
   }
 
+  resolved_tail <- resolve_caliper_tail(t_stats, tail)
+
   for (thresh in thresholds) {
     for (w in widths) {
-      res <- run_single_caliper(t_stats, study_id, thresh, w, add_significance_marks)
+      res <- run_single_caliper(t_stats, thresh, w, study_id = study_id, tail = resolved_tail)
 
       if (show_pb) {
         cli::cli_progress_update()
       }
 
-      est_formatted <- if (is.finite(res$estimate)) {
-        est_str <- format_number(res$estimate, round_to)
-        if (add_significance_marks && is.finite(res$std_error)) {
-          p_val <- 2 * stats::pnorm(-abs(res$estimate / res$std_error))
-          mark <- significance_mark(p_val)
-          paste0(est_str, mark)
-        } else {
-          est_str
-        }
+      share_formatted <- if (is.finite(res$share_above)) {
+        format_number(res$share_above, round_to)
       } else {
         NA_character_
       }
 
-      se_formatted <- if (is.finite(res$std_error)) {
-        paste0("(", format_number(res$std_error, round_to), ")")
+      # Only a share above 0.5 is evidence of p-hacking. A significantly *low*
+      # share points the other way, so it must not be starred as if it were a
+      # discontinuity in the hacking direction.
+      p_value_formatted <- if (is.finite(res$p_value)) {
+        p_str <- format_number(res$p_value, round_to)
+        starrable <- add_significance_marks && identical(res$direction, "above")
+        if (starrable) paste0(p_str, significance_mark(res$p_value)) else p_str
       } else {
         NA_character_
       }
@@ -174,10 +320,16 @@ run_caliper_tests <- function(t_stats, study_id, thresholds = c(0, 1.96, 2.58),
       results[[length(results) + 1]] <- list(
         threshold = thresh,
         width = w,
-        estimate = est_formatted,
-        std_error = se_formatted,
+        share_above = res$share_above,
+        p_value = res$p_value,
+        share_above_formatted = share_formatted,
+        p_value_formatted = p_value_formatted,
         n_above = res$n_above,
-        n_below = res$n_below
+        n_below = res$n_below,
+        n_studies = res$n_studies,
+        direction = res$direction,
+        tail = res$tail,
+        cluster_method = res$cluster_method
       )
     }
   }
@@ -210,7 +362,7 @@ build_caliper_summary <- function(caliper_results, options) {
   display_ratios <- options$display_ratios %||% TRUE
 
   # Initialize result matrix
-  n_rows <- length(widths) * 3 # 3 rows per width: Estimate, SE, n count
+  n_rows <- length(widths) * 4 # 4 rows per width: share above, direction, p-value, n count
   result <- matrix("", nrow = n_rows, ncol = length(thresholds) + 1)
 
   # Column names
@@ -219,159 +371,66 @@ build_caliper_summary <- function(caliper_results, options) {
   # Build matrix
   row_idx <- 1
   for (w in widths) {
-    # Row 1: Estimates
-    result[row_idx, 1] <- paste0("Caliper width ", w, " - Estimate")
-    # Row 2: SEs
-    result[row_idx + 1, 1] <- paste0("Caliper width ", w, " - SE")
-    # Row 3: n count (ratio or total)
-    result[row_idx + 2, 1] <- paste0("Caliper width ", w, if (display_ratios) " - n above/below" else " - n total")
+    # Row 1: Share above the threshold
+    result[row_idx, 1] <- paste0("Caliper width ", w, " - Share above")
+    # Row 2: Which side of the threshold carries the excess mass
+    result[row_idx + 1, 1] <- paste0("Caliper width ", w, " - Direction")
+    # Row 3: Test p-value
+    result[row_idx + 2, 1] <- paste0("Caliper width ", w, " - p-value")
+    # Row 4: n count (ratio or total)
+    result[row_idx + 3, 1] <- paste0("Caliper width ", w, if (display_ratios) " - n above/below" else " - n total")
 
     for (col_idx in seq_along(thresholds)) {
       thresh <- thresholds[col_idx]
-      # Find matching result
+      # Find matching result (thresholds/widths are deduped upstream, so exactly one match)
       res <- caliper_results[[which(
         vapply(caliper_results, function(x) x$width == w && x$threshold == thresh, logical(1))
       )]]
 
-      result[row_idx, col_idx + 1] <- res$estimate
-      result[row_idx + 1, col_idx + 1] <- res$std_error
+      result[row_idx, col_idx + 1] <- res$share_above_formatted
+      result[row_idx + 1, col_idx + 1] <- caliper_direction_label(res$direction)
+      result[row_idx + 2, col_idx + 1] <- res$p_value_formatted
       # Display ratio or total based on option
-      result[row_idx + 2, col_idx + 1] <- if (display_ratios) {
+      counts <- if (display_ratios) {
         paste0(res$n_above, "/", res$n_below)
       } else {
         as.character(res$n_above + res$n_below)
       }
+      n_studies <- res$n_studies
+      result[row_idx + 3, col_idx + 1] <- if (is.null(n_studies) || !is.finite(n_studies) || n_studies == 0) {
+        counts
+      } else {
+        paste0(counts, " (", n_studies, " stud", if (n_studies == 1L) "y" else "ies", ")")
+      }
     }
 
-    row_idx <- row_idx + 3
+    row_idx <- row_idx + 4
   }
 
   # Convert to data frame
   df <- as.data.frame(result, stringsAsFactors = FALSE)
   colnames(df) <- col_names
 
+  # Carried for the printed header; dropped by the CSV exporter.
+  attr(df, "caliper_tail") <- caliper_results[[1]]$tail
+  attr(df, "caliper_cluster_method") <- caliper_results[[1]]$cluster_method
+
   df
 }
 
-# MAIVE utilities ----------------------------------------------------------
-
-#' @title Prepare data for MAIVE
-#' @param df *[data.frame]* Input data with effect, se, n_obs, study_id.
-#' @return *[data.frame]* Data formatted for MAIVE (bs, sebs, Ns, studyid).
-prepare_maive_data <- function(df) {
-  validate(is.data.frame(df))
-
-  required_cols <- c("effect", "se", "n_obs")
-  validate(all(required_cols %in% colnames(df)))
-
-  maive_data <- data.frame(
-    bs = df$effect,
-    sebs = df$se,
-    Ns = df$n_obs,
-    stringsAsFactors = FALSE
+#' @title Human-readable label for a caliper direction
+#' @param direction *[character]* Value returned by [caliper_direction()].
+#' @return *[character]* Label for display.
+caliper_direction_label <- function(direction) {
+  if (is.null(direction) || is.na(direction)) {
+    return("")
+  }
+  switch(direction,
+    above = "excess above",
+    below = "excess below (anti-hacking)",
+    balanced = "balanced",
+    ""
   )
-
-  if ("study_id" %in% colnames(df)) {
-    maive_data$studyid <- df$study_id
-  }
-
-  maive_data
-}
-
-#' @title Format MAIVE results
-#' @param maive_output *[list]* Output from maive() function.
-#' @param options *[list]* Options.
-#' @return *[data.frame]* Formatted MAIVE summary.
-format_maive_results <- function(maive_output, options) {
-  if (is.null(maive_output)) {
-    return(data.frame(
-      Statistic = "Error",
-      Value = "MAIVE estimation failed",
-      stringsAsFactors = FALSE
-    ))
-  }
-
-  rd <- options$round_to
-  rows <- list()
-  add <- function(stat, val) rows[[length(rows) + 1L]] <<- list(stat = stat, val = val)
-  sep <- function() add("", "")
-
-  # --- Estimates ---
-  beta_p <- maive_p_from_coef(maive_output$beta, maive_output$SE)
-  add("MAIVE coefficient", paste0(format_number(maive_output$beta, rd), significance_mark(beta_p)))
-  add("  Std. error", format_se(maive_output$SE, rd))
-
-  selected <- maive_output$petpeese_selected
-  if (!is.null(selected) && !is.na(selected)) {
-    add("Model selected", selected)
-  }
-
-  # --- Publication bias ---
-  sep()
-  pub_p <- maive_output$`pub bias p-value`
-  if (is.numeric(pub_p) && is.finite(pub_p)) {
-    add("Pub. bias p-value", paste0(format_number(pub_p, rd), significance_mark(pub_p)))
-  } else {
-    add("Pub. bias p-value", "NA")
-  }
-
-  add("Egger coefficient", format_number(maive_output$egger_coef, rd))
-  add("  Std. error", format_se(maive_output$egger_se, rd))
-
-  boot_ci <- maive_output$egger_boot_ci
-  if (is.numeric(boot_ci) && length(boot_ci) == 2L && all(is.finite(boot_ci))) {
-    add("  95% CI (bootstrap)", format_ci(boot_ci[1L], boot_ci[2L], rd))
-  }
-
-  # PEESE SE^2 details (only when PEESE is the selected model)
-  peese_coef <- maive_output$peese_se2_coef
-  if (is.numeric(peese_coef) && is.finite(peese_coef)) {
-    add("PEESE SE^2 coefficient", format_number(peese_coef, rd))
-    peese_se <- maive_output$peese_se2_se
-    if (is.numeric(peese_se) && is.finite(peese_se)) {
-      add("  Std. error", format_se(peese_se, rd))
-    }
-  }
-
-  # --- Diagnostics ---
-  sep()
-  ftest_raw <- maive_output$`F-test`
-  ftest_val <- if (!is.null(ftest_raw) && !is.na(ftest_raw) && !identical(ftest_raw, "NA")) {
-    format_number(as.numeric(ftest_raw), rd)
-  } else {
-    "NA"
-  }
-  add("F-test (1st stage IV)", ftest_val)
-
-  add("Hausman test", format_number(maive_output$Hausman, rd))
-  add("  Chi-sq. crit. (alpha=0.05)", format_number(maive_output$Chi2, rd))
-
-  ar_ci <- maive_output$AR_CI
-  if (is.numeric(ar_ci) && length(ar_ci) == 2L && all(is.finite(ar_ci))) {
-    add("AR 95% CI", format_ci(ar_ci[1L], ar_ci[2L], rd))
-  }
-
-  # Build data frame
-  stats <- vapply(rows, `[[`, "", "stat")
-  vals <- vapply(rows, `[[`, "", "val")
-
-  data.frame(
-    Statistic = stats,
-    Value = vals,
-    stringsAsFactors = FALSE,
-    check.names = FALSE
-  )
-}
-
-#' @title Compute two-sided p-value from coefficient and SE
-#' @param beta *[numeric]* Coefficient.
-#' @param se *[numeric]* Standard error.
-#' @return *[numeric]* P-value, or NA if inputs are not finite.
-maive_p_from_coef <- function(beta, se) {
-  if (!is.numeric(beta) || !is.numeric(se) || !is.finite(beta) || !is.finite(se) || se <= 0) {
-    return(NA_real_)
-  }
-  2 * stats::pnorm(-abs(beta / se))
 }
 
 # P-value utilities --------------------------------------------------------
@@ -393,6 +452,28 @@ compute_pvalues <- function(effect, se) {
   2 * stats::pnorm(-abs(t_stats))
 }
 
+#' @title Resolve t-statistics, preferring a user-mapped column
+#' @description
+#' Uses `df$t_stat` where reported, which is more faithful to what the primary
+#' study published (e.g. clustered standard errors the meta-analyst cannot
+#' recompute from `effect`/`se` alone), falling back to `effect / se` for rows
+#' where `t_stat` is absent or `NA`.
+#' @param df *[data.frame]* Input data with effect, se, and optional t_stat columns.
+#' @return *[numeric]* Vector of t-statistics, one per row of `df`.
+resolve_t_stats <- function(df) {
+  validate(is.data.frame(df), is.numeric(df$effect), is.numeric(df$se))
+
+  fallback <- df$effect / df$se
+  if (!"t_stat" %in% colnames(df)) {
+    return(fallback)
+  }
+
+  reported <- suppressWarnings(as.numeric(df$t_stat))
+  missing <- is.na(reported)
+  reported[missing] <- fallback[missing]
+  reported
+}
+
 #' @title Run binomial test wrapper
 #' @param pvalues *[numeric]* P-values to test.
 #' @param p_min *[numeric]* Lower bound of interval.
@@ -412,7 +493,7 @@ run_binomial <- function(pvalues, p_min, p_max, type = "c") {
 
   tryCatch(
     binomial_test(pvalues, p_min, p_max, type),
-    error = function(e) NA_real_
+    error = function(e) skipped_result(e$message)
   )
 }
 
@@ -432,9 +513,13 @@ run_lcm <- function(pvalues, p_min, p_max, cdfs) {
 
   assert(p_min < p_max, "p_min must be less than p_max")
 
+  if (!requireNamespace("fdrtool", quietly = TRUE)) {
+    return(skipped_result("package 'fdrtool' is not installed"))
+  }
+
   tryCatch(
-    lcm_test(pvalues, p_min, p_max, norm = 8, cdfs),
-    error = function(e) NA_real_
+    lcm_test(pvalues, p_min, p_max, cdfs),
+    error = function(e) skipped_result(e$message)
   )
 }
 
@@ -454,37 +539,48 @@ run_fisher <- function(pvalues, p_min, p_max) {
 
   tryCatch(
     fisher_test(pvalues, p_min, p_max),
-    error = function(e) NA_real_
+    error = function(e) skipped_result(e$message)
   )
 }
 
 #' @title Run discontinuity test wrapper
 #' @param pvalues *[numeric]* P-values to test.
 #' @param cutoff *[numeric]* Significance threshold to test for discontinuity.
-#' @param bandwidth *[numeric]* Initial bandwidth for test.
+#' @param bandwidth *[numeric, optional]* Manual bandwidth override. Leave
+#'   `NULL` to let rddensity select its bandwidth automatically.
 #' @return *[numeric]* P-value from test.
-run_discontinuity <- function(pvalues, cutoff = 0.05, bandwidth = 0.05) {
+run_discontinuity <- function(pvalues, cutoff = 0.05, bandwidth = NULL) {
   validate(
     is.numeric(pvalues),
-    is.numeric(cutoff),
-    is.numeric(bandwidth)
+    is.numeric(cutoff)
   )
 
   assert(cutoff > 0 && cutoff < 1, "cutoff must be in (0, 1)")
-  assert(bandwidth > 0, "bandwidth must be positive")
+
+  if (!is.null(bandwidth)) {
+    validate(is.numeric(bandwidth))
+    assert(bandwidth > 0, "bandwidth must be positive")
+  }
 
   if (!requireNamespace("rddensity", quietly = TRUE)) {
-    cli::cli_warn("Package 'rddensity' not available - skipping discontinuity test")
-    return(NA_real_)
+    return(skipped_result("package 'rddensity' is not installed"))
   }
 
   tryCatch(
     run_discontinuity_test(pvalues, c = cutoff, h = bandwidth),
-    error = function(e) NA_real_
+    error = function(e) skipped_result(e$message)
   )
 }
 
 #' @title Run Cox-Shi test wrapper
+#' @description
+#' `n_bins` fixes the bin *count*, not the bin *width*, so the same value
+#' applied to nested windows (e.g. [0, 0.05] and [0, 0.10]) makes the wider
+#' window coarser. A spike in the p-curve narrower than one bin can be averaged away
+#' on the wider window while remaining visible on the narrower one, and the two
+#' windows are then not comparable, nor need their p-values be ordered. Compare
+#' windows at a matched bin width (double `n_bins` when doubling `p_max`)
+#' before reading anything into a disagreement between them.
 #' @param pvalues *[numeric]* P-values to test.
 #' @param study_id *[vector]* Study identifiers for clustering.
 #' @param p_min *[numeric]* Lower bound of interval.
@@ -493,7 +589,7 @@ run_discontinuity <- function(pvalues, cutoff = 0.05, bandwidth = 0.05) {
 #' @param monotonicity_order *[integer]* Order of monotonicity (K).
 #' @param use_bounds *[integer]* Whether to use bounds (0 or 1).
 #' @return *[numeric]* P-value from test.
-run_cox_shi <- function(pvalues, study_id = NULL, p_min, p_max, n_bins = 20L,
+run_cox_shi <- function(pvalues, study_id = NULL, p_min, p_max, n_bins = 10L,
                         monotonicity_order = 2L, use_bounds = 1L) {
   validate(
     is.numeric(pvalues),
@@ -513,7 +609,7 @@ run_cox_shi <- function(pvalues, study_id = NULL, p_min, p_max, n_bins = 20L,
     study_id <- seq_along(pvalues)
   }
 
-  tryCatch(
+  result <- tryCatch(
     cox_shi_test(
       Q = pvalues,
       ind = study_id,
@@ -523,38 +619,41 @@ run_cox_shi <- function(pvalues, study_id = NULL, p_min, p_max, n_bins = 20L,
       K = as.integer(monotonicity_order),
       use_bounds = as.integer(use_bounds)
     ),
-    error = function(e) NA_real_
+    error = function(e) skipped_result(e$message)
   )
+
+  result
 }
 
 #' @title Run suite of p-hacking tests
 #' @description
 #' Executes comprehensive p-hacking detection tests: Caliper (Gerber & Malhotra, 2008),
-#' Elliott et al. (2022), and MAIVE (Irsova et al., 2023).
-#' @param df *[data.frame]* Input data with effect, se, study_id, n_obs columns.
+#' Elliott et al. (2022).
+#' @param df *[data.frame]* Input data with effect, se, and study_id columns.
 #' @param options *[list]* Options containing test parameters.
 #' @return *[list]* Contains test results and formatted summaries.
 run_p_hacking_tests <- function(df, options) {
   validate(is.data.frame(df), is.list(options))
 
-  required_cols <- c("effect", "se")
-  missing_cols <- setdiff(required_cols, colnames(df))
-
-  if (length(missing_cols) > 0) {
-    cli::cli_alert_warning("Missing required columns: {.field {missing_cols}}")
-    return(list(
-      caliper = NULL,
-      elliott = NULL,
-      maive = NULL,
-      skipped = list(reason = paste("Missing columns:", paste(missing_cols, collapse = ", ")))
-    ))
-  }
-
   study_id <- if ("study_id" %in% colnames(df)) df$study_id else seq_len(nrow(df))
-  t_stats <- df$effect / df$se
-  pvalues <- compute_pvalues(df$effect, df$se)
+  t_stats <- resolve_t_stats(df)
+  pvalues <- 2 * stats::pnorm(-abs(t_stats))
+
+  supports <- options$elliott_supports %||% DEFAULT_ELLIOTT_SUPPORTS
+  validate(is.numeric(supports))
+  assert(length(supports) > 0, "elliott_supports must not be empty")
+  assert(all(supports > 0 & supports <= 1), "elliott_supports must lie in (0, 1]")
+  assert(!is.unsorted(supports, strictly = TRUE), "elliott_supports must be strictly increasing")
 
   output <- list()
+  skipped <- list()
+  record_skip <- function(key, label, value) {
+    reason <- skip_reason(value)
+    if (!is.null(reason)) {
+      skipped[[key]] <<- list(label = label, reason = reason)
+    }
+    invisible(NULL)
+  }
 
   # 1. Caliper Tests
   if (options$include_caliper) {
@@ -562,9 +661,10 @@ run_p_hacking_tests <- function(df, options) {
       {
         run_caliper_tests(
           t_stats = t_stats,
-          study_id = study_id,
           thresholds = options$caliper_thresholds,
           widths = options$caliper_widths,
+          study_id = if (isFALSE(options$caliper_cluster)) NULL else study_id,
+          tail = options$caliper_tail %||% "auto",
           add_significance_marks = options$add_significance_marks,
           round_to = options$round_to
         )
@@ -575,134 +675,107 @@ run_p_hacking_tests <- function(df, options) {
       }
     )
     output$caliper <- build_caliper_summary(caliper_results, list(display_ratios = options$caliper_display_ratios))
+    # The summary table is a display grid of formatted strings; the raw
+    # per-pair results ride along so the method can build its estimates frame.
+    output$caliper_results <- caliper_results
   }
 
   # 2. Elliott Tests
   if (options$include_elliott) {
     elliott_tests <- list()
 
-    # Pre-simulate CDFs for LCM test
+    # Pre-simulate CDFs for the LCM test; with a fixed seed the table is
+    # served from its own narrow disk cache (see elliott_cache.R)
+    cdfs_reason <- NULL
     cdfs <- tryCatch(
-      simulate_cdfs_parallel(iterations = options$lcm_iterations, grid_points = options$lcm_grid_points),
+      simulate_cdfs_cached(
+        iterations = options$lcm_iterations,
+        grid_points = options$lcm_grid_points,
+        block_size = options$simulate_cdfs_chunk_size,
+        seed = options$simulate_cdfs_seed
+      ),
       error = function(e) {
-        cli::cli_warn("Failed to simulate CDFs for LCM test: {e$message}")
+        cdfs_reason <<- e$message
         numeric(0)
       }
     )
 
     # Binomial tests
-    elliott_tests$binomial_005 <- list(
-      test = "Binomial [0, 0.05]",
-      p_value = run_binomial(pvalues, 0, 0.05, type = "c")
-    )
-
-    elliott_tests$binomial_01 <- list(
-      test = "Binomial [0, 0.10]",
-      p_value = run_binomial(pvalues, 0, 0.1, type = "c")
-    )
-
-    # LCM tests
-    if (length(cdfs) > 0) {
-      elliott_tests$lcm_005 <- list(
-        test = "LCM [0, 0.05]",
-        p_value = run_lcm(pvalues, 0, 0.05, cdfs)
+    for (p_max in supports) {
+      elliott_tests[[paste0("binomial_", support_key(p_max))]] <- list(
+        test = paste0("Binomial [0, ", support_label(p_max), "]"),
+        family = "binomial",
+        support = support_interval_label(p_max),
+        p_value = run_binomial(pvalues, 0, p_max, type = "c")
       )
+    }
 
-      elliott_tests$lcm_01 <- list(
-        test = "LCM [0, 0.10]",
-        p_value = run_lcm(pvalues, 0, 0.1, cdfs)
+    # LCM tests (always reported, even when the CDF simulation failed, so the
+    # skip reason surfaces instead of the rows silently disappearing)
+    lcm_skip <- if (length(cdfs) == 0) {
+      skipped_result(cdfs_reason %||% "CDF simulation returned no draws")
+    } else {
+      NULL
+    }
+    for (p_max in supports) {
+      elliott_tests[[paste0("lcm_", support_key(p_max))]] <- list(
+        test = paste0("LCM [0, ", support_label(p_max), "]"),
+        family = "lcm",
+        support = support_interval_label(p_max),
+        p_value = lcm_skip %||% run_lcm(pvalues, 0, p_max, cdfs)
       )
     }
 
     # Fisher tests
-    elliott_tests$fisher_005 <- list(
-      test = "Fisher [0, 0.05]",
-      p_value = run_fisher(pvalues, 0, 0.05)
-    )
-
-    elliott_tests$fisher_01 <- list(
-      test = "Fisher [0, 0.10]",
-      p_value = run_fisher(pvalues, 0, 0.1)
-    )
+    for (p_max in supports) {
+      elliott_tests[[paste0("fisher_", support_key(p_max))]] <- list(
+        test = paste0("Fisher [0, ", support_label(p_max), "]"),
+        family = "fisher",
+        support = support_interval_label(p_max),
+        p_value = run_fisher(pvalues, 0, p_max)
+      )
+    }
 
     # Discontinuity test
     if (options$include_discontinuity) {
       elliott_tests$discontinuity <- list(
         test = "Discontinuity at 0.05",
+        family = "discontinuity",
+        support = "at 0.05",
         p_value = run_discontinuity(pvalues, cutoff = 0.05, bandwidth = options$discontinuity_bandwidth)
       )
     }
 
     # Cox-Shi tests
     if (options$include_cox_shi) {
-      elliott_tests$cox_shi_005 <- list(
-        test = "Cox-Shi [0, 0.05]",
-        p_value = run_cox_shi(
-          pvalues, study_id, 0, 0.05,
-          n_bins = options$cox_shi_bins,
-          monotonicity_order = options$cox_shi_order,
-          use_bounds = options$cox_shi_bounds
+      for (p_max in supports) {
+        elliott_tests[[paste0("cox_shi_", support_key(p_max))]] <- list(
+          test = paste0("Cox-Shi [0, ", support_label(p_max), "]"),
+          family = "cox_shi",
+          support = support_interval_label(p_max),
+          p_value = run_cox_shi(
+            pvalues, study_id, 0, p_max,
+            n_bins = options$cox_shi_bins,
+            monotonicity_order = options$cox_shi_order,
+            use_bounds = options$cox_shi_bounds
+          )
         )
-      )
+      }
+    }
 
-      elliott_tests$cox_shi_01 <- list(
-        test = "Cox-Shi [0, 0.10]",
-        p_value = run_cox_shi(
-          pvalues, study_id, 0, 0.1,
-          n_bins = options$cox_shi_bins,
-          monotonicity_order = options$cox_shi_order,
-          use_bounds = options$cox_shi_bounds
-        )
-      )
+    for (key in names(elliott_tests)) {
+      record_skip(key, elliott_tests[[key]]$test, elliott_tests[[key]]$p_value)
     }
 
     output$elliott <- build_elliott_summary(elliott_tests, pvalues, options)
-  }
-
-  # 3. MAIVE Estimator
-  if (options$include_maive) {
-    if ("n_obs" %in% colnames(df)) {
-      maive_data <- prepare_maive_data(df)
-
-      if (options$maive_se == 3L) {
-        cli::cli_alert_info("Running MAIVE with wild cluster bootstrap (this may take a moment)...")
-      }
-
-      maive_results <- tryCatch(
-        {
-          maive(
-            dat = maive_data,
-            method = options$maive_method,
-            weight = options$maive_weight,
-            instrument = options$maive_instrument,
-            studylevel = options$maive_studylevel,
-            SE = options$maive_se,
-            AR = options$maive_ar,
-            first_stage = options$maive_first_stage
-          )
-        },
-        error = function(e) {
-          cli::cli_warn("MAIVE estimation failed: {e$message}")
-          NULL
-        }
-      )
-      output$maive <- tryCatch(
-        format_maive_results(maive_results, options),
-        error = function(e) {
-          cli::cli_warn("MAIVE result formatting failed: {e$message}")
-          NULL
-        }
-      )
-    } else {
-      cli::cli_warn("MAIVE requires 'n_obs' column - skipping MAIVE test")
-      output$maive <- NULL
-    }
+    output$elliott_results <- elliott_tests
   }
 
   output$n_pvalues <- length(pvalues)
   output$n_significant_005 <- sum(pvalues <= 0.05, na.rm = TRUE)
   output$n_significant_010 <- sum(pvalues <= 0.10, na.rm = TRUE)
   output$options <- options
+  output$skipped <- if (length(skipped) > 0) skipped else NULL
 
   output
 }
@@ -720,22 +793,7 @@ build_elliott_summary <- function(elliott_tests, pvalues, options) {
   p_values_formatted <- format_number(p_vals, options$round_to)
 
   # Add significance markers
-  significance <- character(length(p_vals))
-  for (i in seq_along(p_vals)) {
-    if (is.na(p_vals[i])) {
-      significance[i] <- ""
-    } else if (p_vals[i] <= 0.01) {
-      significance[i] <- "***"
-    } else if (p_vals[i] <= 0.05) {
-      significance[i] <- "**"
-    } else if (p_vals[i] <= 0.10) {
-      significance[i] <- "*"
-    } else {
-      significance[i] <- ""
-    }
-  }
-
-  p_values_formatted <- paste0(p_values_formatted, significance)
+  p_values_formatted <- paste0(p_values_formatted, significance_mark(p_vals))
 
   summary <- data.frame(
     Test = test_names,
@@ -744,16 +802,20 @@ build_elliott_summary <- function(elliott_tests, pvalues, options) {
     check.names = FALSE
   )
 
-  # Add observation count rows
-  n_total <- length(pvalues)
-  n_010 <- sum(pvalues <= 0.1, na.rm = TRUE)
-  n_005 <- sum(pvalues <= 0.05, na.rm = TRUE)
-  n_01_range <- sum(pvalues >= 0 & pvalues <= 0.1, na.rm = TRUE)
-  n_005_range <- sum(pvalues >= 0 & pvalues <= 0.05, na.rm = TRUE)
+  # Add observation count rows, widest support first
+  supports <- sort(options$elliott_supports %||% DEFAULT_ELLIOTT_SUPPORTS, decreasing = TRUE)
 
   obs_rows <- data.frame(
-    Test = c("Observations in [0, 0.1]", "Observations in [0, 0.05]", "Observations <= 0.1"),
-    `P-value` = c(as.character(n_01_range), as.character(n_005_range), as.character(n_010)),
+    Test = vapply(
+      supports,
+      function(p_max) paste0("Observations in [0, ", format(p_max), "]"),
+      character(1)
+    ),
+    `P-value` = vapply(
+      supports,
+      function(p_max) as.character(sum(pvalues >= 0 & pvalues <= p_max, na.rm = TRUE)),
+      character(1)
+    ),
     stringsAsFactors = FALSE,
     check.names = FALSE
   )
@@ -765,5 +827,17 @@ build_elliott_summary <- function(elliott_tests, pvalues, options) {
 
 box::export(
   run_caliper_tests,
-  run_p_hacking_tests
+  run_p_hacking_tests,
+  run_single_caliper,
+  resolve_caliper_tail,
+  cluster_robust_share_test,
+  caliper_direction,
+  build_caliper_summary,
+  compute_pvalues,
+  resolve_t_stats,
+  run_binomial,
+  run_lcm,
+  run_discontinuity,
+  run_cox_shi,
+  run_fisher
 )

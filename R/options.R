@@ -16,12 +16,13 @@
 #' `list` Invisibly returns a list of error messages (empty if no errors).
 #' @return *\[list\]* The validation errors
 #' @export
-options.validate <- function(
-    options_file_name = NULL,
-    options_dir = NULL,
-    should_flag_redundant = FALSE,
-    template_path = NULL,
-    failure_action = "abort_verbose") {
+options_validate <- function(
+  options_file_name = NULL,
+  options_dir = NULL,
+  should_flag_redundant = FALSE,
+  template_path = NULL,
+  failure_action = "abort_verbose"
+) {
   box::use(
     artma / const[CONST],
     artma / options / ask[ask_for_existing_options_file_name],
@@ -50,7 +51,7 @@ options.validate <- function(
 
   options_dir <- resolve_options_dir(options_dir)
 
-  options_file_name <- options_file_name %||% ask_for_existing_options_file_name(options_dir = options_dir, prompt = "Please select the user options file you wish to delete: ")
+  options_file_name <- options_file_name %||% ask_for_existing_options_file_name(options_dir = options_dir, prompt = "Please select the user options file you wish to validate: ")
   options_path <- options_file_path(options_dir, options_file_name)
 
   assert(file.exists(options_path), sprintf("Options file '%s' does not exist.", options_path))
@@ -111,17 +112,17 @@ options.validate <- function(
   if (length(errors) > 0) {
     cli::cli_alert_danger("Validation failed.")
 
-    cli::cli_h1("Validation errors found:")
-    for (err in errors) {
-      cli::cli_alert_danger(err$message)
-    }
-
     if (get_verbosity() >= 2) {
+      cli::cli_h1("Validation errors found:")
+      for (err in errors) {
+        cli::cli_alert_danger(err$message)
+      }
+
       cli::cli_h3("Possible Resolutions:")
       cli::cli_ul()
-      cli::cli_li("Run {.code artma::options.help(c('opt.name1', 'opt.name2', ...))} to view detailed descriptions of the specified options.")
-      cli::cli_li("Run {.code artma::options.modify()} to manually modify the options file.")
-      cli::cli_li("Run {.code artma::options.fix()} to automatically fix detected errors where possible.")
+      cli::cli_li("Run {.code artma::options_help(c('opt.name1', 'opt.name2', ...))} to view detailed descriptions of the specified options.")
+      cli::cli_li("Run {.code artma::options_modify()} to manually modify the options file.")
+      cli::cli_li("Run {.code artma::options_fix()} to automatically fix detected errors where possible.")
       cli::cli_end()
       cli::cat_line()
     }
@@ -146,11 +147,12 @@ options.validate <- function(
 #' @param should_overwrite *\[logical, optional\]* Whether to overwrite an existing file without asking. If `TRUE`, the file will be overwritten without prompting. If `FALSE`, the function will abort if the file already exists. If `NULL` (default), the user will be prompted.
 #' @return `NULL`
 #' @export
-options.copy <- function(
-    options_file_name_from = NULL,
-    options_file_name_to = NULL,
-    options_dir = NULL,
-    should_overwrite = NULL) {
+options_copy <- function(
+  options_file_name_from = NULL,
+  options_file_name_to = NULL,
+  options_dir = NULL,
+  should_overwrite = NULL
+) {
   box::use(
     artma / options / ask[ask_for_options_file_name, ask_for_existing_options_file_name],
     artma / options / files[
@@ -190,10 +192,11 @@ options.copy <- function(
 #' @param skip_confirmation *\[boolean, optional\]* If passed as TRUE, the user will not be prompted for deletion confirmation. Defaults to FALSE.
 #' @return `NULL`
 #' @export
-options.delete <- function(
-    options_file_name = NULL,
-    options_dir = NULL,
-    skip_confirmation = FALSE) {
+options_delete <- function(
+  options_file_name = NULL,
+  options_dir = NULL,
+  skip_confirmation = FALSE
+) {
   box::use(
     artma / options / ask[ask_for_existing_options_file_name],
     artma / options / files[
@@ -236,67 +239,123 @@ options.delete <- function(
   }))
 }
 
-#' @title Remove user options
-#' @description Provide a name of a user options file to remove, and remove that file.
-#' @details This function is an alias for \code{\link{options.delete}} and behaves identically.
-#' @param options_file_name *\[character, optional\]* Name of the options file to remove. If not provided, the user will be prompted. Defaults to `NULL`.
-#' @param options_dir *\[character, optional\]* Full path to the folder that contains user options files. If not provided, the default folder is chosen. Defaults to `NULL`.
-#' @param skip_confirmation *\[boolean, optional\]* If passed as TRUE, the user will not be prompted for deletion confirmation. Defaults to FALSE.
-#' @return `NULL`
-#' @export
-options.remove <- function(
-    options_file_name = NULL,
-    options_dir = NULL,
-    skip_confirmation = FALSE) {
-  options.delete(
-    options_file_name = options_file_name,
-    options_dir = options_dir,
-    skip_confirmation = skip_confirmation
-  )
-}
-
 #' @title List available user options
 #' @description Retrieves the list of the existing options files and returns their names as a character vector. By default, this retrieves the names of the files including the yaml suffix, but can be modified to retrieve options verbose names instead.
 #' @param options_dir *\[character, optional\]* Full path to the folder that contains user options files. If not provided, the default folder is chosen. Defaults to `NULL`.
 #' @param should_return_verbose_names *\[logical, optional\]* If set to TRUE, the custom names of each of the options files are read and returned instead of file names. Defaults to FALSE.
-#' @return *\[vector, character\]* A character vector with the names of the options available.
+#' @param details *\[logical, optional\]* If set to TRUE, a `data.frame` describing each options file is returned instead of a character vector: the file name, its resolved `data.source_path`, when the file was last modified, when it was last run, and how many of its options deviate from the template defaults. The last run time is read from the file's output directory, and is `NA` when the file has never produced any results. Defaults to FALSE.
+#' @param template_path *\[character, optional\]* Full path to the options template file, used to resolve the defaults when `details = TRUE`. Defaults to `NULL`.
+#' @return *\[vector, character | data.frame\]* A character vector with the names of the options available, or a `data.frame` when `details = TRUE`.
 #' @export
-options.list <- function(options_dir = NULL, should_return_verbose_names = FALSE) {
+options_list <- function(
+  options_dir = NULL,
+  should_return_verbose_names = FALSE,
+  details = FALSE,
+  template_path = NULL
+) {
   box::use(
     artma / options / files[
       list_options_files,
-      resolve_options_dir
-    ]
+      resolve_options_dir,
+      resolve_template_path
+    ],
+    artma / options / inspect[describe_options_files],
+    artma / libs / core / validation[validate]
   )
+
+  validate(
+    is.logical(should_return_verbose_names),
+    is.logical(details)
+  )
+
   options_dir <- resolve_options_dir(options_dir, must_exist = FALSE)
 
+  if (isTRUE(details)) {
+    return(describe_options_files(
+      options_dir = options_dir,
+      template_path = resolve_template_path(template_path)
+    ))
+  }
+
   list_options_files(options_dir, should_return_verbose_names)
+}
+
+#' @title Diff two user options files
+#' @description Compares two user options files, printing the options whose
+#'   values differ between them, followed by each file's deviations from the
+#'   template defaults.
+#' @details List-typed options (such as `data.columns`) are compared entry by
+#'   entry, so the diff names the individual column mappings that differ rather
+#'   than reporting the whole store as changed.
+#' @param options_file_name_a *\[character, optional\]* Name of the first options file to compare. If not provided, the user will be prompted. Defaults to `NULL`.
+#' @param options_file_name_b *\[character, optional\]* Name of the second options file to compare. If not provided, the user will be prompted. Defaults to `NULL`.
+#' @param options_dir *\[character, optional\]* Full path to the folder that contains user options files. If not provided, the default folder is chosen. Defaults to `NULL`.
+#' @param template_path *\[character, optional\]* Full path to the options template file. Defaults to `NULL`.
+#' @return *\[list\]* Invisibly, a list with the compared `files`, a `differences` data frame, and a `deviations` list holding one data frame of template-default deviations per file.
+#' @export
+options_diff <- function(
+  options_file_name_a = NULL,
+  options_file_name_b = NULL,
+  options_dir = NULL,
+  template_path = NULL
+) {
+  box::use(
+    artma / options / ask[ask_for_existing_options_file_name],
+    artma / options / files[resolve_options_dir, resolve_template_path],
+    artma / options / inspect[diff_options_files, print_options_diff],
+    artma / options / utils[parse_options_file_name],
+    artma / libs / core / utils[get_verbosity]
+  )
+
+  options_dir <- resolve_options_dir(options_dir)
+  template_path <- resolve_template_path(template_path)
+
+  options_file_name_a <- options_file_name_a %||% ask_for_existing_options_file_name(
+    options_dir = options_dir,
+    prompt = "Please select the first user options file to compare: "
+  )
+  options_file_name_b <- options_file_name_b %||% ask_for_existing_options_file_name(
+    options_dir = options_dir,
+    prompt = "Please select the second user options file to compare: "
+  )
+
+  diff <- diff_options_files(
+    options_dir = options_dir,
+    file_a = parse_options_file_name(options_file_name_a),
+    file_b = parse_options_file_name(options_file_name_b),
+    template_path = template_path
+  )
+
+  if (get_verbosity() >= 2) {
+    print_options_diff(diff)
+  }
+
+  invisible(diff)
 }
 
 #' @title Load user options
 #' @description Load user options by their name and return them as a list.
 #' @details In case the options name is not passed, the function will attempt to load the current options configuration. If none is found, it will then attempt to load the default options. If that fails too, an error is raised.
-#' @param options_file_name *\[character, optional\]* Name of the options to load, including the .yaml suffix. Defaults to `NULL`.
+#' @param options_file_name *\[character, optional\]* Name of the options to load. The `.yaml` suffix is appended automatically if missing. Defaults to `NULL`.
 #' @param options_dir *\[character, optional\]* Path to the folder in which to look for user options files. Defaults to `NULL`.
 #' @param create_options_if_null *\[logical, optional\]* If set to TRUE and the options file name is set to NULL, the function will prompt the user to create a new options file. Defaults to TRUE.
 #' @param load_with_prefix *\[logical, optional\]* Whether the options should be loaded with the package prefix. Defaults to TRUE.
 #' @param template_path *\[character, optional\]* Path to the template YAML file. Defaults to `NULL`.
 #' @param should_validate *\[logical, optional\]* Whether the options should be validated after loading. Defaults to TRUE.
-#' @param should_set_to_namespace *\[logical, optional\]* Whether the options should be set in the options() namespace. Defaults to TRUE.
 #' @param should_add_temp_options *\[logical, optional\]* Whether the options should be added to the temporary options. Defaults to FALSE.
 #' @param should_return *\[logical, optional\]* Whether the function should return the list of options. Defaults to FALSE.
 #' @return *\[list|NULL\]* The loaded options as a list or `NULL`.
 #' @export
-options.load <- function(
-    options_file_name = NULL,
-    options_dir = NULL,
-    create_options_if_null = TRUE,
-    load_with_prefix = TRUE,
-    template_path = NULL,
-    should_validate = TRUE,
-    should_set_to_namespace = FALSE, # Be careful when setting this to TRUE - consider using withr::with_options instead
-    should_add_temp_options = FALSE,
-    should_return = TRUE) {
+options_load <- function(
+  options_file_name = NULL,
+  options_dir = NULL,
+  create_options_if_null = TRUE,
+  load_with_prefix = TRUE,
+  template_path = NULL,
+  should_validate = TRUE,
+  should_add_temp_options = FALSE,
+  should_return = TRUE
+) {
   box::use(
     artma / const[CONST],
     artma / options / files[
@@ -305,13 +364,14 @@ options.load <- function(
       resolve_options_dir,
       resolve_template_path
     ],
-    artma / options / utils[remove_options_with_prefix],
     artma / options / template[
       flatten_user_options,
       collect_leaf_paths,
+      get_option_defs,
       get_template_defaults
     ],
-    artma / libs / core / validation[validate, assert],
+    artma / options / utils[get_expected_type, validate_option_value, parse_options_file_name],
+    artma / libs / core / validation[validate],
     artma / libs / core / utils[get_verbosity]
   )
 
@@ -323,19 +383,18 @@ options.load <- function(
     is.logical(create_options_if_null),
     is.logical(load_with_prefix),
     is.logical(should_validate),
-    is.logical(should_set_to_namespace),
     is.logical(should_return)
   )
 
   if (is.null(options_file_name)) {
-    existing_options_files <- options.list(options_dir = options_dir)
+    existing_options_files <- options_list(options_dir = options_dir)
 
     if (rlang::is_empty(existing_options_files)) {
       if (!create_options_if_null) {
         cli::cli_abort("No user options file to load was provided. Exiting...")
       }
       # Automatically create a new options file when none exist
-      options_file_name <- options.create(
+      options_file_name <- options_create(
         options_file_name = options_file_name,
         options_dir = options_dir
       )
@@ -353,7 +412,7 @@ options.load <- function(
       )
 
       if (selected == create_new_option_text) {
-        options_file_name <- options.create(
+        options_file_name <- options_create(
           options_file_name = options_file_name,
           options_dir = options_dir
         )
@@ -365,122 +424,78 @@ options.load <- function(
     }
   }
 
-  assert(
-    grepl(".yaml$|.yml$", options_file_name),
-    sprintf("Please pass the name of the options to load with the .yaml suffix. Got: %s.", options_file_name)
-  )
+  options_file_name <- parse_options_file_name(options_file_name)
 
   options_path <- options_file_path(options_dir, options_file_name)
   nested_options <- read_options_file(options_path)
 
   parent_key <- if (load_with_prefix) CONST$PACKAGE_NAME else NULL
   leaf_set <- collect_leaf_paths(template_path)
-  prefixed_options <- flatten_user_options(
+  # The flattened paths carry the parent prefix, so the leaf set must too:
+  # otherwise list-typed leaves (e.g. data.columns) are descended into instead
+  # of being taken whole.
+  flatten_leaf_set <- if (is.null(parent_key)) {
+    leaf_set
+  } else {
+    paste0(parent_key, ".", leaf_set)
+  }
+  user_values <- flatten_user_options(
     user_options = nested_options,
-    leaf_set = leaf_set,
+    leaf_set = flatten_leaf_set,
     parent = parent_key
   )
 
+  # Loading is pure: merge the user's values over the template defaults. It never
+  # writes to disk and never prompts. Fixing and migration live in options_fix().
+  defaults <- get_template_defaults(template_path = template_path, prefix = parent_key)
+
   if (should_validate) {
-    errors <- withr::with_options(
-      list("artma.verbose" = 1),
-      suppressMessages(options.validate(
-        options_file_name = options_file_name,
-        options_dir = options_dir,
-        template_path = template_path,
-        failure_action = "return_errors_quiet"
-      ))
-    )
+    # Keep each user value only when it matches the template type; otherwise fall
+    # back to the default. Required options with no default that are missing or
+    # invalid abort the load, naming the offending options.
+    resolved <- defaults
+    unresolved <- character(0)
+    substituted <- character(0)
 
-    if (length(errors) > 0) {
-      error_types <- vapply(errors, function(err) err$type, character(1))
-      n_missing <- sum(error_types == "missing_option")
-      n_type <- sum(error_types == "type_mismatch")
+    for (opt_def in get_option_defs(template_path = template_path)) {
+      opt_name <- opt_def$name
+      key <- if (is.null(parent_key)) opt_name else paste0(parent_key, ".", opt_name)
 
-      defaults <- get_template_defaults(template_path = template_path, prefix = parent_key)
-      apply_template_defaults <- function(current_options) {
-        unresolved <- character(0)
+      user_ok <- (key %in% names(user_values)) &&
+        is.null(validate_option_value(
+          user_values[[key]], get_expected_type(opt_def), opt_name, opt_def$allow_na
+        ))
 
-        for (err in errors) {
-          if (!(err$type %in% c("missing_option", "type_mismatch"))) {
-            next
-          }
-
-          opt_name <- err$opt_def$name
-          key <- if (is.null(parent_key)) opt_name else paste0(parent_key, ".", opt_name)
-
-          if (key %in% names(defaults)) {
-            current_options[[key]] <- defaults[[key]]
-          } else {
-            unresolved <- c(unresolved, key)
-          }
-        }
-
-        list(
-          options = current_options,
-          unresolved = unique(unresolved)
-        )
-      }
-
-      if (interactive()) {
-        if (n_missing > 0) {
-          cli::cli_alert_warning(
-            "Your options file {.file {options_file_name}} is missing {n_missing} option{?s} added in the latest version."
-          )
-        }
-        if (n_type > 0) {
-          cli::cli_alert_warning(
-            "Your options file {.file {options_file_name}} has {n_type} option value type mismatch{?es}."
-          )
-        }
-
-        choice <- climenu::select(
-          choices = c("Fix now (recommended)", "Proceed with defaults"),
-          prompt = "How would you like to handle this?"
-        )
-
-        if (choice == "Fix now (recommended)") {
-          options.fix(
-            options_file_name = options_file_name,
-            options_dir = options_dir,
-            template_path = template_path,
-            force_default_overwrites = TRUE
-          )
-
-          nested_options <- read_options_file(options_path)
-          prefixed_options <- flatten_user_options(
-            user_options = nested_options,
-            leaf_set = leaf_set,
-            parent = parent_key
-          )
-        } else {
-          default_result <- apply_template_defaults(prefixed_options)
-          prefixed_options <- default_result$options
-
-          if (length(default_result$unresolved) > 0 && get_verbosity() >= 2) {
-            cli::cli_alert_warning(
-              "Could not auto-fill {length(default_result$unresolved)} option{?s} without defaults: {.val {default_result$unresolved}}."
-            )
-          }
-        }
-      } else {
-        if (get_verbosity() >= 2) {
-          cli::cli_alert_warning(paste(
-            "Options file {.file {options_file_name}} has {n_missing} missing option{?s}",
-            "and {n_type} type mismatch{?es}. Proceeding with template defaults where possible."
-          ))
-        }
-
-        default_result <- apply_template_defaults(prefixed_options)
-        prefixed_options <- default_result$options
-
-        if (length(default_result$unresolved) > 0 && get_verbosity() >= 2) {
-          cli::cli_alert_warning(
-            "Could not auto-fill {length(default_result$unresolved)} option{?s} without defaults: {.val {default_result$unresolved}}."
-          )
-        }
+      if (user_ok) {
+        resolved[[key]] <- user_values[[key]]
+      } else if (!(key %in% names(defaults))) {
+        unresolved <- c(unresolved, opt_name)
+      } else if (key %in% names(user_values)) {
+        # The file holds a value that does not match the template type. Loading
+        # stays resilient and falls back to the default, but say so: a later
+        # options_modify() persists the resolved set and would overwrite the
+        # user's value without trace.
+        substituted <- c(substituted, opt_name)
       }
     }
+
+    if (length(substituted) > 0 && get_verbosity() >= 2) {
+      cli::cli_alert_warning(
+        "Ignoring {length(substituted)} invalid value{?s} in {.file {options_file_name}} and using the template default{?s} instead: {.val {substituted}}. Run {.code artma::options_fix()} to write the defaults to the file."
+      )
+    }
+
+    if (length(unresolved) > 0) {
+      cli::cli_abort(c(
+        "Cannot load options file {.file {options_file_name}}.",
+        "x" = "Required option{?s} without a default value {?is/are} missing or invalid: {.val {unresolved}}.",
+        "i" = "Run {.code artma::options_fix()} to repair the file."
+      ))
+    }
+
+    prefixed_options <- resolved
+  } else {
+    prefixed_options <- utils::modifyList(defaults, user_values)
   }
 
   if (get_verbosity() >= 4) {
@@ -490,33 +505,6 @@ options.load <- function(
   if (should_add_temp_options) {
     prefixed_options[["artma.temp.file_name"]] <- options_file_name
     prefixed_options[["artma.temp.dir_name"]] <- options_dir
-  }
-
-  if (should_set_to_namespace) {
-    remove_options_with_prefix(CONST$PACKAGE_NAME) # Remove all existing package options
-    options(prefixed_options)
-
-    # Set autonomy level if present in loaded options
-    autonomy_key <- paste0(CONST$PACKAGE_NAME, ".autonomy.level")
-    if (autonomy_key %in% names(prefixed_options)) {
-      box::use(artma / libs / core / autonomy[set_autonomy_level])
-      tryCatch({
-        level <- as.integer(prefixed_options[[autonomy_key]])
-        if (!is.na(level) && level >= 1 && level <= 5) {
-          set_autonomy_level(level)
-        }
-      }, error = function(e) {
-        if (get_verbosity() >= 2) {
-          cli::cli_alert_warning("Failed to set autonomy level: {e$message}")
-        }
-      })
-    }
-
-    # In non-interactive mode, enforce level 5 regardless of setting
-    if (!interactive()) {
-      box::use(artma / libs / core / autonomy[set_autonomy_level])
-      set_autonomy_level(5L)
-    }
   }
 
   if (should_return) {
@@ -532,22 +520,25 @@ options.load <- function(
 #' @param options_file_name *\[character, optional\]* Name of the user options file to modify, including the suffix.
 #' @param options_dir *\[character, optional\]* Full path to the folder that contains user options files. If not provided, the default folder is chosen. Defaults to `NULL`.
 #' @param template_path *\[character, optional\]* Full path to the options template file. Defaults to `NULL`.
-#' @param user_input *\[list, optional\]* A named list of user-supplied values for these options. If `NULL` or missing entries exist, the function will prompt the user via `readline()` (for required entries) or use defaults (for optional ones).
+#' @param user_input *\[list, optional\]* A named list of user-supplied values for these options, using either flat dotted-path names (e.g. `list("data.source_path" = "...")`, matching what `options_load(load_with_prefix = FALSE)` returns) or nested lists that mirror the YAML structure (e.g. `list(data = list(source_path = "..."))`); both are flattened against the template before merging, so a partial edit to a list-type option (e.g. one entry of `data.columns`) is merged into the existing value instead of replacing it. If `NULL` or missing entries exist, the function will prompt the user via `readline()` (for required entries) or use defaults (for optional ones).
 #' @param should_validate *\[logical, optional\]* If TRUE, validate the modified options file against the template. Defaults to TRUE.
 #' @return `NULL`
 #' @export
-options.modify <- function(
-    options_file_name = NULL,
-    options_dir = NULL,
-    template_path = NULL,
-    user_input = list(),
-    should_validate = TRUE) {
+options_modify <- function(
+  options_file_name = NULL,
+  options_dir = NULL,
+  template_path = NULL,
+  user_input = list(),
+  should_validate = TRUE
+) {
   box::use(
     artma / options / ask[
       ask_for_existing_options_file_name,
       ask_for_options_to_modify
     ],
     artma / libs / core / validation[assert, validate],
+    artma / options / files[resolve_template_path],
+    artma / options / template[collect_leaf_paths, flatten_user_options],
     artma / options / utils[validate_user_input]
   )
 
@@ -558,13 +549,12 @@ options.modify <- function(
     is.logical(should_validate)
   )
 
-  current_options <- options.load(
+  current_options <- options_load(
     options_file_name = options_file_name,
     options_dir = options_dir,
     create_options_if_null = FALSE,
     load_with_prefix = FALSE,
     should_validate = TRUE,
-    should_set_to_namespace = FALSE,
     should_return = TRUE
   )
 
@@ -578,9 +568,17 @@ options.modify <- function(
 
   validate_user_input(user_input)
 
-  new_options <- utils::modifyList(current_options, user_input)
+  # current_options is keyed by flat dotted paths (options_load(load_with_prefix
+  # = FALSE)). Flattening user_input against the same leaf set turns either a
+  # nested user_input or an already-flat one into that representation, so
+  # modifyList() merges into the matching key instead of adding a sibling
+  # top-level key that later clobbers it (see flat_to_nested()).
+  leaf_set <- collect_leaf_paths(resolve_template_path(template_path))
+  flat_user_input <- flatten_user_options(user_options = user_input, leaf_set = leaf_set)
 
-  options.create(
+  new_options <- utils::modifyList(current_options, flat_user_input)
+
+  options_create(
     options_file_name = options_file_name,
     options_dir = options_dir,
     template_path = template_path,
@@ -602,9 +600,10 @@ options.modify <- function(
 #' @param options_dir *\[character, optional\]* Full path to the folder that contains user options files. If not provided, the default folder is chosen. Defaults to `NULL`.
 #' @return `NULL` Opens the file for editing
 #' @export
-options.open <- function(
-    options_file_name = NULL,
-    options_dir = NULL) {
+options_open <- function(
+  options_file_name = NULL,
+  options_dir = NULL
+) {
   box::use(
     artma / options / files[resolve_options_dir],
     artma / options / ask[ask_for_existing_options_file_name],
@@ -648,33 +647,39 @@ options.open <- function(
 #' @description
 #' Prints information for each requested option (or all options if `options` is `NULL`).
 #'
-#' @param options *\[character, optional\]* A single option name (dot-separated) or a
-#'   character vector thereof. If `NULL`, prints **all** options from"
-#'   the template.
+#' @details Called without arguments, the whole option tree is printed, grouped by
+#'   top-level section, one line per option carrying its name, type and default.
+#'   Named options are printed in full, with their help text. A name that matches
+#'   a group rather than a single option (e.g. `"methods.bma"`, or `"methods"`)
+#'   expands to every option underneath it.
+#'
+#' @param options *\[character, optional\]* A single option name (dot-separated), a
+#'   group name, or a character vector thereof. If `NULL`, prints **all** options
+#'   from the template as a tree.
 #' @param template_path *\[character, optional\]* Path to the template YAML file.
 #'   Defaults to \code{PATHS$FILE_OPTIONS_TEMPLATE}.
 #' @return Invisibly returns `NULL`, printing the requested information
 #'   to the console.
 #' @export
-options.help <- function(
-    options = NULL,
-    template_path = NULL) {
+options_help <- function(
+  options = NULL,
+  template_path = NULL
+) {
   box::use(
-    artma / const[CONST],
     artma / options / files[resolve_template_path],
-    artma / options / utils[print_options_help_text],
+    artma / options / inspect[expand_option_tokens, print_option_detail, print_option_tree],
     artma / options / template[flatten_template_options, read_template],
-    artma / libs / core / validation[assert, validate],
+    artma / libs / core / validation[validate],
     artma / libs / core / utils[get_verbosity]
   )
 
-  if (is.null(options)) {
-    if (get_verbosity() >= 2) {
-      cli::cli_alert_warning("Enter option names either as a character vector or as a single name to print their help.\n")
-    }
+  if (!is.null(options)) {
+    validate(is.character(options))
+  }
+
+  if (get_verbosity() < 2) {
     return(invisible(NULL))
   }
-  validate(is.character(options))
 
   template_path <- resolve_template_path(template_path)
 
@@ -685,47 +690,33 @@ options.help <- function(
   #    Each item typically has `name`, `type`, `default`, `help`, possibly others.
   template_map <- stats::setNames(template_defs, vapply(template_defs, `[[`, character(1), "name"))
 
-  not_found <- setdiff(options, names(template_map))
-  if (length(not_found) > 0) {
-    if (get_verbosity() >= 2) {
-      cli::cli_alert_warning("The following requested option(s) are not recognized: {.emph {not_found}}")
-    }
+  if (is.null(options)) {
+    print_option_tree(template_defs)
     return(invisible(NULL))
   }
 
   if (length(options) == 0) {
-    if (get_verbosity() >= 2) {
-      cli::cli_alert_warning("No options to explain.")
-    }
+    cli::cli_alert_warning("No options to explain.")
+    return(invisible(NULL))
+  }
+
+  # A requested name is either an option or a group; a group expands to every
+  # option underneath it, so the caller does not have to know the full path.
+  expansion <- expand_option_tokens(options, names(template_map))
+
+  if (length(expansion$not_found) > 0) {
+    cli::cli_alert_warning("The following requested option(s) are not recognized: {.emph {expansion$not_found}}")
+  }
+
+  if (length(expansion$matched) == 0) {
     return(invisible(NULL))
   }
 
   cli::cli_h1("Options Help")
   cli::cat_line()
 
-  for (opt_name in options) {
-    opt_def <- template_map[[opt_name]]
-
-    nm <- opt_def$name
-    tp <- opt_def$type
-    hlp <- opt_def$help %||% "(No help text provided.)"
-
-    if ("default" %in% names(opt_def)) {
-      # Accessing a null default value would assign null, so we coerce it to a 'null' string.
-      def <- opt_def$default %||% "null"
-    } else {
-      def <- "This option is required"
-    }
-
-    opt_styles <- CONST$STYLES$OPTIONS
-    if (get_verbosity() >= 2) {
-      cli::cli_text("{.strong Option name:} {opt_styles$NAME(nm)}")
-      cli::cli_text("{.strong Type:} {opt_styles$TYPE(tp)}")
-      cli::cli_text("{.strong Default:} {opt_styles$DEFAULT(def)}")
-      print_options_help_text(hlp)
-      cli::cli_rule()
-      cli::cat_line()
-    }
+  for (opt_name in expansion$matched) {
+    print_option_detail(template_map[[opt_name]])
   }
 
   invisible(NULL)
@@ -736,7 +727,7 @@ options.help <- function(
 #' @param ... *\[any\]* Additional arguments.
 #' @return `NULL` Prints the default directory to console.
 #' @export
-options.print_default_dir <- function(...) { # nolint: object_name_linter.
+options_print_default_dir <- function(...) {
   box::use(
     artma / paths[PATHS],
     artma / libs / core / utils[get_verbosity]
@@ -757,11 +748,12 @@ options.print_default_dir <- function(...) { # nolint: object_name_linter.
 #' @param force_default_overwrites *\[logical, optional\]* If set to TRUE, the function will overwrite the existing options file with the default values. Defaults to TRUE.
 #' @return `NULL` Fixes the user options file.
 #' @export
-options.fix <- function(
-    options_file_name = NULL,
-    options_dir = NULL,
-    template_path = NULL,
-    force_default_overwrites = TRUE) {
+options_fix <- function(
+  options_file_name = NULL,
+  options_dir = NULL,
+  template_path = NULL,
+  force_default_overwrites = TRUE
+) {
   box::use(
     artma / const[CONST],
     artma / options / ask[ask_for_existing_options_file_name, ask_for_option_value],
@@ -789,9 +781,14 @@ options.fix <- function(
     cli::cli_abort(cli::format_inline("The user options file {.file {options_file_name}} does not exist under path {.path {expected_path}}."))
   }
 
+  # Fold any legacy dual-store column options into the unified data.columns
+  # store before validating, so the fix pass works on the current format.
+  box::use(artma / options / migrate[migrate_legacy_options])
+  migrate_legacy_options(options_file_name = options_file_name, options_dir = options_dir)
+
   errors <- withr::with_options(
     list("artma.verbose" = min(get_verbosity(), 2)),
-    options.validate(
+    options_validate(
       options_file_name = options_file_name,
       options_dir = options_dir,
       template_path = template_path,
@@ -876,7 +873,7 @@ options.fix <- function(
     cli::cli_inform("Fixing the user options file {.path {options_file_name}}...")
   }
 
-  options.create(
+  options_create(
     options_file_name = options_file_name,
     options_dir = options_dir,
     template_path = template_path,
@@ -894,21 +891,22 @@ options.fix <- function(
 #' @param options_file_name *\[character\]* Name of the new user options file, including the suffix.
 #' @param options_dir *\[character, optional\]* Full path to the folder that contains user options files. If not provided, the default folder is chosen. Defaults to `NULL`.
 #' @param template_path *\[character, optional\]* Full path to the options template file.
-#' @param user_input *\[list, optional\]* A named list of user-supplied values for these options. If `NULL` or missing entries exist, the function will prompt the user via `readline()` (for required entries) or use defaults (for optional ones).
+#' @param user_input *\[list, optional\]* A named list of user-supplied values for these options, using either flat dotted-path names (e.g. `list("data.source_path" = "...")`) or nested lists that mirror the YAML structure (e.g. `list(data = list(source_path = "..."))`). When overwriting an existing file, a partial edit to a list-type option (e.g. one entry of `data.columns`) is merged into the existing value instead of replacing it. If `NULL` or missing entries exist, the function will prompt the user via `readline()` (for required entries) or use defaults (for optional ones).
 #' @param should_validate *\[logical, optional\]* If TRUE, validate the new options file against the template. Defaults to TRUE.
 #' @param should_overwrite *\[logical, optional\]* If TRUE, overwrite the file if it already exists. Defaults to FALSE, in which case the user is prompted to confirm the overwrite.
 #' @param action_name *\[character, optional\]* A name for the action being performed. This is used for logging purposes. Defaults to "create".
 #' `character` Name of the newly created user options file as a character.
 #' @return `NULL`
 #' @export
-options.create <- function(
-    options_file_name = NULL,
-    options_dir = NULL,
-    template_path = NULL,
-    user_input = list(),
-    should_validate = TRUE,
-    should_overwrite = FALSE,
-    action_name = "creating") {
+options_create <- function(
+  options_file_name = NULL,
+  options_dir = NULL,
+  template_path = NULL,
+  user_input = list(),
+  should_validate = TRUE,
+  should_overwrite = FALSE,
+  action_name = "creating"
+) {
   box::use(
     artma / options / ask[ask_for_options_file_name],
     artma / options / template[parse_options_from_template, flatten_user_options, collect_leaf_paths],
@@ -950,6 +948,19 @@ options.create <- function(
     cli::format_inline("Invalid options file path: {.path {options_path}}")
   )
 
+  leaf_set <- collect_leaf_paths(template_path)
+  # Flatten user_input against the template leaf set so a nested user_input
+  # (e.g. list(data = list(source_path = ...))) resolves to the same flat
+  # dotted keys as list("data.source_path" = ...) on both branches below.
+  user_input <- flatten_user_options(user_options = user_input, leaf_set = leaf_set)
+
+  # Honor the "mock" data-source shortcut programmatically, not only in the
+  # interactive prompt: generate the mock dataset and point the option at it.
+  if (identical(user_input[["data.source_path"]], "mock")) {
+    box::use(artma / data / mock[materialize_mock_data_path])
+    user_input[["data.source_path"]] <- materialize_mock_data_path()
+  }
+
   parsed_options <- if (!file.exists(options_path)) {
     parse_options_from_template(
       path         = template_path,
@@ -974,25 +985,38 @@ options.create <- function(
         cli::cli_abort("Aborting the overwriting of a user options file.")
       }
     }
-    leaf_set <- collect_leaf_paths(template_path)
     current_options <- flatten_user_options(user_options = read_options_file(options_path), leaf_set = leaf_set)
     utils::modifyList(current_options, user_input)
   }
 
   nested_options <- flat_to_nested(parsed_options)
 
-  write_options_file(options_path, nested_options)
-
   if (should_validate) {
+    # Validate a temporary copy before touching the real file: options_validate()
+    # can abort, and if it did after the real file was already overwritten, a
+    # previously valid options file would be left corrupted on disk with no
+    # way back.
+    tmp_path <- tempfile(
+      pattern = paste0(tools::file_path_sans_ext(options_file_name), "-"),
+      tmpdir = options_dir,
+      fileext = ".yaml"
+    )
+    write_options_file(tmp_path, nested_options)
+    on.exit(if (file.exists(tmp_path)) file.remove(tmp_path), add = TRUE)
+
     withr::with_options(
       list("artma.verbose" = min(get_verbosity(), 2)),
-      options.validate(
-        options_file_name = options_file_name,
+      options_validate(
+        options_file_name = basename(tmp_path),
         options_dir = options_dir,
         template_path = template_path,
         failure_action = "abort_verbose"
       )
     )
+
+    file.copy(tmp_path, options_path, overwrite = TRUE)
+  } else {
+    write_options_file(options_path, nested_options)
   }
 
   if (get_verbosity() >= 3) {
@@ -1002,8 +1026,88 @@ options.create <- function(
   invisible(options_file_name)
 }
 
-# Copy an existing folder of options into another place
-# options.migrate
+# Deprecated dotted aliases (see contributingGuides/API.md). Removed after 1.0.
 
-# Inspect an existing user options file
-# options.inspect
+#' @rdname artma-deprecated
+#' @export
+options.validate <- function(...) {
+  lifecycle::deprecate_warn("0.4.0", "options.validate()", "options_validate()")
+  options_validate(...)
+}
+
+#' @rdname artma-deprecated
+#' @export
+options.copy <- function(...) {
+  lifecycle::deprecate_warn("0.4.0", "options.copy()", "options_copy()")
+  options_copy(...)
+}
+
+#' @rdname artma-deprecated
+#' @export
+options.delete <- function(...) {
+  lifecycle::deprecate_warn("0.4.0", "options.delete()", "options_delete()")
+  options_delete(...)
+}
+
+#' @rdname artma-deprecated
+#' @export
+options.list <- function(...) {
+  lifecycle::deprecate_warn("0.4.0", "options.list()", "options_list()")
+  options_list(...)
+}
+
+#' @rdname artma-deprecated
+#' @export
+options.diff <- function(...) {
+  lifecycle::deprecate_warn("0.4.0", "options.diff()", "options_diff()")
+  options_diff(...)
+}
+
+#' @rdname artma-deprecated
+#' @export
+options.load <- function(...) {
+  lifecycle::deprecate_warn("0.4.0", "options.load()", "options_load()")
+  options_load(...)
+}
+
+#' @rdname artma-deprecated
+#' @export
+options.modify <- function(...) {
+  lifecycle::deprecate_warn("0.4.0", "options.modify()", "options_modify()")
+  options_modify(...)
+}
+
+#' @rdname artma-deprecated
+#' @export
+options.open <- function(...) {
+  lifecycle::deprecate_warn("0.4.0", "options.open()", "options_open()")
+  options_open(...)
+}
+
+#' @rdname artma-deprecated
+#' @export
+options.help <- function(...) {
+  lifecycle::deprecate_warn("0.4.0", "options.help()", "options_help()")
+  options_help(...)
+}
+
+#' @rdname artma-deprecated
+#' @export
+options.print_default_dir <- function(...) { # nolint: object_name_linter.
+  lifecycle::deprecate_warn("0.4.0", "options.print_default_dir()", "options_print_default_dir()")
+  options_print_default_dir(...)
+}
+
+#' @rdname artma-deprecated
+#' @export
+options.fix <- function(...) {
+  lifecycle::deprecate_warn("0.4.0", "options.fix()", "options_fix()")
+  options_fix(...)
+}
+
+#' @rdname artma-deprecated
+#' @export
+options.create <- function(...) {
+  lifecycle::deprecate_warn("0.4.0", "options.create()", "options_create()")
+  options_create(...)
+}

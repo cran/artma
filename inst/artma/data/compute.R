@@ -32,14 +32,123 @@ add_obs_id_column <- function(df) {
   df
 }
 
+#' @title Check whether label values are human-legible
+#' @description Study labels count as legible when they are mostly non-numeric
+#'   text ("Smith (2009)"), mirroring the value heuristics of
+#'   \code{is_likely_study_key}.
+#' @param labels *\[character\]* Candidate label values.
+#' @return *\[logical\]* TRUE if the values read as human-legible labels.
+#' @keywords internal
+is_legible_label_vector <- function(labels) {
+  labels <- trimws(as.character(labels))
+  labels <- labels[!is.na(labels) & nzchar(labels)]
+
+  if (length(labels) == 0) {
+    return(FALSE)
+  }
+
+  numeric_like_ratio <- mean(grepl("^[-+]?[0-9]+(\\.[0-9]+)?$", labels))
+  if (numeric_like_ratio > 0.8) {
+    return(FALSE)
+  }
+
+  mean(grepl("[A-Za-z]", labels)) >= 0.6
+}
+
+
+#' @title Check that labels group rows exactly like study IDs
+#' @description A label column can stand in for the study key only when the
+#'   mapping is one-to-one: every study ID carries a single label and no two
+#'   studies share one.
+#' @param labels *\[character\]* Candidate label values, one per row.
+#' @param study_ids *\[integer\]* Normalized study IDs, one per row.
+#' @return *\[logical\]* TRUE if labels and IDs induce the same grouping.
+#' @keywords internal
+labels_align_with_study_ids <- function(labels, study_ids) {
+  if (any(is.na(labels) | !nzchar(labels)) || any(is.na(study_ids))) {
+    return(FALSE)
+  }
+
+  n_ids <- length(unique(study_ids))
+  n_labels <- length(unique(labels))
+  n_pairs <- length(unique(paste(study_ids, labels, sep = "\r")))
+
+  n_pairs == n_ids && n_labels == n_ids
+}
+
+
+#' @title Find a human-legible source column for study labels
+#' @description When the study key column holds numeric IDs, the frame often
+#'   still carries the citation-style study names under another column
+#'   ("study", "author", ...). Returns the best such column: it must look like
+#'   study labels, group rows exactly like the study IDs, and carry a
+#'   study-name-like column name (an existing \code{study_label} column always
+#'   qualifies). NULL when the current labels are already legible or no
+#'   suitable column exists.
+#' @param df *\[data.frame\]* The data frame.
+#' @param study_ids *\[integer\]* Normalized study IDs, one per row.
+#' @param current_labels *\[character\]* Labels derived from the study key.
+#' @return *\[character\]* Column name, or NULL.
+#' @keywords internal
+find_study_label_source <- function(df, study_ids, current_labels) {
+  box::use(
+    artma / data / column_recognition[MATCH_THRESHOLDS, get_column_patterns, match_column_name],
+    artma / data / utils[get_reserved_colnames]
+  )
+
+  if (is_legible_label_vector(current_labels)) {
+    return(NULL)
+  }
+
+  candidates <- setdiff(names(df), setdiff(get_reserved_colnames(), "study_label"))
+  if (length(candidates) == 0) {
+    return(NULL)
+  }
+
+  study_patterns <- get_column_patterns()["study_id"]
+
+  scores <- vapply(candidates, function(col) {
+    values <- df[[col]]
+    if (!(is.character(values) || is.factor(values))) {
+      return(NA_real_)
+    }
+    labels <- trimws(as.character(values))
+    if (!is_legible_label_vector(labels)) {
+      return(NA_real_)
+    }
+    if (!labels_align_with_study_ids(labels, study_ids)) {
+      return(NA_real_)
+    }
+    if (identical(col, "study_label")) {
+      # A user-provided study_label column beats any name-matched candidate
+      return(2)
+    }
+    match <- match_column_name(col, study_patterns)
+    if (identical(match$match, "study_id") && match$score >= MATCH_THRESHOLDS$optional_confidence) {
+      match$score
+    } else {
+      NA_real_
+    }
+  }, numeric(1))
+
+  if (all(is.na(scores))) {
+    return(NULL)
+  }
+
+  candidates[which.max(scores)]
+}
+
+
 #' @title Add study ID column
 #' @description Add or normalize the study ID column. Uses the existing
 #'   \code{study_id} column (character or integer), preserves its original
 #'   labels in \code{study_label}, and overwrites \code{study_id} with
-#'   integer IDs derived from factorizing its values.
+#'   integer IDs derived from factorizing its values. When the study key is
+#'   numeric and another column carries human-legible study names that group
+#'   rows the same way, \code{study_label} is taken from that column instead.
 #' @param df *\[data.frame\]* The data frame with a \code{study_id} column.
 #' @return *\[data.frame\]* The data frame with \code{study_id} as integer IDs
-#'   and \code{study_label} as the original study key values.
+#'   and \code{study_label} as the study label values.
 #' @keywords internal
 add_study_id_column <- function(df) {
   box::use(artma / libs / core / utils[get_verbosity])
@@ -53,27 +162,40 @@ add_study_id_column <- function(df) {
   valid_ids <- as.integer(factor(study_src, levels = unique(study_src)))
 
   study_labels <- as.character(study_src)
+  label_source <- "the original study keys"
+
+  label_col <- find_study_label_source(df, valid_ids, study_labels)
+  if (!is.null(label_col)) {
+    study_labels <- as.character(df[[label_col]])
+    label_source <- sprintf("the column '%s'", label_col)
+    if (get_verbosity() >= 3 && !identical(label_col, "study_label")) {
+      cli::cli_alert_info(
+        "The study keys are numeric; using {.field {label_col}} for {.field study_label} instead."
+      )
+    }
+  }
+
   if (!"study_label" %in% colnames(df)) {
     df$study_label <- study_labels
     if (get_verbosity() >= 4) {
-      cli::cli_inform("Created {.field study_label} column from original study keys")
+      cli::cli_inform("Created {.field study_label} column from {label_source}")
     }
   } else if (!identical(as.character(df$study_label), study_labels)) {
     if (get_verbosity() >= 2) {
       cli::cli_alert_warning(c(
-        "!" = "Existing {.val study_label} values differ from the source {.val study_id} column.",
-        "i" = "Overwriting {.val study_label} with the original study keys."
+        "!" = "Existing {.val study_label} values differ from {label_source}.",
+        "i" = "Overwriting {.val study_label}."
       ))
     }
     df$study_label <- study_labels
   }
 
   if ("study_id" %in% colnames(df)) {
-    invalid_or_missing_ids <- which(is.na(df$study_id) | df$study_id != valid_ids)
+    invalid_or_missing_ids <- which(is.na(study_src) | trimws(as.character(study_src)) == "")
     if (length(invalid_or_missing_ids) > 0) {
       if (get_verbosity() >= 2) {
         cli::cli_alert_warning(c(
-          "!" = "Found {length(invalid_or_missing_ids)} invalid or missing study IDs in the column {.val study_id}.",
+          "!" = "Found {length(invalid_or_missing_ids)} invalid or missing study IDs in the column {.val study_id}. ",
           "i" = "Resetting them to sequential integers."
         ))
       }
@@ -92,20 +214,16 @@ add_study_id_column <- function(df) {
 #' @keywords internal
 add_t_stat_column <- function(df) {
   box::use(
-    artma / const[CONST],
     calc = artma / calc / index
   )
-  opt_path <- "artma.data.colnames.t_stat"
 
   if ("t_stat" %in% colnames(df)) {
     if (any(is.na(df$t_stat))) {
       n_missing <- sum(is.na(df$t_stat))
-      opt_name <- CONST$STYLES$OPTIONS$NAME(opt_path)
-      opt_val <- CONST$STYLES$OPTIONS$VALUE("NA")
       cli::cli_abort(c(
         "!" = "Found {n_missing} missing t-statistics in the column {.val t_stat}.",
-        "i" = "Please add these to your data frame or set the option {opt_name} to {opt_val} to compute them automatically.",
-        "i" = "You can set the option by running {.code artma::options.modify(user_input = list('{opt_path}' = NA))}."
+        "i" = "Please add these to your data frame, or remove the {.val t_stat} column mapping so they are computed automatically.",
+        "i" = "You can remove the mapping by running {.code artma::config_set('t_stat', source_name = NA)}."
       ))
     }
   }
@@ -126,7 +244,7 @@ add_study_size_column <- function(df) {
   study_id_col <- df$study_id
 
   freq_table <- table(study_id_col)
-  study_size_col <- vapply(study_id_col, function(x) freq_table[as.character(x)], FUN.VALUE = integer(1))
+  study_size_col <- unname(as.integer(freq_table[as.character(study_id_col)]))
 
   if ("study_size" %in% colnames(df)) {
     invalid_or_missing_ids <- which(is.na(df$study_size) | df$study_size != study_size_col)
@@ -207,12 +325,28 @@ add_reg_dof_column <- function(df) {
 add_precision_column <- function(df) {
   box::use(
     calc = artma / calc / index,
-    artma / libs / core / utils[get_verbosity]
+    artma / libs / core / utils[get_verbosity],
+    artma / options / typed_accessors[get_precision_type, get_winsorization_level]
   )
 
+  winsorization_level <- get_winsorization_level()
+  winsorization_active <- !is.null(winsorization_level) &&
+    !is.na(winsorization_level) && winsorization_level != 0
+
   if ("precision" %in% colnames(df)) {
-    # Validate existing precision column
-    if (any(is.na(df$precision))) {
+    if (!is.numeric(df$precision)) {
+      cli::cli_abort("The column {.val precision} must be numeric.")
+    }
+
+    if (winsorization_active) {
+      # se (and thus precision) was winsorized upstream; recompute precision
+      # from the winsorized se/reg_dof so it stays consistent with
+      # effect/se/t_stat instead of keeping stale pre-winsorization values.
+      if (get_verbosity() >= 3) {
+        cli::cli_alert_info("Recalculating {.field precision} from winsorized data.")
+      }
+      df$precision <- calc$precision(se = df$se, reg_dof = df$reg_dof)
+    } else if (any(is.na(df$precision))) {
       n_missing <- sum(is.na(df$precision))
       if (get_verbosity() >= 2) {
         cli::cli_alert_warning(c(
@@ -225,13 +359,9 @@ add_precision_column <- function(df) {
       calculated_precision <- calc$precision(se = df$se, reg_dof = df$reg_dof)
       df$precision[missing_idx] <- calculated_precision[missing_idx]
     }
-
-    if (!is.numeric(df$precision)) {
-      cli::cli_abort("The column {.val precision} must be numeric.")
-    }
   } else {
     # Calculate precision based on option
-    precision_type <- getOption("artma.calc.precision_type", default = "1/SE")
+    precision_type <- get_precision_type()
     df$precision <- calc$precision(se = df$se, reg_dof = df$reg_dof)
 
     if (get_verbosity() >= 4) {
@@ -280,9 +410,9 @@ update_config_with_computed_columns <- function(df) {
           var_name = col_name,
           var_name_verbose = make_verbose_name(col_name),
           data_type = col_data_type,
-          variable_summary = !identical(col_name, "study_label"),  # Keep labels out of numeric summaries
-          effect_sum_stats = FALSE,  # Don't split by computed columns
-          is_computed = TRUE  # Mark as computed for clarity
+          variable_summary = !identical(col_name, "study_label"), # Keep labels out of numeric summaries
+          effect_sum_stats = FALSE, # Don't split by computed columns
+          is_computed = TRUE # Mark as computed for clarity
         )
 
         if (get_verbosity() >= 4) {
@@ -302,8 +432,11 @@ update_config_with_computed_columns <- function(df) {
 
 
 #' @title Compute optional columns
-#' @description Compute optional columns that the user did not provide,
-#'   then update the data config to include them.
+#' @description Compute optional columns that the user did not provide.
+#'   This step is pure: it only derives columns and never writes the data
+#'   config. Registering the computed columns in the data config is the job of
+#'   the persist phase (`update_config_with_computed_columns`), which runs
+#'   whether or not this cached compute step executed.
 #'   This includes:
 #'   - obs_id: Sequential observation IDs (1 to nrow)
 #'   - study_id: Integer study IDs based on study names
@@ -318,21 +451,16 @@ compute_optional_columns <- function(df) {
   box::use(artma / libs / core / utils[get_verbosity])
 
   if (get_verbosity() >= 3) {
-    cli::cli_alert_info("Computing optional columns for {.val {nrow(df)}} observations…")
+    cli::cli_alert_info("Computing optional columns for {.val {nrow(df)}} observations...")
   }
 
-  df_with_computed <- df |>
+  df |>
     add_obs_id_column() |>
     add_study_id_column() |>
     add_t_stat_column() |>
     add_study_size_column() |>
     add_reg_dof_column() |>
     add_precision_column()
-
-  # Update the data config to include computed columns
-  update_config_with_computed_columns(df_with_computed)
-
-  df_with_computed
 }
 
-box::export(compute_optional_columns)
+box::export(compute_optional_columns, update_config_with_computed_columns)

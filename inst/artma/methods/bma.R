@@ -11,11 +11,16 @@ bma <- function(df) {
     artma / econometric / bma[
       handle_bma_params,
       run_bma,
-      extract_bma_results
+      extract_bma_results,
+      rename_bma_model,
+      build_bma_model_labels,
+      render_bma_comparison_plot
     ],
     artma / libs / core / utils[get_verbosity],
-    artma / libs / core / validation[assert, validate, validate_columns],
+    artma / libs / core / validation[validate, validate_columns],
+    artma / modules / runtime_methods[new_method_result],
     artma / options / index[get_option_group],
+    artma / options / resolver[opt_spec, resolve_options],
     artma / visualization / options[get_visualization_options]
   )
 
@@ -30,39 +35,48 @@ bma <- function(df) {
   opt <- get_option_group("artma.methods.bma")
   vis <- get_visualization_options()
 
-  burn <- opt$burn %||% 10000L
-  iter <- opt$iter %||% 50000L
-  g <- opt$g %||% "UIP"
-  mprior <- opt$mprior %||% "uniform"
-  nmodel <- opt$nmodel %||% 1000L
-  mcmc <- opt$mcmc %||% "bd"
-  use_vif_optimization <- opt$use_vif_optimization %||% FALSE
-  max_groups_to_remove <- opt$max_groups_to_remove %||% 30L
-  print_results <- opt$print_results %||% "fast"
+  resolved <- resolve_options(opt, list(
+    burn = opt_spec(
+      default = 10000L, type = "numeric",
+      constraint = function(x) x > 0, constraint_msg = "burn must be positive"
+    ),
+    iter = opt_spec(
+      default = 50000L, type = "numeric",
+      constraint = function(x) x > 0, constraint_msg = "iter must be positive"
+    ),
+    g = opt_spec(default = "UIP", type = "character"),
+    mprior = opt_spec(default = "uniform", type = "character"),
+    nmodel = opt_spec(
+      default = 1000L, type = "numeric",
+      constraint = function(x) x > 0, constraint_msg = "nmodel must be positive"
+    ),
+    mcmc = opt_spec(default = "bd", type = "character"),
+    use_vif_optimization = opt_spec(default = FALSE, type = "logical"),
+    max_groups_to_remove = opt_spec(
+      default = 30L, type = "numeric",
+      constraint = function(x) x > 0, constraint_msg = "max_groups_to_remove must be positive"
+    ),
+    verbose_output = opt_spec(default = FALSE, type = "logical"),
+    print_results = opt_spec(
+      default = "fast", type = "character",
+      constraint = function(x) x %in% c("none", "fast", "verbose", "all", "table"),
+      constraint_msg = "print_results must be one of: none, fast, verbose, all, table"
+    )
+  ))
+
+  burn <- resolved$burn
+  iter <- resolved$iter
+  g <- resolved$g
+  mprior <- resolved$mprior
+  nmodel <- resolved$nmodel
+  mcmc <- resolved$mcmc
+  use_vif_optimization <- resolved$use_vif_optimization
+  max_groups_to_remove <- resolved$max_groups_to_remove
+  verbose_output <- resolved$verbose_output
+  print_results <- resolved$print_results
   export_graphics <- vis$export_graphics
   export_path <- vis$export_path
   graph_scale <- vis$graph_scale
-
-  validate(
-    is.numeric(burn),
-    is.numeric(iter),
-    is.character(g),
-    is.character(mprior),
-    is.numeric(nmodel),
-    is.character(mcmc),
-    is.logical(use_vif_optimization),
-    is.numeric(max_groups_to_remove),
-    is.character(print_results)
-  )
-
-  assert(burn > 0, "burn must be positive")
-  assert(iter > 0, "iter must be positive")
-  assert(nmodel > 0, "nmodel must be positive")
-  assert(max_groups_to_remove > 0, "max_groups_to_remove must be positive")
-  assert(
-    print_results %in% c("none", "fast", "verbose", "all", "table"),
-    "print_results must be one of: none, fast, verbose, all, table"
-  )
 
   prepared <- prepare_bma_inputs(
     df = df,
@@ -75,19 +89,19 @@ bma <- function(df) {
 
   if (!is.null(prepared$skipped)) {
     if (get_verbosity() >= 2) {
-      cli::cli_alert_warning("No valid BMA variables available. Skipping BMA analysis.")
+      cli::cli_alert_warning("{prepared$skipped}. Skipping BMA analysis.")
     }
-    return(list(
-      coefficients = data.frame(
-        variable = character(0),
-        pip = numeric(0),
-        post_mean = numeric(0),
-        post_sd = numeric(0),
-        cond_pos_sign = numeric(0),
-        stringsAsFactors = FALSE
-      ),
-      model = NULL,
-      skipped = prepared$skipped
+    empty_coefs <- data.frame(
+      variable = character(0),
+      pip = numeric(0),
+      post_mean = numeric(0),
+      post_sd = numeric(0),
+      cond_pos_sign = numeric(0),
+      stringsAsFactors = FALSE
+    )
+    return(new_method_result(
+      tables = list(coefficients = empty_coefs),
+      meta = list(model = NULL, skip_reason = prepared$skipped)
     ))
   }
 
@@ -115,61 +129,39 @@ bma <- function(df) {
       cli::cli_alert_info("Running BMA model {i} of {length(bma_params)}...")
     }
 
-    bma_model <- run_bma(bma_data, bma_params[[i]])
+    bma_model <- run_bma(bma_data, bma_params[[i]], quiet = !verbose_output)
 
-    extract_bma_results(
+    # Suppress individual BMA text output unless verbose_output is enabled
+    effective_print <- if (verbose_output) print_results else "none"
+
+    bma_coefs_matrix <- extract_bma_results(
       bma_model,
       bma_data,
       bma_var_list,
-      print_results = print_results,
+      print_results = effective_print,
       theme = vis$theme,
       export_graphics = export_graphics,
       export_path = export_path,
       graph_scale = graph_scale
     )
 
-    pip_values <- BMS::pmp.bma(bma_model)
-    var_names <- bma_model$reg.names
-
-    # Extract coefficient matrix and get "Post Mean" column
-    bma_coefs_all <- stats::coef(bma_model, order.by.pip = FALSE, exact = TRUE, include.constant = TRUE)
-
-    if (is.matrix(bma_coefs_all) || length(dim(bma_coefs_all)) > 1) {
-      post_means <- bma_coefs_all[, "Post Mean"]
-
-      # Remove intercept row if present
-      rnames <- rownames(bma_coefs_all)
-      if (!is.null(rnames) && length(rnames) > 0) {
-        intercept_idx <- which(rnames == "(Intercept)")
-        if (length(intercept_idx) > 0) {
-          post_means <- post_means[-intercept_idx]
-        }
-      }
-
-      if (length(post_means) == length(var_names)) {
-        coef_values <- as.numeric(post_means)
-      } else {
-        if (get_verbosity() >= 2) {
-          cli::cli_alert_warning("Coefficient count mismatch: got {length(post_means)}, expected {length(var_names)}")
-        }
-        coef_values <- rep(NA, length(var_names))
-      }
-    } else {
-      if (get_verbosity() >= 2) {
-        cli::cli_alert_warning("Unexpected coefficient structure")
-      }
-      coef_values <- rep(NA, length(var_names))
-    }
-
+    # Build coefficients from the full matrix returned by extract_bma_results
+    # (includes verbose names from rename_bma_model and intercept)
     coef_df <- data.frame(
-      variable = var_names,
-      pip = as.numeric(pip_values[var_names]),
-      post_mean = coef_values,
-      post_sd = as.numeric(NA),
-      cond_pos_sign = as.numeric(NA),
+      variable = rownames(bma_coefs_matrix),
+      pip = as.numeric(bma_coefs_matrix[, "PIP"]),
+      post_mean = as.numeric(bma_coefs_matrix[, "Post Mean"]),
+      post_sd = as.numeric(bma_coefs_matrix[, "Post SD"]),
+      cond_pos_sign = if ("Cond.Pos.Sign" %in% colnames(bma_coefs_matrix)) {
+        as.numeric(bma_coefs_matrix[, "Cond.Pos.Sign"])
+      } else {
+        NA_real_
+      },
       stringsAsFactors = FALSE
     )
 
+    # Normalize intercept naming to match FMA convention
+    coef_df$variable <- gsub("^\\(Intercept\\)$", "Intercept", coef_df$variable)
     rownames(coef_df) <- NULL
 
     results[[i]] <- list(
@@ -181,11 +173,77 @@ bma <- function(df) {
     )
   }
 
-  if (length(results) == 1) {
-    invisible(results[[1]])
-  } else {
-    invisible(results)
+  if (length(results) > 1) {
+    comparison_labels <- build_bma_model_labels(bma_params)
+    comparison_models <- stats::setNames(
+      lapply(seq_along(results), function(i) {
+        rename_bma_model(results[[i]]$model, results[[i]]$var_list)
+      }),
+      comparison_labels
+    )
+
+    render_bma_comparison_plot(
+      comparison_models,
+      export_graphics = export_graphics,
+      export_path = export_path,
+      graph_scale = graph_scale,
+      print_plot = print_results == "all" && get_verbosity() >= 3
+    )
   }
+
+  # Downstream consumers (fma, best_practice_estimate, the MA table builder) use
+  # the first parameter set; the full list is preserved under meta$all.
+  primary <- results[[1]]
+  invisible(new_method_result(
+    tables = list(coefficients = primary$coefficients),
+    estimates = bma_estimates(primary$coefficients, nrow(primary$data)),
+    meta = list(
+      model = primary$model,
+      data = primary$data,
+      params = primary$params,
+      var_list = primary$var_list,
+      skipped = NULL,
+      all = results
+    )
+  ))
+}
+
+#' @title Tidy estimates for BMA
+#' @description
+#' Map the posterior coefficient frame onto the shared `estimates` schema, one
+#' row per moderator.
+#'
+#' BMA reports a posterior, not a sampling distribution, so the inferential
+#' columns are read Bayesian: `estimate` is the posterior mean, `std_error` the
+#' posterior standard deviation, and `statistic` the posterior inclusion
+#' probability (PIP). There is no frequentist test statistic or p-value to put
+#' there instead, and PIP is the number every downstream consumer of a BMA run
+#' wants next to the mean, so it takes the `statistic` slot and each row carries
+#' a `note` saying so. `cond_pos_sign` has no schema column and stays in the
+#' display table.
+#' @param coefficients *\[data.frame\]* The BMA coefficient frame
+#'   (`variable`, `pip`, `post_mean`, `post_sd`).
+#' @param n_obs *\[integer, optional\]* Observations the BMA was fitted on.
+#' @return *\[data.frame\]* A frame in the shared estimates schema.
+bma_estimates <- function(coefficients, n_obs = NA_integer_) {
+  box::use(
+    artma / modules / runtime_methods[new_estimates]
+  )
+
+  if (!is.data.frame(coefficients) || nrow(coefficients) == 0L) {
+    return(new_estimates())
+  }
+
+  new_estimates(data.frame(
+    method = "bma",
+    term = coefficients$variable,
+    estimate = coefficients$post_mean,
+    std_error = coefficients$post_sd,
+    statistic = coefficients$pip,
+    n_obs = n_obs,
+    note = "statistic is the posterior inclusion probability (PIP)",
+    stringsAsFactors = FALSE
+  ))
 }
 
 #' Prepare inputs for BMA and FMA workflows
@@ -195,7 +253,7 @@ prepare_bma_inputs <- function(df, config, use_vif_optimization, max_groups_to_r
     artma / econometric / bma[get_bma_data, find_optimal_bma_formula],
     artma / libs / core / validation[assert, validate, validate_columns],
     artma / libs / core / utils[get_verbosity],
-    artma / variable / bma[get_bma_priority_variables]
+    artma / variable / bma[flag_derived_bma_candidates, get_bma_priority_variables]
   )
 
   if (is.null(verbosity)) {
@@ -243,8 +301,68 @@ prepare_bma_inputs <- function(df, config, use_vif_optimization, max_groups_to_r
     bma_vars <- bma_vars[bma_vars %in% names(df)]
   }
 
+  # BMA regresses on a numeric design matrix throughout: `get_bma_data()`
+  # z-scores each non-binary column and `run_bma()` asserts every column is
+  # numeric. A character or factor moderator therefore aborts the run, and it
+  # does so from inside `scale()` with a bare "'x' must be numeric" that names
+  # no column. Drop them here instead, where the offender can be named.
+  non_numeric_vars <- bma_vars[vapply(bma_vars, function(v) {
+    !is.numeric(df[[v]]) && !is.logical(df[[v]])
+  }, logical(1))]
+  if (length(non_numeric_vars)) {
+    if (verbosity >= 2) {
+      cli::cli_alert_warning(
+        "Excluding {length(non_numeric_vars)} non-numeric variable{?s} from the BMA moderator set: {.val {non_numeric_vars}}"
+      )
+      cli::cli_inform(
+        "BMA needs numeric moderators. Encode {cli::qty(length(non_numeric_vars))}{?this/these} column{?s} as dummies, or set {.code bma: false} on {?it/them} in the data config."
+      )
+    }
+    bma_vars <- setdiff(bma_vars, non_numeric_vars)
+  }
+
+  # Constant columns carry no moderator information, and scaling one yields an
+  # all-NaN column that na.omit would then use to drop every observation.
+  constant_vars <- bma_vars[vapply(bma_vars, function(v) {
+    vals <- df[[v]]
+    length(unique(vals[!is.na(vals)])) <= 1L
+  }, logical(1))]
+  if (length(constant_vars)) {
+    if (verbosity >= 2) {
+      cli::cli_alert_warning(
+        "Excluding {length(constant_vars)} constant (zero-variance) variable{?s} from the BMA moderator set: {.val {constant_vars}}"
+      )
+    }
+    bma_vars <- setdiff(bma_vars, constant_vars)
+  }
+
   if (!length(bma_vars)) {
     return(list(skipped = "No valid BMA variables available"))
+  }
+
+  # Configured moderators are used as-is, but warn when one looks like a
+  # derived encoding of the effect or its standard error (winsorized copy,
+  # t-statistic, inverse SE, ...): configs saved by older versions can carry
+  # such columns, and they silently corrupt the BMA results. Set bma: false on
+  # the column to drop it, or bma_allow_derived: true to keep it and silence
+  # this warning.
+  derived <- flag_derived_bma_candidates(
+    df,
+    setdiff(bma_vars, get_bma_priority_variables()),
+    config = config
+  )
+  if (nrow(derived) && verbosity >= 2) {
+    cli::cli_alert_warning(
+      "{nrow(derived)} configured BMA moderator{?s} look{?s/} like derived encoding{?s} of the effect or its standard error: {.val {derived$var_name}}"
+    )
+    details <- sprintf(
+      "%s: |cor| = %.3f with %s",
+      derived$var_name, derived$correlation, derived$target
+    )
+    cli::cli_bullets(stats::setNames(details, rep("*", length(details))))
+    cli::cli_inform(
+      "Regressing the effect on an encoding of itself hides every genuine moderator and drags the best-practice estimate toward the sample mean. Set {.code bma: false} on {cli::qty(nrow(derived))}{?this/these} column{?s} in the data config, or {.code bma_allow_derived: true} to keep {?it/them} and silence this warning."
+    )
   }
 
   # Only include 'effect' as required (dependent variable)
@@ -305,6 +423,11 @@ prepare_bma_inputs <- function(df, config, use_vif_optimization, max_groups_to_r
     include_reference_groups = FALSE
   )
 
+  # Column subsetting below drops custom attributes, so hold the scaling
+  # metadata aside and re-attach it (pruned to surviving columns) at the end.
+  scale_centers <- attr(bma_data, "bpe_scale_centers")
+  scale_scales <- attr(bma_data, "bpe_scale_scales")
+
   if (!"effect" %in% colnames(bma_data)) {
     cli::cli_abort("BMA data must include an {.code effect} column.")
   }
@@ -346,7 +469,7 @@ prepare_bma_inputs <- function(df, config, use_vif_optimization, max_groups_to_r
 
   # Check for rank deficiency and multicollinearity, and remove aliased variables
   if (ncol(bma_data) > 2) {
-    max_iterations <- 50  # Prevent infinite loop
+    max_iterations <- 50 # Prevent infinite loop
     iteration <- 0
 
     repeat {
@@ -418,11 +541,68 @@ prepare_bma_inputs <- function(df, config, use_vif_optimization, max_groups_to_r
     }
   }
 
+  # BMS::bms() crashes with "subscript out of bounds" when the model space has
+  # exactly one candidate regressor (its internal XtX.big matrix collapses to
+  # 1x1 but position indices assume at least two candidates). Two or more
+  # moderators are required to reach the codepath BMS actually supports.
+  n_moderators <- ncol(bma_data) - 1
+  if (n_moderators == 1) {
+    sole_moderator <- setdiff(colnames(bma_data), "effect")
+    return(list(
+      skipped = sprintf(
+        "BMA requires at least 2 candidate moderator variables, but only 1 remains (%s). The BMS package cannot fit a model with a single regressor",
+        sole_moderator
+      )
+    ))
+  }
+
+  if (!is.null(scale_centers)) {
+    attr(bma_data, "bpe_scale_centers") <- scale_centers[colnames(bma_data)]
+    attr(bma_data, "bpe_scale_scales") <- scale_scales[colnames(bma_data)]
+  }
+
   list(
     bma_data = bma_data,
     bma_var_list = bma_var_list,
     bma_var_names = bma_var_names
   )
+}
+
+#' Unwrap a BMA result into its model/data/var_list/params fields
+#' @description
+#' Accepts either the standard method-result shape (fields nested under
+#' `$meta`) or a bare list carrying `model`/`data`/`var_list` directly, so
+#' callers that pass a previously computed `bma()` result or a hand-built
+#' list are both supported. Returns a list with `model`, `data`, `var_list`,
+#' `params` and `skipped` fields (all `NULL` except `skipped` when
+#' `bma_result` does not carry a usable bundle; `skipped` carries the
+#' `meta$skip_reason` string when the source `bma()` run was itself skipped).
+#' @param bma_result *\[list, optional\]* Either a `bma()` method result or a
+#'   bare `list(model=, data=, var_list=, params=)`.
+#' @return *\[list\]* `list(model=, data=, var_list=, params=, skipped=)`.
+unwrap_bma_result <- function(bma_result) {
+  empty <- list(model = NULL, data = NULL, var_list = NULL, params = NULL, skipped = NULL)
+
+  if (!is.list(bma_result)) {
+    return(empty)
+  }
+
+  # Accept the standard method contract (fields under meta) or a bare meta-like
+  # list for callers that pass one directly.
+  meta <- bma_result$meta %||% bma_result
+
+  if (!is.null(meta$model) || !is.null(meta$data) || !is.null(meta$var_list)) {
+    return(list(
+      model = meta$model,
+      data = meta$data,
+      var_list = meta$var_list,
+      params = meta$params,
+      skipped = meta$skip_reason
+    ))
+  }
+
+  empty$skipped <- meta$skip_reason
+  empty
 }
 
 #' Prompt user to select BMA variables at runtime
@@ -436,7 +616,7 @@ prompt_bma_variable_selection <- function(df, config) {
     artma / variable / bma[suggest_variables_for_bma]
   )
 
-  if (!should_prompt_user(required_level = 4)) {
+  if (!should_prompt_user(required_level = "autonomous")) {
     if (get_verbosity() >= 3) {
       cli::cli_inform("Autonomy level is high - using automatic variable selection")
     }
@@ -470,7 +650,7 @@ prompt_bma_variable_selection_mode <- function() {
     artma / libs / core / autonomy[should_prompt_user]
   )
 
-  if (!should_prompt_user(required_level = 4)) {
+  if (!should_prompt_user(required_level = "autonomous")) {
     return("auto")
   }
 
@@ -589,7 +769,7 @@ auto_select_bma_variables <- function(df, config) {
   cli::cat_line()
 
   box::use(artma / libs / core / autonomy[should_prompt_user])
-  if (!should_prompt_user(required_level = 4)) {
+  if (!should_prompt_user(required_level = "autonomous")) {
     var_names <- suggested_vars$var_name
     cli::cli_alert_success("Using {length(var_names)} suggested moderator{?s} (autonomy level: high)")
     return(var_names)
@@ -650,7 +830,7 @@ manual_select_bma_variables <- function(df, config) {
     artma / libs / core / autonomy[should_prompt_user]
   )
 
-  if (!should_prompt_user(required_level = 4)) {
+  if (!should_prompt_user(required_level = "autonomous")) {
     if (get_verbosity() >= 3) {
       cli::cli_inform("Autonomy level is high - skipping manual variable selection")
     }
@@ -775,14 +955,18 @@ save_bma_variables_to_data_config <- function(variables, config) {
 
 
 box::use(
-  artma / libs / infrastructure / cache[cache_cli_runner],
-  artma / data / cache_signatures[build_data_cache_signature]
+  artma / modules / runtime_methods[register_runtime_method]
 )
 
-run <- cache_cli_runner(
+run <- register_runtime_method(
   bma,
   stage = "bma",
-  key_builder = function(...) build_data_cache_signature()
+  description = "Bayesian Model Averaging over the moderator variables",
+  required_columns = c("effect", "se"),
+  suggests = "BMS",
+  cached = TRUE
 )
 
-box::export(bma, run, prepare_bma_inputs)
+# prepare_bma_inputs and unwrap_bma_result are exported because the fma and
+# best_practice_estimate methods reuse them directly.
+box::export(bma, bma_estimates, run, prepare_bma_inputs, unwrap_bma_result)

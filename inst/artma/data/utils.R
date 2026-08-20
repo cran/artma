@@ -5,26 +5,56 @@ assign_na_col <- function(df, colname) {
 }
 
 #' @title Get standard column names
-#' @description Get a vector of column names from the user options template.
-#' @param filter_fn *\[function\]* A function to filter the option definitions.
+#' @description Get the vector of standard column names the pipeline recognizes.
+#'   These are the role keys of the unified per-column store (`data.columns`).
 #' @return *\[character\]* A vector of column names.
-get_standardized_colnames <- function(filter_fn = function(x) TRUE) {
-  box::use(
-    artma / options / template[get_option_defs],
-    artma / libs / infrastructure / polyfills[keep, map_chr, str_remove]
-  )
-  opt_path <- "data.colnames"
-  defs <- get_option_defs(opt_path = opt_path)
-  defs <- keep(defs, filter_fn)
-  names <- map_chr(defs, "name")
-  str_remove(names, paste0("^", opt_path, "\\."))
+get_standardized_colnames <- function() {
+  box::use(artma / const[CONST])
+  CONST$DATA$STANDARD_COLNAMES
 }
 
 #' @title Get required columns
 #' @description Get a vector of columns required by the analysis to exist in the data frame.
 #' @return *\[character\]* A vector of column names.
 get_required_colnames <- function() {
-  get_standardized_colnames(filter_fn = ~ !isTRUE(.x$allow_na))
+  box::use(artma / const[CONST])
+  CONST$DATA$REQUIRED_COLNAMES
+}
+
+#' @title Get the column name mapping from the unified column store
+#' @description Reads `artma.data.columns` and extracts the mapping from
+#'   standard column names to the source column names in the user's data file.
+#'   Only role records (keyed by a standard column name) with a non-NA
+#'   `source_name` participate. Identity mappings are typically absent from the
+#'   sparse store; a standard column already named correctly in the data frame
+#'   needs no record.
+#' @return *\[list\]* Named list mapping standard names to source column names.
+get_colnames_map <- function() {
+  store <- getOption("artma.data.columns", list())
+  if (!is.list(store) || length(store) == 0) {
+    return(list())
+  }
+
+  map <- list()
+  for (std in intersect(names(store), get_standardized_colnames())) {
+    entry <- store[[std]]
+    if (!is.list(entry)) next
+    src <- entry[["source_name"]]
+    if (is.null(src) || length(src) != 1 || is.na(src) || !nzchar(src)) next
+    map[[std]] <- src
+  }
+  map
+}
+
+#' @title Get reserved column names
+#' @description Get the full set of standard column names produced by the
+#'   data pipeline: required input columns plus columns computed downstream
+#'   (e.g. `obs_id`, `reg_dof`, `precision`). These are never valid moderator
+#'   variables and must be excluded from variable detection and suggestion.
+#' @return *\[character\]* A vector of reserved column names.
+get_reserved_colnames <- function() {
+  box::use(artma / const[CONST])
+  union(get_required_colnames(), CONST$DATA$COMPUTED_COLNAMES)
 }
 
 #' Get the number of studies in an analysis data frame.
@@ -40,85 +70,40 @@ get_number_of_studies <- function(df) {
 
 #' @title Standardize column names
 #' @description Standardize the column names of a data frame to a single source of truth set of column names.
+#'   This is the pure standardizer: it never prompts and never attempts
+#'   auto-detection. Callers that need to fill in a missing mapping
+#'   interactively should run that workflow first (see
+#'   `artma / data / interactive_mapping`) and persist the result before
+#'   calling this function.
 #' @param df *\[data.frame\]* The data frame to standardize
-#' @param auto_detect *\[logical\]* If TRUE and mapping not found, attempt auto-detection
+#' @param quiet *\[logical, optional\]* Suppress informational messages. Used by
+#'   callers that standardize an intermediate frame (e.g. the configure phase)
+#'   so a single run does not announce the same action twice. Defaults to `FALSE`.
+#' @param required_colnames *\[character, optional\]* The raw columns that must
+#'   be mapped or present for this call to succeed. Defaults to `NULL`, which
+#'   uses the full `get_required_colnames()` set (the historical behavior).
+#'   Callers that know which methods are actually being run pass a narrower,
+#'   run-specific set here; see `artma / data / method_requirements
+#'   [resolve_hard_required_colnames]`.
 #' @return *\[data.frame\]* The standardized data frame
-standardize_column_names <- function(df, auto_detect = TRUE) {
+standardize_column_names <- function(df, quiet = FALSE, required_colnames = NULL) {
   box::use(
-    artma / libs / core / validation[validate],
-    artma / options / utils[get_option_group],
-    artma / libs / core / utils[get_verbosity]
+    artma / libs / core / utils[get_verbosity],
+    artma / libs / core / validation[validate, assert]
   )
 
   validate(is.data.frame(df))
 
   names(df) <- make.names(names(df))
 
-  # Try to get existing column mapping from options
-  map <- tryCatch(
-    {
-      opt_map <- get_option_group("artma.data.colnames")
-      # Filter out NA values
-      opt_map[!is.na(opt_map)]
-    },
-    error = function(e) list()
-  )
-
-  map <- lapply(map, make.names) # Handle non-standard column names
-  required_colnames <- get_required_colnames()
-
-  # Check if we have all required columns mapped
-  missing_required <- base::setdiff(required_colnames, names(map))
-
-  # If mapping is incomplete and auto_detect is enabled, try to recognize columns
-  if (length(missing_required) > 0 && auto_detect) {
-    if (get_verbosity() >= 3) {
-      cli::cli_alert_info("Column mapping incomplete, attempting automatic recognition...")
-    }
-
-    box::use(
-      artma / data / column_recognition[recognize_columns],
-      artma / data / interactive_mapping[column_mapping_workflow]
-    )
-
-    # Get automatic recognition
-    auto_mapping <- recognize_columns(df, min_confidence = 0.7)
-
-    # Always present detected columns to user for confirmation
-    config_setup <- getOption("artma.data.config_setup", "auto")
-
-    if (length(auto_mapping) > 0) {
-      # Columns were detected - always present them for confirmation
-      if (get_verbosity() >= 3) {
-        cli::cli_alert_info("Starting column mapping workflow...")
-      }
-      final_mapping <- column_mapping_workflow(
-        df = df,
-        auto_mapping = auto_mapping,
-        options_file_name = getOption("artma.options_file_name"),
-        force_interactive = (config_setup == "manual")
-      )
-    } else {
-      # No columns detected, go straight to interactive mapping
-      if (get_verbosity() >= 3) {
-        cli::cli_alert_info("No columns automatically detected, starting interactive mapping...")
-      }
-      final_mapping <- column_mapping_workflow(
-        df = df,
-        auto_mapping = list(),
-        options_file_name = getOption("artma.options_file_name"),
-        force_interactive = TRUE
-      )
-    }
-
-    # Update the map with the final mapping
-    for (std_col in names(final_mapping)) {
-      map[[std_col]] <- make.names(final_mapping[[std_col]])
-    }
+  # Read the column mapping from the unified per-column store
+  map <- lapply(get_colnames_map(), make.names) # Handle non-standard column names
+  if (is.null(required_colnames)) {
+    required_colnames <- get_required_colnames()
   }
 
-  # Check that every required column is mapped
-  missing_required <- base::setdiff(required_colnames, names(map))
+  # Check that every required column is either mapped or already present
+  missing_required <- base::setdiff(required_colnames, c(names(map), names(df)))
   if (length(missing_required)) {
     cli::cli_abort(c(
       "x" = "Missing mapping for required columns: {.val {missing_required}}",
@@ -138,12 +123,62 @@ standardize_column_names <- function(df, auto_detect = TRUE) {
 
   # Rename columns to standardized names - only when present in the data frame
   reverse_map <- stats::setNames(names(map), unlist(map))
+  rename_from <- names(df)[names(df) %in% names(reverse_map)]
+  rename_to <- unname(reverse_map[rename_from])
+
+  # A rename target already occupied by a different column would otherwise
+  # silently produce two columns sharing a name; `df$<name>` would then return
+  # whichever comes first, ignoring the user's explicit mapping. Detect this
+  # before renaming and abort, except for the cases where no collision
+  # actually results: an identity mapping (source == target, a no-op), the
+  # occupying column being renamed away itself in this same pass, or the user
+  # having resolved the conflict in favor of the mapping (drop_conflicting_raw).
+  column_store <- getOption("artma.data.columns", list())
+  if (!is.list(column_store)) column_store <- list()
+
+  for (i in seq_along(rename_from)) {
+    source_col <- rename_from[[i]]
+    target_col <- rename_to[[i]]
+
+    if (identical(source_col, target_col)) next
+    if (!target_col %in% names(df)) next
+    if (target_col %in% rename_from) next
+
+    if (identical(df[[source_col]], df[[target_col]])) {
+      # Byte-identical duplicate: drop the stale column quietly and proceed.
+      df[[target_col]] <- NULL
+      next
+    }
+
+    store_entry <- column_store[[target_col]]
+    if (is.list(store_entry) && isTRUE(store_entry[["drop_conflicting_raw"]])) {
+      if (!quiet && get_verbosity() >= 3) {
+        cli::cli_alert_info(
+          "Dropping the raw {.val {target_col}} column: {.val {source_col}} is configured to supply it."
+        )
+      }
+      df[[target_col]] <- NULL
+      next
+    }
+
+    cli::cli_abort(c(
+      "x" = "Cannot map {.val {source_col}} to standard column {.val {target_col}}: the data frame already has a different column named {.val {target_col}}.",
+      "i" = "Keep the mapping and drop the raw column: {.code artma::config_set(\"{target_col}\", drop_conflicting_raw = TRUE)}",
+      "i" = "Use the raw {.val {target_col}} column instead: {.code artma::config_reset(\"{target_col}\")}",
+      "i" = "Or map {.val {target_col}} to another source column: {.code artma::config_set(\"{target_col}\", source_name = \"<column>\")}"
+    ))
+  }
+
   names(df)[names(df) %in% names(reverse_map)] <- reverse_map[names(df)[names(df) %in% names(reverse_map)]]
 
   missing_required <- setdiff(required_colnames, colnames(df))
   if (length(missing_required)) {
     cli::cli_abort("Failed to standardize the following columns: {.val {missing_required}}")
   }
+
+  assert(!anyDuplicated(names(df)), cli::format_inline(
+    "Standardization produced duplicated column names: {.val {names(df)[duplicated(names(df))]}}"
+  ))
 
   df
 }
@@ -187,6 +222,20 @@ determine_df_type <- function(path, should_validate = TRUE) {
   file_extension
 }
 
+#' @title Determine the data type of a vector
+#' @description Classify a column into one of the recognized data types.
+#'   Numeric columns are read as follows:
+#'
+#'   - only `0`/`1` values: `dummy`, matching the treatment of a logical column
+#'   - every value a whole number: `int`, whatever its range; identifiers and
+#'     counts are integers, not percentages
+#'   - fractional values, all within `[0, 1]`: `perc`, the proportion type the
+#'     rest of the package assumes (it offers a split at `0.5`)
+#'   - anything else numeric: `float`
+#' @param data *\[vector\]* The column to classify.
+#' @param recognized_data_types *\[character, optional\]* When given, the
+#'   permitted types; a classification outside the set aborts.
+#' @return *\[character\]* The data type.
 determine_vector_type <- function(data, recognized_data_types = NULL) {
   box::use(
     artma / libs / core / validation[validate]
@@ -202,12 +251,12 @@ determine_vector_type <- function(data, recognized_data_types = NULL) {
     "category"
   } else if (is.numeric(data)) {
     clean_data <- data[!is.na(data)]
-    if (all(clean_data == floor(clean_data))) {
-      if (all(clean_data >= 0 & clean_data <= 100)) {
-        "perc"
-      } else {
-        "int"
-      }
+    if (all(clean_data %in% c(0, 1))) {
+      "dummy"
+    } else if (all(clean_data == floor(clean_data))) {
+      "int"
+    } else if (all(clean_data >= 0 & clean_data <= 1)) {
+      "perc"
     } else {
       "float"
     }
@@ -228,8 +277,10 @@ box::export(
   assign_na_col,
   determine_df_type,
   determine_vector_type,
+  get_colnames_map,
   get_number_of_studies,
   get_required_colnames,
+  get_reserved_colnames,
   get_standardized_colnames,
   raise_invalid_data_type_error,
   standardize_column_names

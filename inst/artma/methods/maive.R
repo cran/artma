@@ -1,0 +1,258 @@
+#' @title MAIVE estimator
+#' @description
+#' Meta-Analysis Instrumental Variable Estimator (Irsova et al., Nature
+#' Communications, 2025). MAIVE corrects the mean effect for publication bias,
+#' p-hacking, and spurious precision by instrumenting reported variances with
+#' the inverse sample size, then plugging the fitted variances into a funnel
+#' model (PET, PEESE, PET-PEESE, or the endogenous kink).
+maive_estimator <- function(df) {
+  box::use(
+    artma / libs / core / validation[validate, validate_columns],
+    artma / libs / core / utils[get_verbosity],
+    artma / libs / formatting / results[print_sectioned_table, print_paragraph],
+    artma / econometric / maive[maive_first_stage_f, maive_first_stage_is_weak, run_maive],
+    artma / modules / runtime_methods[new_method_result],
+    artma / options / index[get_option_group],
+    artma / options / resolver[opt_spec, resolve_options],
+    artma / options / significance_marks[resolve_add_significance_marks]
+  )
+
+  validate(is.data.frame(df))
+  validate_columns(df, c("effect", "se", "n_obs"))
+
+  opt <- get_option_group("artma.methods.maive")
+
+  resolved_options <- resolve_options(opt, list(
+    method = opt_spec(
+      default = 3L, type = "numeric", cast = as.integer,
+      constraint = function(x) x %in% c(1, 2, 3, 4),
+      constraint_msg = "maive method must be 1, 2, 3, or 4"
+    ),
+    weight = opt_spec(
+      default = 0L, type = "numeric", cast = as.integer,
+      constraint = function(x) x %in% c(0, 1, 2),
+      constraint_msg = "maive weight must be 0, 1, or 2"
+    ),
+    instrument = opt_spec(
+      default = 1L, type = "numeric", cast = as.integer,
+      constraint = function(x) x %in% c(0, 1),
+      constraint_msg = "maive instrument must be 0 or 1"
+    ),
+    studylevel = opt_spec(
+      default = 2L, type = "numeric", cast = as.integer,
+      constraint = function(x) x %in% c(0, 1, 2),
+      constraint_msg = "maive studylevel must be 0, 1, or 2"
+    ),
+    se = opt_spec(
+      default = 1L, type = "numeric", cast = as.integer,
+      constraint = function(x) x %in% c(0, 1, 2, 3),
+      constraint_msg = "maive se must be 0, 1, 2, or 3"
+    ),
+    ar = opt_spec(
+      default = 0L, type = "numeric", cast = as.integer,
+      constraint = function(x) x %in% c(0, 1),
+      constraint_msg = "maive ar must be 0 or 1"
+    ),
+    first_stage = opt_spec(
+      default = 0L, type = "numeric", cast = as.integer,
+      constraint = function(x) x %in% c(0, 1, 2),
+      constraint_msg = "maive first_stage must be 0, 1, or 2"
+    ),
+    seed = opt_spec(default = 123L, type = "numeric", cast = as.integer),
+    round_to = opt_spec(
+      default = 3L, type = "numeric", key = "artma.output.number_of_decimals",
+      cast = as.integer,
+      constraint = function(x) x >= 0,
+      constraint_msg = "Number of decimals must be non-negative"
+    )
+  ))
+  resolved_options$add_significance_marks <- resolve_add_significance_marks()
+
+  # show_interpretation drives display only and is not part of resolved_options
+  # (which is echoed into the method result meta), so it is resolved separately.
+  show_interpretation <- resolve_options(opt, list(
+    show_interpretation = opt_spec(default = TRUE, type = "logical")
+  ))$show_interpretation
+
+  method <- resolved_options$method
+  instrument <- resolved_options$instrument
+  add_significance_marks <- resolved_options$add_significance_marks
+
+  result <- run_maive(df, resolved_options)
+
+  if (get_verbosity() >= 1) {
+    cli::cli_h2("MAIVE estimator")
+
+    if (is.null(result$summary)) {
+      cli::cli_alert_warning("MAIVE was skipped: {result$skipped}")
+    } else {
+      print_sectioned_table(result$summary)
+
+      # The weak-instrument note in the table is easy to skim past, and it is
+      # the one diagnostic that invalidates the headline number, so it also
+      # gets an alert one verbosity level below the interpretation paragraph.
+      maive_f <- maive_first_stage_f(result$raw)
+      if (get_verbosity() >= 2 && instrument == 1 && maive_first_stage_is_weak(maive_f)) {
+        cli::cli_text("")
+        cli::cli_alert_warning(c(
+          "First-stage F is {round(maive_f, 3)}, below 10: the sample-size instrument ",
+          "is weak and the MAIVE estimate is unreliable."
+        ))
+        if (!identical(result$first_stage$value, 1L)) {
+          cli::cli_alert_info(
+            "Try {.code first_stage: 1} (log first stage), which fits data whose sample sizes span orders of magnitude."
+          )
+        }
+      }
+
+      if (isTRUE(show_interpretation) && length(result$interpretation) > 0 && get_verbosity() >= 3) {
+        cli::cli_text("")
+        cli::cli_verbatim("Interpretation")
+        print_paragraph(result$interpretation)
+      }
+
+      cli::cli_text("")
+      if (add_significance_marks) {
+        cli::cli_text("Significance marks: * p <= 0.1, ** p <= 0.05, *** p <= 0.01")
+      }
+      cli::cli_text("Method: Irsova, Bom, Havranek & Rachinger, Nature Communications, 2025.")
+    }
+  }
+
+  invisible(new_method_result(
+    tables = list(summary = result$summary),
+    estimates = maive_estimates(result$raw, nrow(df)),
+    meta = list(
+      maive = result$raw,
+      interpretation = result$interpretation,
+      first_stage = result$first_stage,
+      options = resolved_options,
+      skip_reason = result$skipped
+    )
+  ))
+}
+
+#' @title Tidy estimates for the MAIVE estimator
+#' @description
+#' Map the raw MAIVE output onto the shared `estimates` schema. The sectioned
+#' display table mixes coefficients, specification labels, and diagnostics in a
+#' single `Statistic`/`Value` pair, so only the numeric coefficients cross over,
+#' split across two models:
+#'
+#' * `model = "maive"`: the instrumented estimator, with `term = "effect"` (the
+#'   corrected mean), `term = "publication_bias"` (the Egger coefficient), and
+#'   `term = "se_squared"` (the PEESE variance term) when the specification
+#'   reports one. The first-stage F rides along as `term = "first_stage_f"`,
+#'   which fills `statistic` only, since it is a diagnostic rather than an
+#'   estimate.
+#' * `model = "unadjusted"`: the same funnel model without the IV correction,
+#'   reported by MAIVE for comparison.
+#'
+#' Confidence intervals are the normal-approximation ones MAIVE's own summary
+#' shows; the Egger interval uses the bootstrap bounds when the specification
+#' produced them. Anderson-Rubin intervals, the Hausman test, and the
+#' specification labels stay in `meta$maive`.
+#' @param maive_output *\[list, optional\]* The raw output of `maive()`, or
+#'   `NULL` when the estimator was skipped.
+#' @param n_obs *\[integer, optional\]* Observations the estimator ran on.
+#' @return *\[data.frame\]* A frame in the shared estimates schema.
+maive_estimates <- function(maive_output, n_obs = NA_integer_) {
+  box::use(
+    artma / econometric / maive[maive_ci, maive_first_stage_f, maive_p_from_coef],
+    artma / modules / runtime_methods[new_estimates]
+  )
+
+  if (!is.list(maive_output)) {
+    return(new_estimates())
+  }
+
+  numeric_or_na <- function(x) {
+    if (is.numeric(x) && length(x) == 1L && is.finite(x)) as.numeric(x) else NA_real_
+  }
+
+  row <- function(model, term, estimate, std_error = NA_real_, statistic = NA_real_,
+                  p_value = NA_real_, conf = c(NA_real_, NA_real_)) {
+    data.frame(
+      method = "maive",
+      model = model,
+      term = term,
+      estimate = estimate,
+      std_error = std_error,
+      statistic = statistic,
+      p_value = p_value,
+      conf_low = conf[[1L]],
+      conf_high = conf[[2L]],
+      n_obs = n_obs,
+      stringsAsFactors = FALSE
+    )
+  }
+
+  rows <- list()
+
+  beta <- numeric_or_na(maive_output$beta)
+  beta_se <- numeric_or_na(maive_output$SE)
+  rows[[length(rows) + 1L]] <- row(
+    "maive", "effect", beta,
+    std_error = beta_se,
+    p_value = maive_p_from_coef(beta, beta_se),
+    conf = maive_ci(beta, beta_se)
+  )
+
+  egger <- numeric_or_na(maive_output$egger_coef)
+  egger_se <- numeric_or_na(maive_output$egger_se)
+  boot_ci <- maive_output$egger_boot_ci
+  egger_conf <- if (is.numeric(boot_ci) && length(boot_ci) == 2L && all(is.finite(boot_ci))) {
+    as.numeric(boot_ci)
+  } else {
+    maive_ci(egger, egger_se)
+  }
+  rows[[length(rows) + 1L]] <- row(
+    "maive", "publication_bias", egger,
+    std_error = egger_se,
+    p_value = numeric_or_na(maive_output$`pub bias p-value`),
+    conf = egger_conf
+  )
+
+  peese_coef <- numeric_or_na(maive_output$peese_se2_coef)
+  if (!is.na(peese_coef)) {
+    peese_se <- numeric_or_na(maive_output$peese_se2_se)
+    rows[[length(rows) + 1L]] <- row(
+      "maive", "se_squared", peese_coef,
+      std_error = peese_se,
+      p_value = maive_p_from_coef(peese_coef, peese_se),
+      conf = maive_ci(peese_coef, peese_se)
+    )
+  }
+
+  f_stat <- maive_first_stage_f(maive_output)
+  if (!is.na(f_stat)) {
+    rows[[length(rows) + 1L]] <- row("maive", "first_stage_f", NA_real_, statistic = f_stat)
+  }
+
+  beta_standard <- numeric_or_na(maive_output$beta_standard)
+  if (!is.na(beta_standard)) {
+    se_standard <- numeric_or_na(maive_output$SE_standard)
+    rows[[length(rows) + 1L]] <- row(
+      "unadjusted", "effect", beta_standard,
+      std_error = se_standard,
+      p_value = maive_p_from_coef(beta_standard, se_standard),
+      conf = maive_ci(beta_standard, se_standard)
+    )
+  }
+
+  new_estimates(do.call(rbind, rows))
+}
+
+box::use(
+  artma / modules / runtime_methods[register_runtime_method]
+)
+
+run <- register_runtime_method(
+  maive_estimator,
+  stage = "maive",
+  description = "MAIVE estimator, correcting the mean effect for spurious precision",
+  required_columns = c("effect", "se", "n_obs"),
+  suggests = "MAIVE"
+)
+
+box::export(maive_estimator, maive_estimates, run)

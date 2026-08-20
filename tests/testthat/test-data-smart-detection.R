@@ -1,17 +1,20 @@
 box::use(
+  testthat[
+    expect_equal,
+    expect_error,
+    expect_no_error,
+    expect_true,
+    test_that
+  ]
+)
+
+box::use(
   artma / data / smart_detection[
     detect_delimiter,
-    detect_encoding,
     smart_read_csv,
     validate_df_structure
   ]
 )
-
-test_that <- getFromNamespace("test_that", "testthat")
-expect_equal <- getFromNamespace("expect_equal", "testthat")
-expect_true <- getFromNamespace("expect_true", "testthat")
-expect_error <- getFromNamespace("expect_error", "testthat")
-expect_no_error <- getFromNamespace("expect_no_error", "testthat")
 
 
 # Helper function to create temp CSV files for testing
@@ -102,16 +105,6 @@ test_that("detect_delimiter handles inconsistent delimiters by choosing most con
 
   delim <- detect_delimiter(tmp_file)
   expect_equal(delim, ";")
-})
-
-
-test_that("detect_encoding returns valid encoding", {
-  tmp_file <- tempfile(fileext = ".csv")
-  writeLines("test,data", tmp_file)
-  on.exit(unlink(tmp_file))
-
-  encoding <- detect_encoding(tmp_file)
-  expect_true(encoding %in% c("UTF-8", "latin1", "ISO-8859-1", "CP1252"))
 })
 
 

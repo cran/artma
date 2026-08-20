@@ -1,12 +1,8 @@
 box::use(
   testthat[
-    describe,
     expect_equal,
-    expect_error,
-    expect_false,
     expect_no_error,
     expect_true,
-    expect_type,
     test_that
   ],
   withr[local_options]
@@ -20,73 +16,27 @@ box::use(
 
 # Test box imports ------------------------------------------------------------
 
-test_that("effect_summary_stats_interactive module exports expected functions", {
-  # This will fail if the module can't be loaded or exports are wrong
-  expect_no_error({
-    box::use(
-      artma / interactive / effect_summary_stats[
-        prompt_effect_summary_var_selection,
-        update_config_with_selections
-      ]
-    )
-  })
-
-  # Verify functions exist
-  expect_true(is.function(prompt_effect_summary_var_selection))
-  expect_true(is.function(update_config_with_selections))
-})
-
-test_that("effect_summary_stats method can import interactive module", {
-  # Verify the imports used in effect_summary_stats.R work
-  expect_no_error({
-    box::use(
-      artma / interactive / effect_summary_stats[
-        prompt_effect_summary_var_selection
-      ],
-      artma / data_config / write[update_data_config]
-    )
-  })
+# The interactive module's readline-driven exports are not called by any other
+# test (they prompt), so an existence check is their only unit coverage. Every
+# other import these smoke tests once verified (data_config, variable
+# suggestion/detection, utils, validation) is exercised by real callers in this
+# and neighbouring files, so their loadability is covered transitively.
+test_that("interactive effect-summary module exports its readline entry points", {
+  box::use(
+    artma / interactive / effect_summary_stats[
+      prompt_effect_summary_var_selection,
+      auto_select_effect_summary_vars
+    ]
+  )
 
   expect_true(is.function(prompt_effect_summary_var_selection))
-  expect_true(is.function(update_data_config))
-})
-
-test_that("all required data_config functions are available", {
-  expect_no_error({
-    box::use(
-      artma / data_config / write[update_data_config, fix_data_config],
-      artma / data_config / read[get_data_config]
-    )
-  })
-
-  expect_true(is.function(update_data_config))
-  expect_true(is.function(fix_data_config))
-  expect_true(is.function(get_data_config))
-})
-
-
-# Integration with variable suggestion ----------------------------------------
-
-test_that("interactive module integrates with variable suggestion", {
-  expect_no_error({
-    box::use(
-      artma / interactive / effect_summary_stats[
-        auto_select_effect_summary_vars
-      ],
-      artma / variable / suggestion[
-        suggest_variables_for_effect_summary
-      ]
-    )
-  })
-
   expect_true(is.function(auto_select_effect_summary_vars))
-  expect_true(is.function(suggest_variables_for_effect_summary))
 })
 
 
 # Workflow integration tests --------------------------------------------------
 
-test_that("effect_summary_stats handles empty config gracefully in non-interactive mode", {
+test_that("effect_summary_stats defaults to the All Data row in non-interactive mode", {
   box::use(
     artma / methods / effect_summary_stats[effect_summary_stats]
   )
@@ -100,7 +50,7 @@ test_that("effect_summary_stats handles empty config gracefully in non-interacti
 
   # Set empty config and non-interactive mode
   local_options(
-    "artma.data.config" = list(
+    "artma.data.columns" = list(
       effect = list(
         var_name = "effect",
         effect_sum_stats = NA,
@@ -117,11 +67,20 @@ test_that("effect_summary_stats handles empty config gracefully in non-interacti
     "artma.verbose" = 1
   )
 
-  # Should return empty result without error (non-interactive)
-  result <- effect_summary_stats(df)
+  # Should default the effect column in, producing the "All Data" row
+  method_result <- effect_summary_stats(df)
+  result <- method_result$tables$summary
 
   expect_true(is.data.frame(result))
-  expect_equal(nrow(result), 0)
+  expect_equal(nrow(result), 1)
+  expect_equal(result$`Var Name`, "All Data")
+
+  # The same run fills the estimates slot, one row per statistic, unrounded.
+  estimates <- method_result$estimates
+  expect_equal(unique(estimates$model), "All Data")
+  expect_equal(estimates$estimate[estimates$term == "mean"], mean(df$effect))
+  expect_equal(estimates$estimate[estimates$term == "median"], stats::median(df$effect))
+  expect_equal(unique(estimates$n_obs), 3L)
 })
 
 test_that("effect_summary_stats processes configured variables correctly", {
@@ -138,7 +97,7 @@ test_that("effect_summary_stats processes configured variables correctly", {
 
   # Configure year for effect summary stats
   local_options(
-    "artma.data.config" = list(
+    "artma.data.columns" = list(
       effect = list(
         var_name = "effect",
         var_name_verbose = "Effect",
@@ -170,7 +129,7 @@ test_that("effect_summary_stats processes configured variables correctly", {
     "artma.verbose" = 1
   )
 
-  result <- effect_summary_stats(df)
+  result <- effect_summary_stats(df)$tables$summary
 
   expect_true(is.data.frame(result))
   expect_true(nrow(result) > 0)
@@ -181,6 +140,100 @@ test_that("effect_summary_stats processes configured variables correctly", {
   expect_true(any(grepl("Year", result$`Var Name`)))
 })
 
+
+# Value-level assertions ------------------------------------------------------
+
+test_that("effect_summary_stats computes the All Data row exactly", {
+  box::use(
+    artma / methods / effect_summary_stats[effect_summary_stats]
+  )
+
+  # Fixed dataset with hand-computable summary statistics.
+  #   mean   = 0.32   median = 0.30   min = 0.10   max = 0.50
+  #   sd     = 0.164 (rounded)        obs = 5
+  #   z_0.95 = qnorm(0.975) = 1.959964
+  #   se     = sd / sqrt(5); ci = mean +/- z * se -> [0.177, 0.463]
+  #   weighted mean with w = 1 / study_size -> 0.234, its CI from
+  #   se_w = sqrt(sum(w_norm^2 * (x - wm)^2)) -> [0.100, 0.369]
+  df <- data.frame(
+    effect = c(0.10, 0.24, 0.30, 0.46, 0.50),
+    study_size = c(10, 20, 30, 40, 50),
+    stringsAsFactors = FALSE
+  )
+
+  local_options(
+    "artma.data.columns" = list(
+      effect = list(var_name = "effect", effect_sum_stats = NA, equal = NA, gltl = NA),
+      study_size = list(
+        var_name = "study_size",
+        var_name_verbose = "Study Size",
+        data_type = "int",
+        effect_sum_stats = TRUE,
+        equal = NA,
+        gltl = NA
+      )
+    ),
+    "artma.methods.effect_summary_stats.conf_level" = 0.95,
+    "artma.methods.effect_summary_stats.formal_output" = FALSE,
+    "artma.output.number_of_decimals" = 3,
+    "artma.verbose" = 1
+  )
+
+  result <- effect_summary_stats(df)$tables$summary
+  all_data <- result[result$`Var Name` == "All Data", , drop = FALSE]
+
+  expect_equal(nrow(all_data), 1L)
+  expect_equal(all_data$Mean, 0.32)
+  expect_equal(all_data$Median, 0.30)
+  expect_equal(all_data$Min, 0.10)
+  expect_equal(all_data$Max, 0.50)
+  expect_equal(all_data$SD, 0.164)
+  expect_equal(all_data$Obs, 5L)
+  expect_equal(all_data$`CI lower`, 0.177)
+  expect_equal(all_data$`CI upper`, 0.463)
+  expect_equal(all_data$`Weighted Mean`, 0.234)
+  expect_equal(all_data$`WM CI lower`, 0.100)
+  expect_equal(all_data$`WM CI upper`, 0.369)
+})
+
+test_that("effect_summary_stats confidence interval widens with the confidence level", {
+  box::use(
+    artma / methods / effect_summary_stats[effect_summary_stats]
+  )
+
+  df <- data.frame(
+    effect = c(0.10, 0.24, 0.30, 0.46, 0.50),
+    study_size = c(10, 20, 30, 40, 50),
+    stringsAsFactors = FALSE
+  )
+
+  config <- list(
+    effect = list(var_name = "effect", effect_sum_stats = NA, equal = NA, gltl = NA),
+    study_size = list(
+      var_name = "study_size",
+      var_name_verbose = "Study Size",
+      data_type = "int",
+      effect_sum_stats = TRUE,
+      equal = NA,
+      gltl = NA
+    )
+  )
+
+  run_at <- function(conf_level) {
+    local_options(
+      "artma.data.columns" = config,
+      "artma.methods.effect_summary_stats.conf_level" = conf_level,
+      "artma.output.number_of_decimals" = 3,
+      "artma.verbose" = 1
+    )
+    res <- effect_summary_stats(df)$tables$summary
+    row <- res[res$`Var Name` == "All Data", , drop = FALSE]
+    row$`CI upper` - row$`CI lower`
+  }
+
+  expect_true(run_at(0.99) > run_at(0.95))
+  expect_true(run_at(0.95) > run_at(0.80))
+})
 
 # Config update integration ---------------------------------------------------
 
@@ -237,13 +290,13 @@ test_that("update_config_with_selections integrates with effect_summary_stats", 
 
   # Set config and run effect_summary_stats
   local_options(
-    "artma.data.config" = updated_config,
+    "artma.data.columns" = updated_config,
     "artma.methods.effect_summary_stats.conf_level" = 0.95,
     "artma.output.number_of_decimals" = 3,
     "artma.verbose" = 1
   )
 
-  result <- effect_summary_stats(df)
+  result <- effect_summary_stats(df)$tables$summary
 
   expect_true(is.data.frame(result))
   expect_true(nrow(result) > 0)
@@ -266,7 +319,7 @@ test_that("effect_summary_stats handles missing data gracefully", {
   )
 
   local_options(
-    "artma.data.config" = list(
+    "artma.data.columns" = list(
       effect = list(var_name = "effect", effect_sum_stats = NA, equal = NA, gltl = NA),
       study_size = list(var_name = "study_size", effect_sum_stats = NA, equal = NA, gltl = NA),
       year = list(
@@ -282,7 +335,7 @@ test_that("effect_summary_stats handles missing data gracefully", {
 
   # Should handle NA values without error
   expect_no_error({
-    result <- effect_summary_stats(df)
+    result <- effect_summary_stats(df)$tables$summary
   })
 })
 
@@ -299,7 +352,7 @@ test_that("effect_summary_stats handles non-numeric variables correctly", {
   )
 
   local_options(
-    "artma.data.config" = list(
+    "artma.data.columns" = list(
       effect = list(var_name = "effect", effect_sum_stats = NA, equal = NA, gltl = NA),
       study_size = list(var_name = "study_size", effect_sum_stats = NA, equal = NA, gltl = NA),
       category = list(
@@ -315,41 +368,11 @@ test_that("effect_summary_stats handles non-numeric variables correctly", {
   )
 
   # Should warn about non-numeric variable
-  result <- effect_summary_stats(df)
+  result <- effect_summary_stats(df)$tables$summary
 
   expect_true(is.data.frame(result))
   # Category should be skipped, only "All Data" should appear
   expect_equal(nrow(result), 1)
-})
-
-
-# Module dependency verification ----------------------------------------------
-
-test_that("all interactive module dependencies are resolvable", {
-  # Verify all imports in the interactive module work
-  expect_no_error({
-    box::use(
-      artma / variable / suggestion[suggest_variables_for_effect_summary],
-      artma / variable / detection[detect_variable_groups],
-      artma / libs / core / utils[get_verbosity],
-      artma / libs / core / validation[validate, assert],
-      artma / data / utils[determine_vector_type],
-      artma / const[CONST]
-    )
-  })
-})
-
-test_that("effect_summary_stats method dependencies are resolvable", {
-  # Verify all imports in effect_summary_stats.R work
-  expect_no_error({
-    box::use(
-      artma / const[CONST],
-      artma / data_config / read[get_data_config],
-      artma / libs / core / utils[get_verbosity],
-      artma / libs / core / validation[assert, validate, validate_columns],
-      artma / options / index[get_option_group]
-    )
-  })
 })
 
 
@@ -425,11 +448,11 @@ test_that("full workflow: suggestion -> config -> analysis works end-to-end", {
 
     # Step 4: Run analysis with updated config
     local_options(
-      "artma.data.config" = updated_config,
+      "artma.data.columns" = updated_config,
       "artma.verbose" = 1
     )
 
-    result <- effect_summary_stats(df)
+    result <- effect_summary_stats(df)$tables$summary
 
     # Verify we got results
     expect_true(is.data.frame(result))

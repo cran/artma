@@ -23,32 +23,6 @@ get_option_group <- function(prefix) {
   group
 }
 
-#' @title Remove Options by Prefix
-#' @description This function removes all options from the R namespace whose names start with a specified prefix.
-#' @param prefix A string representing the prefix of the options to remove.
-#' @return `NULL`
-remove_options_with_prefix <- function(prefix) {
-  box::use(artma / libs / core / utils[get_verbosity])
-
-  opts <- options()
-  opts_to_remove <- names(opts)[startsWith(names(opts), prefix)]
-
-  if (get_verbosity() >= 4) {
-    cli::cli_inform("Clearing the following options from the options namespace: {.emph {opts_to_remove}}")
-  }
-
-  if (length(opts_to_remove) == 0) {
-    if (get_verbosity() >= 3) {
-      cli::cli_alert_info("No options found with the prefix: {prefix}")
-    }
-    return(invisible(NULL))
-  }
-
-  options(stats::setNames(rep(list(NULL), length(opts_to_remove)), opts_to_remove))
-
-  invisible(NULL)
-}
-
 #' @title Flat to nested
 #' @description Convert a list of flat options to a nested one
 #' @param flat_option_list [list] A list of flat options
@@ -61,7 +35,9 @@ flat_to_nested <- function(flat_option_list) {
   insert_nested <- function(lst, keys, value) {
     key <- keys[1]
     if (length(keys) == 1) {
-      lst[[key]] <- value
+      # Single-bracket assignment so a NULL value is stored as a NULL element
+      # rather than deleting the key.
+      lst[key] <- list(value)
     } else {
       if (is.null(lst[[key]])) {
         lst[[key]] <- list()
@@ -133,14 +109,34 @@ parse_options_file_name <- function(input_string) {
   str_out
 }
 
+#' @title Require an option value
+#' @description Read an option that must already be set, aborting with a clear,
+#'   named-option message when it is `NULL` (i.e. unset). Use this at call sites
+#'   that read a genuinely required key, so a missing value fails at the boundary
+#'   instead of propagating as a `NULL` dereference deeper in the pipeline.
+#' @param key *\[character\]* The fully-qualified option name (e.g.
+#'   `"artma.data.source_path"`).
+#' @return The option value (never `NULL`).
+#' @export
+require_option <- function(key) {
+  box::use(artma / const[CONST])
+
+  val <- getOption(key)
+  if (is.null(val)) {
+    cli::cli_abort(c(
+      "Required option {CONST$STYLES$OPTIONS$NAME(key)} is not set.",
+      "i" = "This value is populated when options are loaded; ensure options are loaded before this call."
+    ))
+  }
+  val
+}
+
 #' A helper function to map the expected type from an option definition.
 get_expected_type <- function(opt_def) {
   # If an explicit type is given, use that.
-  if (!is.null(opt_def$type))
+  if (!is.null(opt_def$type)) {
     return(opt_def$type)
-  # If action is store_true, assume logical.
-  if (!is.null(opt_def$action) && opt_def$action == "store_true")
-    return("logical")
+  }
   cli::cli_abort("Invalid template definition for the option '{opt_def}'. Could not determine the expected value type.")
 }
 
@@ -156,41 +152,26 @@ get_expected_type <- function(opt_def) {
 validate_option_value <- function(val, opt_type, opt_name, allow_na = FALSE) {
   box::use(
     artma / const[CONST],
-    artma / libs / core / validation[validate]
+    artma / libs / core / validation[validate],
+    artma / options / type_registry[get_option_type_spec]
   )
 
   validate(is.character(opt_type), is.character(opt_name)) # 'allow_na' can be NULL
 
-  # Helper function for uniform error formatting:
-  format_error <- function(opt_name, expected_type, val) {
-    cli::format_inline("Option {CONST$STYLES$OPTIONS$NAME(opt_name)} must be {CONST$STYLES$OPTIONS$TYPE(expected_type)}, got: {CONST$STYLES$OPTIONS$VALUE(val)}")
-  }
+  spec <- get_option_type_spec(opt_type)
+  na_allowed <- isTRUE(allow_na) && isTRUE(spec$allows_na)
 
   if (is.null(val) || (length(val) == 1 && is.na(val))) {
-    if (!isTRUE(allow_na))
+    if (!na_allowed) {
       return(cli::format_inline("Option {CONST$STYLES$OPTIONS$NAME(opt_name)} cannot be NULL or NA."))
+    }
     return(NULL) # NA/NULL is allowed
   }
 
-  # Handle enumerations, e.g. "enum: red|blue|green"
-  if (startsWith(opt_type, "enum:")) {
-    valid_values <- parse_template_enum_value(opt_type)
-    if (!val %in% valid_values)
-      return(
-        cli::format_inline(
-          "Option {CONST$STYLES$OPTIONS$NAME(opt_name)} must be one of {.emph {toString(valid_values)}}; got {CONST$STYLES$OPTIONS$VALUE(val)}."
-        )
-      )
-    return(NULL)
-  }
-
-  switch(opt_type,
-    character = if (!is.character(val)) format_error(opt_name, "character", val),
-    integer = if (!is.numeric(val)) format_error(opt_name, "numeric/integer", val),
-    logical = if (!is.logical(val)) format_error(opt_name, "logical", val),
-    numeric = if (!is.numeric(val)) format_error(opt_name, "numeric", val),
-    NULL
-  )
+  # Per-type validation (character/integer/logical/numeric/enum, pass-through for
+  # anything else) lives in the option type registry, shared with
+  # coerce_option_value.
+  spec$validate(val, opt_name, opt_type)
 }
 
 #' @title Validate user input
@@ -213,13 +194,23 @@ validate_user_input <- function(user_input) {
 }
 
 #' @title Print options help text
-#' @description Print options help text
+#' @description Print options help text.
+#'
+#' Help strings are run through `cli::format_inline()` so they can use cli
+#' inline markup. That also makes them glue templates, so a literal brace in the
+#' text (`\usepackage{booktabs}`) is interpolated as an R expression and errors.
+#' Braces meant literally must be doubled in the template, but one malformed
+#' entry must not take down `options_help()` for a whole group, so fall back to
+#' the raw text instead of propagating the error.
 #' @param help *\[character\]* The help text to print
 #' @return `NULL`
 #' @export
 print_options_help_text <- function(help) {
   help_key <- cli::format_inline("{.strong Help}: ")
-  help_body <- cli::format_inline(help)
+  help_body <- tryCatch(
+    cli::format_inline(help),
+    error = function(e) paste(help, collapse = "\n")
+  )
   writeLines(paste0(help_key, help_body))
 }
 
@@ -231,7 +222,7 @@ box::export(
   parse_options_file_name,
   parse_template_enum_value,
   print_options_help_text,
-  remove_options_with_prefix,
+  require_option,
   validate_option_value,
   validate_user_input
 )

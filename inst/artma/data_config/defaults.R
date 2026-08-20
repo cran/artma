@@ -28,25 +28,24 @@ build_default_config_entry <- function(col_name, col_data) {
     }
   )
 
-  list(
-    "var_name" = col_name,
-    "var_name_verbose" = col_name_verbose,
-    "var_name_description" = col_name_verbose,
-    "data_type" = col_data_type,
-    "group_category" = NA,
-    "na_handling" = getOption("artma.data.na_handling", NA),
-    "variable_summary" = is.numeric(col_data),
-    "effect_sum_stats" = NA,
-    "equal" = NA,
-    "gltl" = NA,
-    "bma" = NA,
-    "bma_reference_var" = NA,
-    "bma_to_log" = NA,
-    "bpe" = NA,
-    "bpe_sum_stats" = NA,
-    "bpe_equal" = NA,
-    "bpe_gltl" = NA
+  # Fields with a non-NA default; every other key in CONST$DATA_CONFIG$KEYS
+  # is filled in as NA below, so adding a new key there is the only edit
+  # needed to keep a config entry in sync. The default source_name is the
+  # column's own name (identity mapping), so only genuine renames survive the
+  # sparse diff in extract_overrides().
+  overrides <- list(
+    source_name = col_name,
+    var_name = col_name,
+    var_name_verbose = col_name_verbose,
+    var_name_description = col_name_verbose,
+    data_type = col_data_type,
+    variable_summary = is.numeric(col_data)
   )
+
+  keys <- unlist(CONST$DATA_CONFIG$KEYS, use.names = FALSE)
+  entry <- stats::setNames(as.list(rep(NA, length(keys))), keys)
+  entry[names(overrides)] <- overrides
+  entry
 }
 
 #' @title Build Base Config
@@ -82,9 +81,15 @@ build_base_config <- function(df) {
 #' @param b *\[any\]* Second value
 #' @return *\[logical\]* TRUE if values are identical (including both-NA case)
 identical_or_both_na <- function(a, b) {
-  if (is.null(a) && is.null(b)) return(TRUE)
-  if (is.null(a) || is.null(b)) return(FALSE)
-  if (length(a) == 1 && length(b) == 1 && is.na(a) && is.na(b)) return(TRUE)
+  if (is.null(a) && is.null(b)) {
+    return(TRUE)
+  }
+  if (is.null(a) || is.null(b)) {
+    return(FALSE)
+  }
+  if (length(a) == 1 && length(b) == 1 && is.na(a) && is.na(b)) {
+    return(TRUE)
+  }
   identical(a, b)
 }
 
@@ -110,7 +115,9 @@ extract_overrides <- function(entry, default_entry) {
     }
   }
 
-  if (length(overrides) == 0) return(NULL)
+  if (length(overrides) == 0) {
+    return(NULL)
+  }
   overrides
 }
 

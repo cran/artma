@@ -1,16 +1,30 @@
 box::use(
   testthat[
     expect_equal,
+    expect_error,
     expect_false,
     expect_gt,
+    expect_match,
+    expect_message,
     expect_named,
+    expect_no_message,
+    expect_null,
     expect_true,
+    skip_if_not_installed,
     test_that
   ],
   withr[local_options]
 )
 
-box::use(artma / methods / linear_tests[linear_tests])
+box::use(
+  artma / econometric / linear[
+    flag_ci_conflicts,
+    linear_model_specs,
+    resample_cluster_rows,
+    run_linear_models
+  ],
+  artma / methods / linear_tests[linear_tests]
+)
 
 make_demo_data <- function() {
   set.seed(42)
@@ -28,7 +42,144 @@ make_demo_data <- function() {
   )
 }
 
+# Studies contribute unequal numbers of estimates, which is essential for the
+# study-weighted regression tests: with equal counts, every per-observation
+# weight is the same constant and any (mis)weighting collapses to plain OLS.
+make_unbalanced_data <- function() {
+  set.seed(2026)
+  sizes <- c(2L, 3L, 5L, 7L, 11L, 4L)
+  study_ids <- rep(paste0("S", seq_along(sizes)), times = sizes)
+  se_vals <- runif(sum(sizes), min = 0.05, max = 0.2)
+  data.frame(
+    study_id = study_ids,
+    effect = rnorm(sum(sizes), mean = 0.2, sd = 0.05) + 0.3 * se_vals,
+    se = se_vals,
+    study_size = rep(sizes, times = sizes),
+    precision = 1 / se_vals,
+    check.names = FALSE
+  )
+}
+
+# A study with an extreme, trend-breaking `se`/`effect` pair gives the
+# unweighted specs a high-leverage point: the analytic clustered-vcov test and
+# the percentile bootstrap CI reliably disagree on several rows, which is
+# exactly the disagreement `flag_ci_conflicts()` is meant to surface.
+make_conflict_data <- function() {
+  set.seed(1)
+  n_studies <- 10L
+  per_study <- 4L
+  study_ids <- rep(paste0("S", seq_len(n_studies)), each = per_study)
+  se_level <- runif(n_studies, 0.05, 0.15)
+  se_level[1] <- 8
+  se_vals <- rep(se_level, each = per_study) * exp(rnorm(n_studies * per_study, 0, 0.05))
+  effect_level <- rnorm(n_studies, mean = -0.05, sd = 0.02) + 0.02 * se_level
+  effect_level[1] <- 5
+  effect <- rep(effect_level, each = per_study) + rnorm(n_studies * per_study, 0, 0.01)
+  data.frame(
+    study_id = study_ids,
+    effect = effect,
+    se = se_vals,
+    study_size = sample(20:80, n_studies * per_study, replace = TRUE),
+    precision = 1 / se_vals,
+    check.names = FALSE
+  )
+}
+
+test_that("flag_ci_conflicts marks disagreement between the analytic test and the bootstrap CI", {
+  p_value <- c(0.01, 0.5, 0.5, 0.01, NA, 0.01)
+  bootstrap_lower <- c(-0.1, -0.1, 0.2, 0.2, -0.1, NA)
+  bootstrap_upper <- c(0.5, 0.5, 0.5, 0.5, 0.1, NA)
+
+  result <- flag_ci_conflicts(p_value, bootstrap_lower, bootstrap_upper, conf_level = 0.95)
+
+  expect_equal(
+    result,
+    c(
+      TRUE, # significant analytically, CI includes zero
+      FALSE, # not significant, CI includes zero
+      TRUE, # not significant, CI excludes zero
+      FALSE, # significant, CI excludes zero
+      FALSE, # p-value missing (treated as not significant), CI includes zero -> no conflict
+      NA # bootstrap CI unavailable
+    )
+  )
+})
+
+test_that("run_linear_models flags and marks conflicting rows on high-leverage data", {
+  skip_if_not_installed("plm")
+
+  df <- make_conflict_data()
+  opts <- list(
+    add_significance_marks = TRUE,
+    bootstrap_replications = 60L,
+    conf_level = 0.95,
+    round_to = 3L
+  )
+
+  set.seed(100)
+  res <- run_linear_models(df, opts)
+
+  conflicts <- res$coefficients[res$coefficients$ci_conflict %in% TRUE, , drop = FALSE]
+  expect_gt(nrow(conflicts), 0)
+  expect_true(all(grepl("†$", conflicts$bootstrap_formatted)))
+
+  non_conflicts <- res$coefficients[res$coefficients$ci_conflict %in% FALSE, , drop = FALSE]
+  if (nrow(non_conflicts) > 0) {
+    expect_false(any(grepl("†", non_conflicts$bootstrap_formatted)))
+  }
+})
+
+test_that("linear_tests warns when few bootstrap replications are requested", {
+  skip_if_not_installed("plm")
+
+  df <- make_demo_data()
+
+  local_options(
+    "artma.methods.linear_tests.bootstrap_replications" = 10L,
+    "artma.methods.linear_tests.conf_level" = 0.95,
+    "artma.verbose" = 1
+  )
+
+  # linear_tests() prints its result table regardless of verbosity (the
+  # table is the method's deliverable, not progress narration); the test
+  # session's global sink (see setup.R) keeps that off the log, while
+  # expect_message's own inner handler still sees the signaled condition.
+  expect_message(linear_tests(df), "Only 10 bootstrap replications")
+})
+
+test_that("linear_tests does not warn about replications when the count is high enough", {
+  skip_if_not_installed("plm")
+
+  df <- make_demo_data()
+
+  local_options(
+    "artma.methods.linear_tests.bootstrap_replications" = 999L,
+    "artma.methods.linear_tests.conf_level" = 0.95,
+    "artma.verbose" = 1
+  )
+
+  expect_no_message(linear_tests(df), message = "bootstrap replications")
+})
+
+test_that("linear_tests reports the count of estimates with disagreeing stars and CIs", {
+  skip_if_not_installed("plm")
+
+  df <- make_conflict_data()
+
+  local_options(
+    "artma.methods.add_significance_marks" = TRUE,
+    "artma.methods.linear_tests.bootstrap_replications" = 60L,
+    "artma.methods.linear_tests.conf_level" = 0.95,
+    "artma.verbose" = 1
+  )
+
+  set.seed(100)
+  expect_message(linear_tests(df), "estimates are.*marked with")
+})
+
 test_that("linear tests return tidy coefficients and summary", {
+  skip_if_not_installed("plm")
+
   df <- make_demo_data()
 
   local_options(
@@ -41,42 +192,52 @@ test_that("linear tests return tidy coefficients and summary", {
 
   res <- linear_tests(df)
 
+  expect_named(res, c("tables", "estimates", "plots", "meta"))
+  expect_named(res$tables, "summary")
   expect_named(
-    res,
-    c("coefficients", "summary", "skipped", "options"),
+    res$meta,
+    c("coefficients", "skipped_models", "options"),
     ignore.order = TRUE
   )
 
   expect_equal(
-    sort(unique(res$coefficients$model)),
+    sort(unique(res$meta$coefficients$model)),
     sort(c(
       "ols", "fe", "be", "re", "ols_study_weighted", "ols_precision_weighted"
     ))
   )
 
-  expect_equal(nrow(res$coefficients), 12L)
+  expect_equal(nrow(res$meta$coefficients), 12L)
   expect_named(
-    res$coefficients,
+    res$meta$coefficients,
     c(
-      "estimate", "std_error", "statistic", "p_value", "term", "model",
-      "model_label", "n_obs", "term_label", "bootstrap_lower",
+      "estimate", "std_error", "statistic", "p_value", "term", "vcov_type",
+      "model", "model_label", "n_obs", "term_label", "bootstrap_lower",
       "bootstrap_upper", "significance", "estimate_rounded",
       "std_error_rounded", "estimate_formatted", "std_error_formatted",
-      "bootstrap_formatted"
+      "bootstrap_formatted", "ci_conflict"
     )
   )
 
-  expect_gt(nrow(res$summary), 0)
+  expect_gt(nrow(res$tables$summary), 0)
   expect_equal(
-    rownames(res$summary),
+    rownames(res$tables$summary),
     c(
       "Publication Bias", "(Std. Error)", "Bootstrap CI (PB)",
       "Effect Beyond Bias", "(Std. Error)", "Bootstrap CI (Effect)",
-      "Total Observations"
+      "Total Observations", "Standard Errors"
     )
   )
-  expect_true(all(res$coefficients$significance %in% c("", "*", "**", "***")))
-  expect_equal(res$options$bootstrap_replications, 10L)
+
+  # The between column cannot be clustered, so the table has to say so.
+  expect_equal(
+    res$tables$summary[["Between Effects"]][[8L]],
+    "Heteroskedasticity-robust (HC1)"
+  )
+  expect_equal(res$tables$summary[["OLS"]][[8L]], "Cluster-robust (HC1)")
+
+  expect_true(all(res$meta$coefficients$significance %in% c("", "*", "**", "***")))
+  expect_equal(res$meta$options$bootstrap_replications, 10L)
 })
 
 test_that("linear tests gracefully skip models with missing columns", {
@@ -93,7 +254,732 @@ test_that("linear tests gracefully skip models with missing columns", {
 
   res <- linear_tests(df)
 
-  expect_false("ols_precision_weighted" %in% res$coefficients$model)
-  expect_true("ols_precision_weighted" %in% names(res$skipped))
-  expect_true(grepl("Missing required columns", res$skipped$ols_precision_weighted$reason))
+  expect_false("ols_precision_weighted" %in% res$meta$coefficients$model)
+  expect_true("ols_precision_weighted" %in% names(res$meta$skipped_models))
+  expect_true(grepl("Missing required columns", res$meta$skipped_models$ols_precision_weighted$reason))
+})
+
+test_that("bootstrap CIs are deterministic and seed-identical to the tidy-path implementation", {
+  skip_if_not_installed("plm")
+
+  df <- make_demo_data()
+  opts <- list(
+    add_significance_marks = FALSE,
+    bootstrap_replications = 50L,
+    conf_level = 0.9,
+    round_to = 3L
+  )
+
+  set.seed(123)
+  res <- run_linear_models(df, options = opts)
+
+  set.seed(123)
+  res_repeat <- run_linear_models(df, options = opts)
+
+  ci_cols <- c("model", "term", "bootstrap_lower", "bootstrap_upper")
+  ci <- res$coefficients[, ci_cols]
+  rownames(ci) <- NULL
+  expect_equal(ci, res_repeat$coefficients[, ci_cols], ignore_attr = TRUE)
+
+  finite_rows <- is.finite(ci$bootstrap_lower) & is.finite(ci$bootstrap_upper)
+  expect_true(all(ci$bootstrap_lower[finite_rows] <= ci$bootstrap_upper[finite_rows]))
+
+  # Reference values pinned when the fast boot_estimate paths were verified
+  # against per-replication refits (see the fast-path tests below). The ols
+  # and fe values match the pre-optimization clustered-vcov tidy path;
+  # enabling the be bootstrap shifted the RNG stream for the specs after it,
+  # so those values were regenerated from the verified implementation. The
+  # ols_study_weighted values were regenerated again when its weighting was
+  # corrected to equal-total-weight per study (issue #365); the resamples are
+  # unchanged, only the estimator applied to them.
+  expected <- data.frame(
+    model = rep(
+      c("ols", "fe", "be", "re", "ols_study_weighted", "ols_precision_weighted"),
+      each = 2L
+    ),
+    term = rep(c("effect", "publication_bias"), times = 6L),
+    bootstrap_lower = c(
+      0.160739545997458, -0.601087904579698,
+      0.140819890400399, -0.600311615629511,
+      -0.211101307249788, -2.575829691320434,
+      0.152547356054246, -0.570520287992651,
+      0.135891505542401, -0.603062744099735,
+      0.164684612181770, -0.583949862340950
+    ),
+    bootstrap_upper = c(
+      0.237035405467370, 0.165658257380718,
+      0.243966037478644, 0.440057444128715,
+      0.481753330561316, 3.827252082114144,
+      0.243411054603044, 0.301689687613106,
+      0.240079968258059, 0.404233453422908,
+      0.244794965444753, 0.172746267850587
+    ),
+    stringsAsFactors = FALSE
+  )
+
+  expect_equal(ci, expected, tolerance = 1e-8, ignore_attr = TRUE)
+})
+
+test_that("FE effect-beyond-bias SE comes from the auxiliary intercept model, not the slope", {
+  skip_if_not_installed("plm")
+
+  df <- make_unbalanced_data()
+  res <- run_linear_models(
+    df,
+    options = list(
+      add_significance_marks = FALSE,
+      bootstrap_replications = 0L,
+      conf_level = 0.95,
+      round_to = 3L
+    )
+  )
+
+  fe <- res$coefficients[res$coefficients$model == "fe", , drop = FALSE]
+  se_slope <- fe$std_error[fe$term == "publication_bias"]
+  se_effect <- fe$std_error[fe$term == "effect"]
+
+  expect_false(isTRUE(all.equal(se_effect, se_slope)))
+
+  model <- plm::plm(effect ~ se, data = df, model = "within", index = "study_id")
+  expected <- plm::within_intercept(
+    model,
+    vcov = function(m) plm::vcovHC(m, method = "arellano", type = "HC1", cluster = "group")
+  )
+
+  expect_equal(fe$estimate[fe$term == "effect"], expected[[1L]], tolerance = 1e-12)
+  expect_equal(se_effect, attr(expected, "se")[[1L]], tolerance = 1e-12)
+})
+
+test_that("study-weighted OLS gives each study equal total weight", {
+  df <- make_unbalanced_data()
+  res <- run_linear_models(
+    df,
+    options = list(
+      add_significance_marks = FALSE,
+      bootstrap_replications = 0L,
+      conf_level = 0.95,
+      round_to = 3L
+    )
+  )
+
+  sw <- res$coefficients[res$coefficients$model == "ols_study_weighted", , drop = FALSE]
+
+  # Independent per-study estimate counts; each study's estimates must enter
+  # with lm weight 1/count so every study carries the same total weight.
+  counts <- as.vector(table(df$study_id)[as.character(df$study_id)])
+  expect_equal(df$study_size, counts)
+
+  reference <- stats::lm(effect ~ se, data = df, weights = 1 / counts)
+
+  expect_equal(
+    sw$estimate[sw$term == "effect"],
+    stats::coef(reference)[["(Intercept)"]],
+    tolerance = 1e-12
+  )
+  expect_equal(
+    sw$estimate[sw$term == "publication_bias"],
+    stats::coef(reference)[["se"]],
+    tolerance = 1e-12
+  )
+})
+
+test_that("bootstrap fast paths match slow-path refits on resampled data", {
+  skip_if_not_installed("plm")
+
+  set.seed(42)
+  n_studies <- 12L
+  per_study <- 5L
+  study_ids <- rep(paste0("S", seq_len(n_studies)), each = per_study)
+  se_vals <- runif(n_studies * per_study, min = 0.05, max = 0.15)
+  df <- data.frame(
+    study_id = droplevels(factor(study_ids)),
+    effect = rnorm(n_studies * per_study, mean = 0.2, sd = 0.05),
+    se = se_vals,
+    study_size = sample(20:80, n_studies * per_study, replace = TRUE),
+    precision = 1 / se_vals
+  )
+  cluster_splits <- split(seq_len(nrow(df)), df$study_id)
+
+  specs <- linear_model_specs()
+  names(specs) <- vapply(specs, function(spec) spec$name, character(1))
+  fast_path_specs <- c("ols", "fe", "be", "re", "ols_study_weighted", "ols_precision_weighted")
+  compared <- stats::setNames(integer(length(fast_path_specs)), fast_path_specs)
+
+  set.seed(1234)
+  for (replication in seq_len(2L)) {
+    rows <- resample_cluster_rows(nrow(df), cluster_splits)
+    boot_data <- df[rows, , drop = FALSE]
+
+    for (spec_name in fast_path_specs) {
+      spec <- specs[[spec_name]]
+      fast <- tryCatch(spec$boot_estimate(df, rows), error = function(e) NULL)
+      slow_model <- tryCatch(spec$fit(boot_data), error = function(e) NULL)
+
+      if (is.null(slow_model)) {
+        # A degenerate resample (e.g. too few distinct clusters) must fail
+        # identically on both paths.
+        expect_true(is.null(fast), info = paste(spec_name, "replication", replication))
+        next
+      }
+
+      # Small resampled clusters can legitimately fail clustered vcov
+      # estimation; spec$tidy() reports that with a cli_alert_warning that
+      # isn't test-relevant here (this test compares estimates, not vcov
+      # diagnostics), so keep it off the log.
+      slow_tidy <- suppressMessages(spec$tidy(slow_model, boot_data))
+      slow <- stats::setNames(slow_tidy$estimate, slow_tidy$term)
+
+      expect_equal(
+        fast[c("effect", "publication_bias")],
+        slow[c("effect", "publication_bias")],
+        tolerance = 1e-12,
+        info = paste(spec_name, "replication", replication)
+      )
+      compared[spec_name] <- compared[spec_name] + 1L
+    }
+  }
+
+  expect_true(all(compared > 0L))
+
+  # Under set.seed(1234) no sampled replication is degenerate (every draw
+  # keeps at least six distinct clusters), so force a two-cluster resample:
+  # too few groups for Swamy-Arora, and both random effects paths must fail
+  # identically on it.
+  degenerate_rows <- unlist(cluster_splits[rep(c("S1", "S2"), 6L)], use.names = FALSE)
+  re_spec <- specs[["re"]]
+  expect_null(tryCatch(re_spec$boot_estimate(df, degenerate_rows), error = function(e) NULL))
+  expect_null(suppressWarnings(
+    tryCatch(re_spec$fit(df[degenerate_rows, , drop = FALSE]), error = function(e) NULL)
+  ))
+})
+
+test_that("within fast path merges duplicated resampled clusters like plm", {
+  skip_if_not_installed("plm")
+
+  df <- make_demo_data()
+  df$study_id <- droplevels(factor(df$study_id))
+  cluster_splits <- split(seq_len(nrow(df)), df$study_id)
+
+  specs <- linear_model_specs()
+  names(specs) <- vapply(specs, function(spec) spec$name, character(1))
+  fe_spec <- specs[["fe"]]
+
+  # Force duplicated clusters so the merge semantics are actually exercised.
+  rows <- unlist(
+    cluster_splits[c("S1", "S1", "S2", "S3", "S3", "S3")],
+    use.names = FALSE
+  )
+  boot_data <- df[rows, , drop = FALSE]
+
+  fast <- fe_spec$boot_estimate(df, rows)
+  model <- plm::plm(effect ~ se, data = boot_data, model = "within", index = "study_id")
+
+  expect_equal(
+    fast[["publication_bias"]],
+    unname(stats::coef(model)[["se"]]),
+    tolerance = 1e-12
+  )
+  expect_equal(
+    fast[["effect"]],
+    unname(plm::within_intercept(model)[[1L]]),
+    tolerance = 1e-12
+  )
+})
+
+test_that("between effects standard errors are heteroskedasticity-robust on group means", {
+  skip_if_not_installed("plm")
+  skip_if_not_installed("sandwich")
+
+  df <- make_demo_data()
+  df$study_id <- droplevels(factor(df$study_id))
+
+  specs <- linear_model_specs()
+  names(specs) <- vapply(specs, function(spec) spec$name, character(1))
+  be_spec <- specs[["be"]]
+
+  model <- be_spec$fit(df)
+
+  # The reason the between column needs its own tidy path: plm::vcovHC accepts
+  # only random/within/pooling/fd models. Should a future plm gain `between`
+  # support, this expectation fails rather than the numbers changing quietly.
+  expect_error(
+    plm::vcovHC(model, type = "HC1", cluster = "group"),
+    regexp = "random"
+  )
+
+  tidy <- be_spec$tidy(model, df)
+
+  group <- droplevels(factor(df$study_id))
+  first_in_group <- !duplicated(as.integer(group))
+  means <- data.frame(
+    effect = stats::ave(df$effect, group)[first_in_group],
+    se = stats::ave(df$se, group)[first_in_group]
+  )
+  means_model <- stats::lm(effect ~ se, data = means)
+  oracle <- lmtest::coeftest(
+    means_model,
+    vcov. = sandwich::vcovHC(means_model, type = "HC1")
+  )
+
+  expect_equal(tidy$estimate[tidy$term == "effect"], oracle["(Intercept)", "Estimate"])
+  expect_equal(tidy$std_error[tidy$term == "effect"], oracle["(Intercept)", "Std. Error"])
+  expect_equal(tidy$std_error[tidy$term == "publication_bias"], oracle["se", "Std. Error"])
+  expect_equal(unique(tidy$vcov_type), "Heteroskedasticity-robust (HC1)")
+
+  # Point estimates still come from the between estimator itself.
+  expect_equal(
+    tidy$estimate[tidy$term == "publication_bias"],
+    unname(stats::coef(model)[["se"]])
+  )
+
+  # Clustering by study after collapsing to one row per study is degenerate:
+  # vcovCL returns the HC1 matrix element for element, which is why
+  # heteroskedasticity-robust is the ceiling rather than a shortcut.
+  expect_equal(
+    sandwich::vcovCL(means_model, cluster = seq_len(nrow(means)), type = "HC1"),
+    sandwich::vcovHC(means_model, type = "HC1")
+  )
+
+  # The classical standard errors the old path fell through to are different
+  # numbers, not a rounding difference.
+  expect_false(isTRUE(all.equal(
+    unname(tidy$std_error[tidy$term == "publication_bias"]),
+    unname(sqrt(diag(stats::vcov(model)))[["se"]])
+  )))
+})
+
+test_that("between effects fast path matches plm on duplicated resampled clusters", {
+  skip_if_not_installed("plm")
+
+  df <- make_demo_data()
+  df$study_id <- droplevels(factor(df$study_id))
+  cluster_splits <- split(seq_len(nrow(df)), df$study_id)
+
+  specs <- linear_model_specs()
+  names(specs) <- vapply(specs, function(spec) spec$name, character(1))
+  be_spec <- specs[["be"]]
+
+  # Force duplicated clusters so the merge semantics are actually exercised:
+  # duplicated ids collapse to one cluster-mean row with unchanged means.
+  rows <- unlist(
+    cluster_splits[c("S1", "S1", "S2", "S3", "S3", "S3", "S5")],
+    use.names = FALSE
+  )
+  boot_data <- df[rows, , drop = FALSE]
+
+  fast <- be_spec$boot_estimate(df, rows)
+  model <- plm::plm(effect ~ se, data = boot_data, model = "between", index = "study_id")
+
+  expect_equal(
+    fast[["effect"]],
+    unname(stats::coef(model)[["(Intercept)"]]),
+    tolerance = 1e-12
+  )
+  expect_equal(
+    fast[["publication_bias"]],
+    unname(stats::coef(model)[["se"]]),
+    tolerance = 1e-12
+  )
+})
+
+test_that("between effects fast path matches plm on unbalanced clusters", {
+  skip_if_not_installed("plm")
+
+  set.seed(7)
+  sizes <- c(2L, 3L, 5L, 8L, 13L, 21L, 4L, 30L, 2L, 9L)
+  study_ids <- rep(paste0("U", seq_along(sizes)), times = sizes)
+  se_vals <- runif(sum(sizes), min = 0.05, max = 0.15)
+  df <- data.frame(
+    study_id = droplevels(factor(study_ids)),
+    effect = rnorm(sum(sizes), mean = 0.2, sd = 0.05),
+    se = se_vals
+  )
+  cluster_splits <- split(seq_len(nrow(df)), df$study_id)
+
+  specs <- linear_model_specs()
+  names(specs) <- vapply(specs, function(spec) spec$name, character(1))
+  be_spec <- specs[["be"]]
+
+  set.seed(99)
+  for (replication in seq_len(5L)) {
+    rows <- resample_cluster_rows(nrow(df), cluster_splits)
+    boot_data <- df[rows, , drop = FALSE]
+
+    fast <- tryCatch(be_spec$boot_estimate(df, rows), error = function(e) NULL)
+    model <- tryCatch(
+      plm::plm(effect ~ se, data = boot_data, model = "between", index = "study_id"),
+      error = function(e) NULL
+    )
+
+    if (is.null(model)) {
+      expect_true(is.null(fast), info = paste("replication", replication))
+      next
+    }
+
+    expect_equal(
+      fast[c("effect", "publication_bias")],
+      stats::setNames(
+        unname(stats::coef(model)[c("(Intercept)", "se")]),
+        c("effect", "publication_bias")
+      ),
+      tolerance = 1e-12,
+      info = paste("replication", replication)
+    )
+  }
+})
+
+test_that("between effects fast path fails on degenerate resamples exactly like plm", {
+  skip_if_not_installed("plm")
+
+  df <- make_demo_data()
+  df$study_id <- droplevels(factor(df$study_id))
+  cluster_splits <- split(seq_len(nrow(df)), df$study_id)
+
+  specs <- linear_model_specs()
+  names(specs) <- vapply(specs, function(spec) spec$name, character(1))
+  be_spec <- specs[["be"]]
+
+  # A single distinct cluster leaves fewer mean rows than coefficients.
+  rows <- unlist(cluster_splits[c("S2", "S2", "S2")], use.names = FALSE)
+  boot_data <- df[rows, , drop = FALSE]
+
+  fast <- tryCatch(be_spec$boot_estimate(df, rows), error = function(e) NULL)
+  model <- tryCatch(
+    plm::plm(effect ~ se, data = boot_data, model = "between", index = "study_id"),
+    error = function(e) NULL
+  )
+
+  expect_true(is.null(model))
+  expect_true(is.null(fast))
+
+  # Two distinct clusters fit exactly (two mean rows, two coefficients) on
+  # both paths, so neither may error there.
+  rows <- unlist(cluster_splits[c("S2", "S5")], use.names = FALSE)
+  boot_data <- df[rows, , drop = FALSE]
+
+  fast <- be_spec$boot_estimate(df, rows)
+  model <- plm::plm(effect ~ se, data = boot_data, model = "between", index = "study_id")
+
+  expect_equal(
+    fast[c("effect", "publication_bias")],
+    stats::setNames(
+      unname(stats::coef(model)[c("(Intercept)", "se")]),
+      c("effect", "publication_bias")
+    ),
+    tolerance = 1e-12
+  )
+})
+
+test_that("random effects fast path matches plm on duplicated resampled clusters", {
+  skip_if_not_installed("plm")
+
+  df <- make_demo_data()
+  df$study_id <- droplevels(factor(df$study_id))
+  cluster_splits <- split(seq_len(nrow(df)), df$study_id)
+
+  specs <- linear_model_specs()
+  names(specs) <- vapply(specs, function(spec) spec$name, character(1))
+  re_spec <- specs[["re"]]
+
+  # Force duplicated clusters so the merge semantics are actually exercised.
+  rows <- unlist(
+    cluster_splits[c("S1", "S1", "S2", "S3", "S3", "S3", "S5")],
+    use.names = FALSE
+  )
+  boot_data <- df[rows, , drop = FALSE]
+
+  fast <- re_spec$boot_estimate(df, rows)
+  model <- plm::plm(effect ~ se, data = boot_data, model = "random", index = "study_id")
+
+  expect_equal(
+    fast[["effect"]],
+    unname(stats::coef(model)[["(Intercept)"]]),
+    tolerance = 1e-12
+  )
+  expect_equal(
+    fast[["publication_bias"]],
+    unname(stats::coef(model)[["se"]]),
+    tolerance = 1e-12
+  )
+})
+
+test_that("random effects fast path matches plm on unbalanced clusters", {
+  skip_if_not_installed("plm")
+
+  set.seed(7)
+  sizes <- c(2L, 3L, 5L, 8L, 13L, 21L, 4L, 30L, 2L, 9L)
+  study_ids <- rep(paste0("U", seq_along(sizes)), times = sizes)
+  se_vals <- runif(sum(sizes), min = 0.05, max = 0.15)
+  df <- data.frame(
+    study_id = droplevels(factor(study_ids)),
+    effect = rnorm(sum(sizes), mean = 0.2, sd = 0.05),
+    se = se_vals
+  )
+  cluster_splits <- split(seq_len(nrow(df)), df$study_id)
+
+  specs <- linear_model_specs()
+  names(specs) <- vapply(specs, function(spec) spec$name, character(1))
+  re_spec <- specs[["re"]]
+
+  set.seed(99)
+  for (replication in seq_len(5L)) {
+    rows <- resample_cluster_rows(nrow(df), cluster_splits)
+    boot_data <- df[rows, , drop = FALSE]
+
+    fast <- tryCatch(re_spec$boot_estimate(df, rows), error = function(e) NULL)
+    model <- tryCatch(
+      plm::plm(effect ~ se, data = boot_data, model = "random", index = "study_id"),
+      error = function(e) NULL
+    )
+
+    if (is.null(model)) {
+      expect_true(is.null(fast), info = paste("replication", replication))
+      next
+    }
+
+    expect_equal(
+      fast[c("effect", "publication_bias")],
+      stats::setNames(
+        unname(stats::coef(model)[c("(Intercept)", "se")]),
+        c("effect", "publication_bias")
+      ),
+      tolerance = 1e-12,
+      info = paste("replication", replication)
+    )
+  }
+})
+
+test_that("random effects fast path fails on degenerate resamples exactly like plm", {
+  skip_if_not_installed("plm")
+
+  df <- make_demo_data()
+  df$study_id <- droplevels(factor(df$study_id))
+  cluster_splits <- split(seq_len(nrow(df)), df$study_id)
+
+  specs <- linear_model_specs()
+  names(specs) <- vapply(specs, function(spec) spec$name, character(1))
+  re_spec <- specs[["re"]]
+
+  degenerate_draws <- list(
+    single_cluster = c("S2", "S2", "S2"),
+    two_clusters = c("S2", "S5")
+  )
+
+  for (case in names(degenerate_draws)) {
+    rows <- unlist(cluster_splits[degenerate_draws[[case]]], use.names = FALSE)
+    boot_data <- df[rows, , drop = FALSE]
+
+    fast <- tryCatch(re_spec$boot_estimate(df, rows), error = function(e) NULL)
+    # plm warns about a perfect between fit before erroring on these draws.
+    model <- suppressWarnings(tryCatch(
+      plm::plm(effect ~ se, data = boot_data, model = "random", index = "study_id"),
+      error = function(e) NULL
+    ))
+
+    expect_true(is.null(model), info = case)
+    expect_true(is.null(fast), info = case)
+  }
+
+  # All-singleton clusters: plm rejects the within model as empty.
+  singleton_df <- data.frame(
+    study_id = droplevels(factor(paste0("P", 1:8))),
+    effect = rnorm(8, mean = 0.2, sd = 0.05),
+    se = runif(8, min = 0.05, max = 0.15)
+  )
+  rows <- seq_len(nrow(singleton_df))
+
+  fast <- tryCatch(re_spec$boot_estimate(singleton_df, rows), error = function(e) NULL)
+  model <- tryCatch(
+    plm::plm(effect ~ se, data = singleton_df, model = "random", index = "study_id"),
+    error = function(e) NULL
+  )
+
+  expect_true(is.null(model))
+  expect_true(is.null(fast))
+})
+
+test_that("two-cluster data skips RE and BE with a plain-language reason", {
+  skip_if_not_installed("plm")
+
+  set.seed(7)
+  df <- make_demo_data()
+  df <- df[df$study_id %in% c("S1", "S2"), , drop = FALSE]
+
+  res <- run_linear_models(
+    df,
+    options = list(
+      add_significance_marks = FALSE,
+      bootstrap_replications = 0L,
+      conf_level = 0.95,
+      round_to = 3L
+    )
+  )
+
+  expect_true(all(c("re", "be") %in% names(res$skipped)))
+  expect_true(grepl("Not enough clusters to fit", res$skipped$re$reason))
+  expect_true(grepl("Random Effects", res$skipped$re$reason))
+  expect_true(grepl("found 2", res$skipped$re$reason))
+  expect_true(grepl("Not enough clusters to fit", res$skipped$be$reason))
+  expect_true(grepl("Between Effects", res$skipped$be$reason))
+  expect_false(grepl("not estimable", res$skipped$re$reason))
+
+  expect_true(all(c("ols", "fe") %in% res$coefficients$model))
+})
+
+test_that("singleton-cluster data skips FE and RE with a plain-language reason", {
+  skip_if_not_installed("plm")
+
+  set.seed(7)
+  n_studies <- 6L
+  se_vals <- runif(n_studies, min = 0.05, max = 0.15)
+  df <- data.frame(
+    study_id = paste0("S", seq_len(n_studies)),
+    effect = rnorm(n_studies, mean = 0.2, sd = 0.05),
+    se = se_vals,
+    study_size = sample(20:80, n_studies, replace = TRUE),
+    precision = 1 / se_vals,
+    check.names = FALSE
+  )
+
+  res <- run_linear_models(
+    df,
+    options = list(
+      add_significance_marks = FALSE,
+      bootstrap_replications = 0L,
+      conf_level = 0.95,
+      round_to = 3L
+    )
+  )
+
+  expect_true(all(c("fe", "re") %in% names(res$skipped)))
+  expect_true(grepl("does not vary within any", res$skipped$fe$reason))
+  expect_true(grepl("Fixed Effects", res$skipped$fe$reason))
+  expect_true(grepl("Not enough observations to fit", res$skipped$re$reason))
+  expect_true(grepl("Random Effects", res$skipped$re$reason))
+  expect_false(grepl("empty model", res$skipped$fe$reason))
+
+  expect_true(all(c("ols", "be") %in% res$coefficients$model))
+})
+
+test_that("constant within-cluster se skips FE and RE even with many clusters", {
+  skip_if_not_installed("plm")
+
+  df <- make_demo_data()
+  df$se <- stats::ave(df$se, df$study_id)
+
+  res <- run_linear_models(
+    df,
+    options = list(
+      add_significance_marks = FALSE,
+      bootstrap_replications = 0L,
+      conf_level = 0.95,
+      round_to = 3L
+    )
+  )
+
+  expect_true(all(c("fe", "re") %in% names(res$skipped)))
+  expect_true(grepl("does not vary within any", res$skipped$fe$reason))
+  expect_true(grepl("does not vary within any", res$skipped$re$reason))
+
+  expect_true(all(c("ols", "be") %in% res$coefficients$model))
+})
+
+test_that("panel models are skipped with a clear message when plm is unavailable", {
+  df <- make_demo_data()
+
+  res <- run_linear_models(
+    df,
+    options = list(
+      add_significance_marks = FALSE,
+      bootstrap_replications = 0L,
+      conf_level = 0.95,
+      round_to = 3L
+    ),
+    is_pkg_available = function(pkg) pkg != "plm"
+  )
+
+  panel_models <- c("fe", "be", "re")
+
+  expect_false(any(panel_models %in% res$coefficients$model))
+  expect_true(all(panel_models %in% names(res$skipped)))
+
+  reasons <- vapply(res$skipped[panel_models], function(item) item$reason, character(1))
+  expect_true(all(grepl("plm", reasons, fixed = TRUE)))
+  expect_true(all(grepl("install.packages", reasons, fixed = TRUE)))
+
+  expect_true("ols" %in% res$coefficients$model)
+})
+
+test_that("linear tests return unrounded estimates in the shared schema", {
+  skip_if_not_installed("plm")
+
+  box::use(
+    artma / modules / runtime_methods[ESTIMATES_COLUMNS]
+  )
+
+  df <- make_demo_data()
+
+  local_options(
+    "artma.methods.add_significance_marks" = TRUE,
+    "artma.methods.linear_tests.bootstrap_replications" = 10L,
+    "artma.methods.linear_tests.conf_level" = 0.9,
+    "artma.output.number_of_decimals" = 2,
+    "artma.verbose" = 1
+  )
+
+  res <- linear_tests(df)
+  estimates <- res$estimates
+
+  expect_named(estimates, ESTIMATES_COLUMNS)
+  expect_equal(nrow(estimates), nrow(res$meta$coefficients))
+  expect_equal(unique(estimates$method), "linear_tests")
+  expect_equal(sort(unique(estimates$term)), c("effect", "publication_bias"))
+
+  expect_true(is.numeric(estimates$estimate))
+  expect_true(is.numeric(estimates$std_error))
+  expect_true(is.numeric(estimates$p_value))
+  expect_true(is.integer(estimates$n_obs))
+
+  # The numbers come straight from the model, untouched by the display
+  # rounding that `artma.output.number_of_decimals` drives.
+  expect_equal(estimates$estimate, res$meta$coefficients$estimate)
+  expect_equal(estimates$std_error, res$meta$coefficients$std_error)
+  expect_false(all(estimates$estimate == round(estimates$estimate, 2)))
+})
+
+test_that("linear_tests_estimates flags CI conflicts and handles an empty frame", {
+  box::use(
+    artma / methods / linear_tests[linear_tests_estimates]
+  )
+
+  coefficients <- data.frame(
+    model = c("ols", "fe"),
+    term = c("effect", "effect"),
+    estimate = c(0.1, 0.2),
+    std_error = c(0.01, 0.02),
+    statistic = c(10, 10),
+    p_value = c(0.001, 0.2),
+    bootstrap_lower = c(0.05, -0.1),
+    bootstrap_upper = c(0.15, 0.3),
+    n_obs = c(30L, 30L),
+    ci_conflict = c(FALSE, TRUE),
+    stringsAsFactors = FALSE
+  )
+
+  estimates <- linear_tests_estimates(coefficients)
+  expect_true(is.na(estimates$note[1]))
+  expect_match(estimates$note[2], "disagree")
+  expect_equal(estimates$conf_low, coefficients$bootstrap_lower)
+
+  # The variance estimator travels with the numbers, so an exported CSV keeps
+  # the distinction that would otherwise live only in a console warning.
+  coefficients$vcov_type <- c("Cluster-robust (HC1)", "Heteroskedasticity-robust (HC1)")
+  annotated <- linear_tests_estimates(coefficients)
+  expect_equal(annotated$note[1], "Standard errors: Cluster-robust (HC1)")
+  expect_match(annotated$note[2], "^Standard errors: Heteroskedasticity-robust \\(HC1\\); ")
+  expect_match(annotated$note[2], "disagree$")
+
+  empty <- linear_tests_estimates(data.frame())
+  expect_equal(nrow(empty), 0L)
+  expect_true(is.numeric(empty$estimate))
 })

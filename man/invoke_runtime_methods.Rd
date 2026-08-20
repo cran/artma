@@ -4,17 +4,23 @@
 \alias{invoke_runtime_methods}
 \title{Invoke methods}
 \usage{
-invoke_runtime_methods(methods, df, ...)
+invoke_runtime_methods(methods, df, modules_dir = NULL, ...)
 }
 \arguments{
 \item{methods}{\emph{[character]} A character vector of the methods to invoke.}
 
 \item{df}{\emph{[data.frame]} The data frame to invoke the methods on.}
 
+\item{modules_dir}{\emph{[character, optional]} Directory to discover runtime method modules in. Defaults to \code{NULL}, in which case the standard package methods directory is used. Used mainly for dependency injection in tests.}
+
 \item{...}{\emph{[any]} Additional arguments to pass to the methods.}
 }
 \value{
 \emph{[list]} Results of the invocations, indexed by method names.
+Failed methods are omitted; their names and error messages are attached
+as the \code{failed_methods} attribute. Methods skipped for missing columns or
+packages are attached as the \code{skipped_methods} attribute (both named
+character vectors).
 
 Internal example:
 df <- data.frame(...)
@@ -22,5 +28,20 @@ invoke_runtime_methods(c("funnel_plot", "bma", "fma"), df)
 }
 \description{
 Pass a vector of runtime methods to invoke, together with a data frame to invoke these methods on, and invoke them.
+
+Methods run in an order derived from their declared \code{depends_on} metadata
+(topologically sorted, discovery order preserved among independent methods);
+each upstream result is passed to its dependents as a \verb{<dependency>_result}
+argument. Before a method runs, its declared \code{required_columns} are checked
+against the data frame and its \code{suggests} packages against the installed
+set; a method that fails either check is skipped with an explanation rather
+than aborting the run.
+
+Method failures are isolated: a method that throws an error is skipped with
+a warning and the remaining methods still run. The run only aborts for
+invalid input (for example, unknown method names), never because a method
+failed or was skipped. Skipped and failed methods are attached as attributes
+for the closing run summary to report, and a final warning is emitted if
+every method failed.
 }
 \keyword{internal}

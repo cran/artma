@@ -1,11 +1,39 @@
+#' @title Read a template from disk
+#' @description Read a template YAML file and remove the temp block. This is the
+#'   uncached primitive; callers should go through [parse_template()] so the
+#'   parse is shared within a load.
+#' @param template_path *\[character\]* Path to the template YAML file.
+#' @param mtime *\[numeric\]* Modification time of the template, used only as a
+#'   cache key by the memoised wrapper.
+#' @keywords internal
+.read_template_from_disk <- function(template_path, mtime) { # nolint: object_name_linter.
+  template <- yaml::read_yaml(template_path)
+  template[["temp"]] <- NULL
+  template
+}
+
+# Memoised on (path, mtime) so every template consumer within a single load
+# shares one disk read. The mtime key invalidates the cache when the file
+# changes on disk.
+.parse_template_memoised <- memoise::memoise(.read_template_from_disk) # nolint: object_name_linter.
+
+#' @title Parse an options template
+#' @description Read and cache a template YAML file, keyed on its path and
+#'   modification time. All template consumers share this parse, so a template
+#'   is read from disk at most once per load.
+#' @param template_path *\[character\]* Path to the template YAML file.
+#' @return A list of template options with the temp block removed.
+parse_template <- function(template_path) {
+  mtime <- as.numeric(file.mtime(template_path))
+  .parse_template_memoised(template_path, mtime)
+}
+
 #' @title Read template
 #' @description Read a template YAML file and remove the temp block.
 #' @param template_path *\[character\]* Path to the template YAML file.
 #' @return A list of template options.
 read_template <- function(template_path) {
-  template <- yaml::read_yaml(template_path)
-  template[["temp"]] <- NULL
-  template
+  parse_template(template_path)
 }
 
 #' @title Check if a node is an option definition
@@ -32,9 +60,9 @@ flatten_template_options <- function(x, parent = NULL) {
     path <- if (is.null(parent)) nm else paste(parent, nm, sep = ".")
     node <- x[[nm]]
 
-    # <U+2500><U+2500><U+25BA> A leaf?  (= list that has a 'type' field)
+    # --> A leaf?  (= list that has a 'type' field)
     if (is_option_def(node)) {
-      node$name <- path # <<U+2500><U+2500> add the synthetic name
+      node$name <- path # <-- add the synthetic name
       flattened[[length(flattened) + 1L]] <- node
       next
     }
@@ -85,8 +113,25 @@ get_template_defaults <- function(template_path, prefix = NULL) {
   defaults
 }
 
+#' @title Check whether a value can be descended into
+#' @description A value is only worth recursing into when it is a list that
+#'   carries a name for every element. Unnamed lists (YAML sequences), partially
+#'   named lists and empty mappings have nothing to key a flat path on, so
+#'   descending would silently discard them; they are taken whole instead.
+#' @param value *\[any\]* The value to test.
+#' @return *\[logical\]* Whether the value should be descended into.
+is_descendable <- function(value) {
+  if (!is.list(value) || length(value) == 0) {
+    return(FALSE)
+  }
+  nms <- names(value)
+  !is.null(nms) && all(nzchar(nms))
+}
+
 #' @title Flatten user options
 #' @description Flattens a nested user-supplied YAML object *but* stops at template leaves
+#' @details Values are assigned with single-bracket indexing so an explicit
+#'   YAML `null` is preserved as a `NULL` element rather than deleting the key.
 #' @param user_options *\[list\]* A nested list returned by yaml::read_yaml()
 #' @param leaf_set *\[character\]* A character vector with the leaf paths
 #' @param parent *\[character\]* The current parent path
@@ -95,16 +140,17 @@ flatten_user_options <- function(user_options, leaf_set, parent = NULL) {
 
   for (nm in names(user_options)) {
     path <- if (is.null(parent)) nm else paste(parent, nm, sep = ".")
+    value <- user_options[[nm]]
 
-    # <U+2500><U+2500><U+25BA> If we've reached a declared template leaf, take the whole value as-is
-    if (path %in% leaf_set || !is.list(user_options[[nm]])) {
-      flat[[path]] <- user_options[[nm]]
+    # --> If we've reached a declared template leaf, take the whole value as-is
+    if (path %in% leaf_set || !is_descendable(value)) {
+      flat[path] <- list(value)
       next
     }
 
     # Otherwise keep descending
     flat <- c(flat, flatten_user_options(
-      user_options = user_options[[nm]],
+      user_options = value,
       leaf_set = leaf_set,
       parent = path
     ))
@@ -140,35 +186,29 @@ get_option_defs <- function(template_path = NULL, opt_path = NULL) {
 }
 
 
-#' @title Resolve a fixed option
-#' @description Resolve a fixed option, either using a default value or throwing an error if no default is provided.
-#' @param opt [list] Option definition.
-#' @param user_input [list] A named list of user-provided values.
-#' `any` The resolved value for the fixed option.
+#' @title Sanitize a raw prompt answer
+#' @description Trim surrounding whitespace from a `readline()` answer and, for
+#'   path prompts, strip surrounding quotes. Windows Explorer's "Copy as path"
+#'   wraps the path in double quotes, and a quoted path fails every
+#'   `file.exists()` check downstream.
+#' @param input_val [character] The raw answer.
+#' @param prompt_type [character] The prompt type the answer was collected for.
+#' @return [character] The sanitized answer.
 #' @keywords internal
-resolve_fixed_option <- function(opt, user_input) {
-  box::use(
-    artma / const[CONST],
-    artma / libs / core / utils[get_verbosity]
-  )
+sanitize_prompt_input <- function(input_val, prompt_type) {
+  box::use(artma / libs / core / string[trim_quotes])
 
-  if (!is.null(user_input[[opt$name]])) {
-    if (user_input[[opt$opt_name]] == opt$default) {
-      return(opt$default)
-    }
-    # User tried to set a value for a fixed option to a non-default value
-    if (get_verbosity() >= 2) {
-      cli::cli_alert_warning("Ignoring user-provided value for fixed option {CONST$STYLES$OPTIONS$NAME(opt$name)}.")
-    }
+  if (!is.character(input_val) || length(input_val) != 1 || is.na(input_val)) {
+    return(input_val)
   }
-  if (!is.null(opt$default)) {
-    return(opt$default)
+
+  input_val <- trimws(input_val)
+
+  if (prompt_type %in% c("file", "directory")) {
+    input_val <- trimws(trim_quotes(input_val))
   }
-  if (is.null(opt$default)) {
-    cli::cli_abort("Required option {CONST$STYLES$OPTIONS$NAME(opt$name)} is fixed, but no default is provided.")
-  } else {
-    NULL # Not required, no default
-  }
+
+  input_val
 }
 
 #' @title Prompt user for a required value with no default
@@ -229,6 +269,7 @@ prompt_user_for_option_value <- function(opt) {
 
   hint_msg <- if (length(hints)) paste0(" (or ", paste(hints, collapse = ", "), ")") else ""
   input_val <- readline(prompt = cli::format_inline("Enter a value for {.strong {opt$name}}{hint_msg}: "))
+  input_val <- sanitize_prompt_input(input_val, prompt_type)
 
   if (input_val == "choose" || is.na(input_val) || (!nzchar(input_val) && prompt_type %in% c("file", "directory"))) {
     input_val <- switch(prompt_type,
@@ -238,30 +279,8 @@ prompt_user_for_option_value <- function(opt) {
     )
     Sys.sleep(0.5) # Allow tk to print the closing message into the console
   } else if (input_val == "mock" && prompt_type == "file") {
-    # Generate mock data and save to temp file
-    box::use(
-      artma / testing / mocks / mock_df[create_mock_df],
-      artma / libs / core / utils[get_verbosity]
-    )
-
-    if (get_verbosity() >= 3) {
-      cli::cli_alert_info("Generating mock data...")
-    }
-
-    # Create temp file in R temp directory
-    temp_file <- tempfile(pattern = "artma-mock-data-", fileext = ".csv")
-
-    # Generate mock data frame and save to temp file
-    mock_df <- create_mock_df(
-      with_file_creation = TRUE,
-      file_path = temp_file
-    )
-
-    if (get_verbosity() >= 3) {
-      cli::cli_alert_success("Mock data generated and saved to {.path {temp_file}}")
-    }
-
-    input_val <- temp_file
+    box::use(artma / data / mock[materialize_mock_data_path])
+    input_val <- materialize_mock_data_path()
   }
 
   val_is_empty <- (!nzchar(input_val) || rlang::is_empty(input_val))
@@ -286,13 +305,12 @@ prompt_user_for_option_value <- function(opt) {
 #' @param is_interactive [logical(1)] Whether to prompt the user for missing/required values.
 #' @keywords internal
 resolve_option_value <- function(
-    opt,
-    user_input) {
-  is_interactive <- interactive()
+  opt,
+  user_input
+) {
+  box::use(artma / const[CONST])
 
-  if (isTRUE(opt$fixed)) {
-    return(resolve_fixed_option(opt, user_input))
-  }
+  is_interactive <- interactive()
 
   if (opt$name %in% names(user_input)) {
     return(user_input[[opt$name]])
@@ -307,27 +325,28 @@ resolve_option_value <- function(
   }
 
   # 3) No user value, no default
-  if (is.null(opt$default)) {
-    if (!is_interactive) {
-      cli::cli_abort("Required option {CONST$STYLES$OPTIONS$NAME(opt$name)} not provided, and no default is available.")
-    }
-    return(prompt_user_for_option_value(opt))
+  if (!is_interactive) {
+    cli::cli_abort("Required option {CONST$STYLES$OPTIONS$NAME(opt$name)} not provided, and no default is available.")
   }
-
-  cli::cli_abort("Unreachable code reached.")
+  prompt_user_for_option_value(opt)
 }
 
 
 #' @title Coerce an option value
-#' @description A helper function that attempts to coerce an option value to the correct type. If it fails, it passes the value as is.
-#' @param val [any] The value to validate or coerce.
+#' @description Coerce an option value to the type declared in its template
+#'   definition. Coercion is fail-loud: if the value cannot be represented as the
+#'   expected type (a non-numeric in a numeric option, a fractional in an integer
+#'   option, a value outside an enum's members), it aborts naming the option, the
+#'   raw value, and the expected type instead of silently returning the original.
+#' @param val [any] The value to coerce.
 #' @param opt [list] The option definition.
 #' `any` The coerced value.
 #' @keywords internal
 coerce_option_value <- function(val, opt) {
   box::use(
     artma / const[CONST],
-    artma / libs / core / utils[get_verbosity]
+    artma / libs / core / utils[get_verbosity],
+    artma / options / type_registry[get_option_type_spec]
   )
 
   # If the value is NULL, there's nothing to coerce
@@ -335,54 +354,39 @@ coerce_option_value <- function(val, opt) {
     return(val)
   }
 
-  if (length(val) == 1 && is.na(val) && isTRUE(opt$allow_na)) {
+  spec <- get_option_type_spec(opt$type)
+  na_allowed <- isTRUE(opt$allow_na) && isTRUE(spec$allows_na)
+
+  if (length(val) == 1 && is.na(val) && na_allowed) {
     return(val)
   }
 
-  # Enumerations, e.g. "enum: red|blue|green", return as is
-  if (startsWith(opt$type, "enum:")) {
-    return(val)
-  }
-
-  enforce_na_allowed <- function(val, opt) {
-    if (any(is.na(val)) && !isTRUE(opt$allow_na)) {
+  enforce_na_allowed <- function(v) {
+    if (any(is.na(v)) && !na_allowed) {
       cli::cli_abort("Option {CONST$STYLES$OPTIONS$NAME(opt$name)} does not allow NA values.")
     }
   }
 
-  tryCatch(
-    {
-      enforce_na_allowed(val, opt)
+  enforce_na_allowed(val)
 
-      coerced_val <- switch(opt$type,
-        character = as.character(val),
-        integer = as.integer(val),
-        logical = as.logical(val),
-        numeric = as.numeric(val),
-        list = as.list(val),
-        val
-      )
+  # Per-type coercion (character/integer/logical/numeric/list/enum) lives in the
+  # option type registry, shared with validate_option_value.
+  coerced_val <- spec$coerce(val, opt)
 
-      if (isTRUE(opt$standardize) && opt$type == "character") {
-        standard_val <- make.names(coerced_val)
-        if (standard_val != coerced_val && !is.na(coerced_val)) {
-          if (get_verbosity() >= 2) {
-            cli::cli_alert_warning(
-              "Option {CONST$STYLES$OPTIONS$NAME(opt$name)} does not allow non-standard values. Standardizing from {CONST$STYLES$OPTIONS$VALUE(val)} to {CONST$STYLES$OPTIONS$VALUE(standard_val)}."
-            )
-          }
-        }
-        coerced_val <- standard_val
+  if (isTRUE(opt$standardize) && opt$type == "character") {
+    standard_val <- make.names(coerced_val)
+    if (standard_val != coerced_val && !is.na(coerced_val)) {
+      if (get_verbosity() >= 2) {
+        cli::cli_alert_warning(
+          "Option {CONST$STYLES$OPTIONS$NAME(opt$name)} does not allow non-standard values. Standardizing from {CONST$STYLES$OPTIONS$VALUE(val)} to {CONST$STYLES$OPTIONS$VALUE(standard_val)}."
+        )
       }
+    }
+    coerced_val <- standard_val
+  }
 
-      # In come invalid cases, the coercion will return NA.
-      # We re-throw an error and catch it to return the original value.
-      # This makes it easier to find the invalid value afterwards.
-      enforce_na_allowed(coerced_val, opt)
-      coerced_val
-    },
-    error = function(e) val # Return the original value if coercion fails
-  )
+  enforce_na_allowed(coerced_val)
+  coerced_val
 }
 
 #' @title Parse options from a template
@@ -393,10 +397,11 @@ coerce_option_value <- function(val, opt) {
 #' @param add_prefix [logical(1)] Whether to add a package prefix to all. Defaults to FALSE.
 #' #' `list` A list of options
 parse_options_from_template <- function(
-    path,
-    user_input = list(),
-    interactive = TRUE,
-    add_prefix = FALSE) {
+  path,
+  user_input = list(),
+  interactive = TRUE,
+  add_prefix = FALSE
+) {
   box::use(
     artma / const[CONST],
     artma / libs / core / validation[assert_options_template_exists],
@@ -408,11 +413,12 @@ parse_options_from_template <- function(
   options_def <- flatten_template_options(raw_template_options)
 
   parsed_options <- list()
-  column_name_prefix <- "data.colnames."
+  columns_option_name <- "data.columns"
 
-  # First pass: Resolve non-column-name options (especially data.source_path)
+  # First pass: Resolve everything except the unified column store
+  # (especially data.source_path, which column preprocessing depends on)
   for (opt in options_def) {
-    if (!startsWith(opt$name, column_name_prefix)) {
+    if (opt$name != columns_option_name) {
       val <- resolve_option_value(opt, user_input)
       val <- coerce_option_value(val, opt)
       # We do not validate here, only after all options are parsed
@@ -423,12 +429,13 @@ parse_options_from_template <- function(
     }
   }
 
-  # Now that data.source_path might be resolved, run column preprocessing
+  # Now that data.source_path might be resolved, run column preprocessing to
+  # build the role records of the unified column store
   user_input <- preprocess_column_mapping(user_input, options_def)
 
-  # Second pass: Resolve column name options (should now be in user_input from preprocessing)
+  # Second pass: Resolve the unified column store (now possibly in user_input)
   for (opt in options_def) {
-    if (startsWith(opt$name, column_name_prefix)) {
+    if (opt$name == columns_option_name) {
       val <- resolve_option_value(opt, user_input)
       val <- coerce_option_value(val, opt)
       # We do not validate here, only after all options are parsed
@@ -445,11 +452,15 @@ parse_options_from_template <- function(
 }
 
 box::export(
+  coerce_option_value,
+  sanitize_prompt_input,
   collect_leaf_paths,
   flatten_template_options,
   flatten_user_options,
+  is_descendable,
   get_template_defaults,
   get_option_defs,
   parse_options_from_template,
+  parse_template,
   read_template
 )

@@ -7,11 +7,13 @@ box_plot <- function(df) {
   box::use(
     artma / data_config / read[get_data_config],
     artma / libs / core / utils[get_verbosity],
-    artma / libs / core / validation[assert, validate, validate_columns],
+    artma / libs / core / validation[validate, validate_columns],
     artma / libs / core / autonomy[should_prompt_user],
+    artma / modules / runtime_methods[new_method_result],
     artma / options / index[get_option_group],
+    artma / options / resolver[opt_spec, resolve_options],
     artma / visualization / options[get_visualization_options],
-    artma / visualization / export[save_plot, build_export_filename, ensure_export_dir]
+    artma / visualization / export[export_named_plots, preview_plot]
   )
 
   validate(is.data.frame(df))
@@ -25,22 +27,25 @@ box_plot <- function(df) {
   opt <- get_option_group("artma.methods.box_plot")
   vis <- get_visualization_options()
 
-  factor_by <- opt$factor_by %||% NA_character_
-  max_boxes <- opt$max_boxes %||% 60L
+  resolved <- resolve_options(opt, list(
+    factor_by = opt_spec(default = NA_character_, type = "character", allow_na = TRUE),
+    max_per_plot = opt_spec(
+      default = 60L, type = "numeric", from = "max_boxes_per_plot",
+      constraint = function(x) x > 0,
+      constraint_msg = "max_boxes_per_plot must be positive"
+    ),
+    show_mean_line = opt_spec(default = TRUE, type = "logical"),
+    effect_label = opt_spec(default = "effect", type = "character")
+  ))
+
+  factor_by <- resolved$factor_by
+  max_per_plot <- resolved$max_per_plot
+  show_mean_line <- resolved$show_mean_line
+  effect_label <- resolved$effect_label
   theme_name <- vis$theme
-  show_mean_line <- opt$show_mean_line %||% TRUE
-  effect_label <- opt$effect_label %||% "effect"
   export_graphics <- vis$export_graphics
   export_path <- vis$export_path
   graph_scale <- vis$graph_scale
-
-  validate(
-    is.numeric(max_boxes),
-    is.logical(show_mean_line),
-    is.character(effect_label)
-  )
-
-  assert(max_boxes > 0, "max_boxes must be positive")
 
   factor_by <- resolve_factor_by(df, config, factor_by)
 
@@ -48,10 +53,10 @@ box_plot <- function(df) {
     if (get_verbosity() >= 2) {
       cli::cli_alert_warning("No suitable grouping variable found. Skipping box plot.")
     }
-    return(invisible(list(
+    return(invisible(new_method_result(
       plots = list(),
-      factor_by = NULL,
-      n_groups = 0L
+      meta = list(factor_by = NULL, n_groups = 0L),
+      class = "artma_box_plot"
     )))
   }
 
@@ -62,7 +67,7 @@ box_plot <- function(df) {
   result <- create_box_plots(
     df = df,
     factor_by = factor_by,
-    max_boxes = max_boxes,
+    max_per_plot = max_per_plot,
     theme_name = theme_name,
     show_mean_line = show_mean_line,
     effect_label = effect_label
@@ -75,22 +80,28 @@ box_plot <- function(df) {
       if (n_plots > 1) {
         cli::cli_alert_info("Displaying plot {i}/{n_plots}")
       }
-      suppressWarnings(print(result$plots[[i]])) # nolint: undesirable_function_linter.
+      preview_plot(result$plots[[i]])
     }
   }
 
   if (export_graphics) {
-    export_box_plots(
+    export_named_plots(
       plots = result$plots,
-      factor_by = factor_by,
+      base_name = "box_plot",
       export_path = export_path,
-      graph_scale = graph_scale
+      graph_scale = graph_scale,
+      names = factor_by,
+      width = 800,
+      height = 1100
     )
   }
 
-  # Add class for clean printing (print method defined in R/print.R)
-  class(result) <- c("artma_box_plot", class(result))
-  invisible(result)
+  # Class attached for clean printing (print method defined in R/print.R)
+  invisible(new_method_result(
+    plots = result$plots,
+    meta = list(factor_by = factor_by, n_groups = result$n_groups),
+    class = "artma_box_plot"
+  ))
 }
 
 
@@ -122,8 +133,8 @@ resolve_factor_by <- function(df, config, factor_by_option) {
   }
 
   # For box plots, study labels/IDs are almost always the right choice, so we only prompt
-  # at low autonomy levels (1-2). At medium and above, auto-select.
-  if (should_prompt_user(required_level = 3) && length(candidates) > 1) {
+  # below the "balanced" autonomy level. At "balanced" and above, auto-select.
+  if (should_prompt_user(required_level = "balanced") && length(candidates) > 1) {
     box::use(artma / interactive / box_plot[prompt_factor_by_selection])
     return(prompt_factor_by_selection(df, config, candidates))
   }
@@ -149,12 +160,11 @@ resolve_factor_by <- function(df, config, factor_by_option) {
 #' @return *\[character\]* Vector of candidate variable names
 #' @keywords internal
 detect_factor_candidates <- function(df, config) {
+  box::use(artma / data / utils[get_reserved_colnames])
+
   # For box plots, include study identifiers as candidates (unlike other methods),
   # but exclude numeric identifiers and computed columns
-  excluded_names <- c(
-    "effect", "se", "t_stat", "study_size",
-    "n_obs", "sample_size", "dof", "reg_dof", "precision", "obs_id"
-  )
+  excluded_names <- setdiff(get_reserved_colnames(), c("study_id", "study_label"))
 
   var_names <- setdiff(names(df), excluded_names)
 
@@ -164,7 +174,7 @@ detect_factor_candidates <- function(df, config) {
 
   candidates <- character(0)
 
-  # Study identifier columns are always valid grouping variables; downstream splits by max_boxes
+  # Study identifier columns are always valid grouping variables; downstream splits by max_boxes_per_plot
   max_levels_default <- 200L
   max_levels_numeric <- 30L
   max_levels_study <- 10000L
@@ -234,17 +244,18 @@ detect_factor_candidates <- function(df, config) {
 #'
 #' @description
 #' Creates one or more box plots, splitting data if there are too many unique factor values.
+#' When splitting is needed, plots are balanced so each has a similar number of boxes.
 #'
 #' @param df *\[data.frame\]* The data frame
 #' @param factor_by *\[character\]* Variable to group by
-#' @param max_boxes *\[integer\]* Maximum boxes per plot
+#' @param max_per_plot *\[integer\]* Maximum boxes per plot
 #' @param theme_name *\[character\]* Theme name
 #' @param show_mean_line *\[logical\]* Whether to show mean line
 #' @param effect_label *\[character\]* Label for effect axis
 #'
 #' @return *\[list\]* List with plots, factor_by, and n_groups
 #' @keywords internal
-create_box_plots <- function(df, factor_by, max_boxes, theme_name, show_mean_line, effect_label) {
+create_box_plots <- function(df, factor_by, max_per_plot, theme_name, show_mean_line, effect_label) {
   box::use(artma / libs / core / validation[validate])
 
   validate(
@@ -257,7 +268,7 @@ create_box_plots <- function(df, factor_by, max_boxes, theme_name, show_mean_lin
   unique_factors <- sort(unique(stats::na.omit(factor_values)))
   n_factors <- length(unique_factors)
 
-  if (n_factors <= max_boxes) {
+  if (n_factors <= max_per_plot) {
     plot <- create_single_box_plot(
       df = df,
       factor_by = factor_by,
@@ -272,15 +283,15 @@ create_box_plots <- function(df, factor_by, max_boxes, theme_name, show_mean_lin
     ))
   }
 
-  datasets <- list()
-  remaining_factors <- unique_factors
-  while (length(remaining_factors) > 0) {
-    upper_bound <- min(max_boxes, length(remaining_factors))
-    split_factors <- remaining_factors[seq_len(upper_bound)]
-    subset_mask <- factor_values %in% split_factors
-    datasets[[length(datasets) + 1]] <- df[subset_mask, , drop = FALSE]
-    remaining_factors <- remaining_factors[!remaining_factors %in% split_factors]
-  }
+  # Balance factors across plots so each plot has a similar number of boxes
+  n_plots <- ceiling(n_factors / max_per_plot)
+  chunk_size <- ceiling(n_factors / n_plots)
+  factor_chunks <- split(unique_factors, ceiling(seq_along(unique_factors) / chunk_size))
+
+  datasets <- lapply(factor_chunks, function(chunk_factors) {
+    subset_mask <- factor_values %in% chunk_factors
+    df[subset_mask, , drop = FALSE]
+  })
 
   plots <- lapply(datasets, function(subset_df) {
     create_single_box_plot(
@@ -327,8 +338,15 @@ create_single_box_plot <- function(df, factor_by, theme_name, show_mean_line, ef
   factor_levels <- rev(sort(unique(stats::na.omit(factor_values))))
   factor_by_verbose <- gsub("_", " ", factor_by)
 
-  plot_df <- df
-  plot_df[[".factor"]] <- factor(factor_values, levels = factor_levels)
+  # Only the two mapped columns are needed. Passing the whole data frame makes
+  # the plot fail on any unrelated column irregularity (duplicate names in
+  # particular, which ggplot2 rejects outright).
+  plot_df <- data.frame(
+    effect = df[["effect"]],
+    .factor = factor(factor_values, levels = factor_levels),
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
 
   p <- ggplot2::ggplot(
     data = plot_df,
@@ -362,52 +380,16 @@ create_single_box_plot <- function(df, factor_by, theme_name, show_mean_line, ef
 }
 
 
-#' Export box plots to files
-#'
-#' @param plots *\[list\]* List of ggplot objects
-#' @param factor_by *\[character\]* Factor variable name
-#' @param export_path *\[character\]* Directory path
-#' @param graph_scale *\[numeric\]* Scale factor
-#'
-#' @return NULL (invisibly)
-#' @keywords internal
-export_box_plots <- function(plots, factor_by, export_path, graph_scale) {
-  box::use(
-    artma / libs / core / utils[get_verbosity],
-    artma / visualization / export[save_plot, build_export_filename, ensure_export_dir]
-  )
-
-  ensure_export_dir(export_path)
-  n_plots <- length(plots)
-  use_indexing <- n_plots > 1
-
-  for (i in seq_along(plots)) {
-    index <- if (use_indexing) i else NULL
-    filename <- build_export_filename("box_plot", factor_by, index = index)
-    full_path <- file.path(export_path, filename)
-
-    save_plot(
-      plot = plots[[i]],
-      path = full_path,
-      width = 800,
-      height = 1100,
-      scale = graph_scale
-    )
-  }
-
-  invisible(NULL)
-}
-
 
 box::use(
-  artma / libs / infrastructure / cache[cache_cli_runner],
-  artma / data / cache_signatures[build_data_cache_signature]
+  artma / modules / runtime_methods[register_runtime_method]
 )
 
-run <- cache_cli_runner(
+run <- register_runtime_method(
   box_plot,
   stage = "box_plot",
-  key_builder = function(...) build_data_cache_signature()
+  description = "Box plots of the effect grouped by a categorical variable",
+  required_columns = "effect"
 )
 
 box::export(box_plot, run)

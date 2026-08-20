@@ -28,7 +28,7 @@ When you run this in an interactive R session, artma will:
 4. **Let you choose methods** - Select which analyses you want to run
 5. **Run your analysis** - Execute everything and return results
 
-If you want artma to open the results folder for you at the end of a run, set `open_results = TRUE`. You can always access your results later manually using `artma::results.open()`.
+If you want artma to open the results folder for you at the end of a run, set `open_results = TRUE`. You can always access your results later manually using `artma::results_open()`.
 
 That's it! The function handles all the complexity behind the scenes.
 
@@ -83,9 +83,10 @@ Methods are the analytical functions that perform specific meta-analysis tasks. 
 - `nonlinear_tests` - Test nonlinear relationships
 - `exogeneity_tests` - Test for endogeneity
 - `p_hacking_tests` - Detect p-hacking patterns
+- `maive` - MAIVE estimator, correcting for publication bias, p-hacking, and spurious precision
 - `variable_summary_stats` - Summary statistics for variables
 
-You can run one method, multiple methods, or all methods in a single call.
+You can run one method, multiple methods, or all methods in a single call. For a full description of every method, see the [Methods Overview](methods-overview.html) vignette.
 
 ## Common Workflows
 
@@ -139,12 +140,14 @@ For scripts and automation:
 
 ```r
 # Create options file programmatically
-artma::options.create(
+artma::options_create(
   options_file_name = "analysis_2025",
   user_input = list(
     "data.source_path" = "/path/to/data.csv",
-    "data.colnames.effect" = "effect_size",
-    "data.colnames.se" = "standard_error",
+    "data.columns" = list(
+      effect = list(source_name = "effect_size"),
+      se = list(source_name = "standard_error")
+    ),
     "methods.effect_summary_stats.conf_level" = 0.95
   )
 )
@@ -211,6 +214,28 @@ effect_results <- results$effect_summary_stats
 str(effect_results)
 ```
 
+### What a Run Leaves on Disk
+
+A run that saves results writes them into its output directory (`tables/` for
+the exported tables, `graphics/` for the plots) together with a `run.json`
+manifest describing that run: when it happened, which options file and data
+source it used, the methods requested, run, skipped and failed, the effective
+seed, and the files it wrote.
+
+The file list is recorded as the files are written, so it describes the run
+rather than everything that has piled up in the directory. That is what the
+HTML report uses to find each method's plots, and what the CLI reports in
+`--json` mode.
+
+Every run also closes with a `Run summary` block on the console: the same
+facts, read from the same sources, so the manifest and what you saw scroll by
+never disagree.
+
+`run.json` is overwritten by every run into the same output directory: it
+always describes the latest run, never a history. Runs driven by different
+options files already get their own output directory. To keep an older run,
+copy its directory, or point `output.dir` at a per-run location.
+
 ## Choosing Methods
 
 ### Discovering Available Methods
@@ -218,7 +243,7 @@ str(effect_results)
 To see what methods are available:
 
 ```r
-artma::methods.list()
+artma::methods_list()
 ```
 
 This prints all available methods to the console.
@@ -250,15 +275,17 @@ Options files are created automatically when needed, but you can also create the
 
 ```r
 # Interactive creation
-artma::options.create()
+artma::options_create()
 
 # Programmatic creation
-artma::options.create(
+artma::options_create(
   options_file_name = "my_analysis",
   user_input = list(
     "data.source_path" = "/path/to/data.csv",
-    "data.colnames.effect" = "effect_size",
-    "data.colnames.se" = "standard_error"
+    "data.columns" = list(
+      effect = list(source_name = "effect_size"),
+      se = list(source_name = "standard_error")
+    )
   )
 )
 ```
@@ -267,16 +294,16 @@ artma::options.create(
 
 ```r
 # List all options files
-artma::options.list()
+artma::options_list()
 
 # Copy an options file
-artma::options.copy(
+artma::options_copy(
   options_file_name_from = "baseline.yaml",
   options_file_name_to = "sensitivity.yaml"
 )
 
 # Modify an options file
-artma::options.modify(
+artma::options_modify(
   options_file_name = "my_analysis.yaml",
   options_to_modify = list(
     "methods.effect_summary_stats.conf_level" = 0.99
@@ -284,7 +311,7 @@ artma::options.modify(
 )
 
 # Validate an options file
-artma::options.validate("my_analysis.yaml")
+artma::options_validate("my_analysis.yaml")
 ```
 
 For detailed information about options files, see the [Understanding Options Files](options-files.html) vignette.
@@ -369,7 +396,7 @@ options(artma.verbose = 4)  # Verbose: everything
 If you're modifying options files manually, validate them:
 
 ```r
-artma::options.validate("my_analysis.yaml")
+artma::options_validate("my_analysis.yaml")
 ```
 
 This catches errors before you run the analysis.
@@ -379,8 +406,8 @@ This catches errors before you run the analysis.
 ### Documentation
 
 - `?artma` - Main function help
-- `?artma::methods.list` - List available methods
-- `?artma::options.create` - Create options files
+- `?artma::methods_list` - List available methods
+- `?artma::options_create` - Create options files
 - Vignettes - Detailed guides (like this one!)
 
 ### Verbosity Levels
@@ -400,14 +427,13 @@ When in doubt, validate:
 
 ```r
 # Validate options file
-artma::options.validate("my_analysis.yaml")
+artma::options_validate("my_analysis.yaml")
 
 # Check available methods
-artma::methods.list()
+artma::methods_list()
 
-# Check data structure (after loading)
-df <- artma::prepare_data()
-str(df)
+# Check how artma reads and preprocesses your data
+artma::data_preview(options = "my_analysis.yaml")
 ```
 
 ## Next Steps

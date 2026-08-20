@@ -7,76 +7,92 @@ is_auto_output_dir <- function(output_dir) {
   is.null(output_dir) || is.na(output_dir) || identical(output_dir, "auto")
 }
 
-persist_auto_output_dir <- function(output_dir) {
-  box::use(artma / libs / core / utils[get_verbosity])
-
-  options_file_name <- getOption("artma.temp.file_name")
-  options_dir <- getOption("artma.temp.dir_name")
-
-  if (is.null(options_file_name) || is.null(options_dir)) {
-    if (get_verbosity() >= 4) {
-      cli::cli_inform("No options file available to persist output directory.")
-    }
-    return(invisible(FALSE))
+#' Derive the per-options-file subdirectory for auto output
+#'
+#' @description
+#' Uses the stem of the loaded options file (`artma.temp.file_name`) so that
+#' runs driven by different options files never share an output directory.
+#' The stem is sanitized to a portable character set; when no options file is
+#' loaded (or the stem sanitizes to nothing), `"default"` is used.
+#'
+#' @param file_name *\[character, optional\]* Options file name to derive the
+#'   subdirectory from. Defaults to the loaded options file, so callers that
+#'   inspect a file without loading it can pass the name explicitly.
+#' @return *\[character\]* A safe directory name.
+#' @keywords internal
+auto_output_subdir <- function(file_name = getOption("artma.temp.file_name", NULL)) {
+  if (is.null(file_name) || length(file_name) != 1L || is.na(file_name) || !nzchar(file_name)) {
+    return("default")
   }
-
-  saved <- tryCatch(
-    {
-      suppressMessages(
-        artma::options.modify(
-          options_file_name = options_file_name,
-          options_dir = options_dir,
-          user_input = list("output.dir" = output_dir),
-          should_validate = TRUE
-        )
-      )
-      TRUE
-    },
-    error = function(e) {
-      if (get_verbosity() >= 2) {
-        cli::cli_alert_warning(
-          "Failed to persist output directory: {e$message}"
-        )
-      }
-      FALSE
-    }
-  )
-
-  if (isTRUE(saved)) {
-    options("artma.output.dir" = output_dir)
-  }
-
-  invisible(saved)
+  stem <- tools::file_path_sans_ext(basename(file_name))
+  stem <- gsub("[^A-Za-z0-9._-]+", "_", stem)
+  stem <- gsub("^[_.]+|[_.]+$", "", stem)
+  if (!nzchar(stem)) "default" else stem
 }
 
 #' Resolve the output directory path
 #'
 #' @description
 #' Reads the `artma.output.dir` option. If set to `"auto"` (default) or `NA`,
-#' returns a session-specific temporary directory. Otherwise returns the
-#' configured path as-is.
+#' returns a durable per-options-file directory under
+#' `tools::R_user_dir("artma", "data")`. Otherwise returns the configured path
+#' as-is. The `"auto"` value is never rewritten in the options file; the
+#' directory is resolved fresh on every call, so switching options files
+#' mid-session switches the output directory with it.
 #'
 #' @return *\[character\]* The resolved output directory path.
 resolve_output_dir <- function() {
   output_dir <- getOption("artma.output.dir", "auto")
 
   if (is_auto_output_dir(output_dir)) {
-    return(file.path(tempdir(), "artma-results"))
+    return(file.path(tools::R_user_dir("artma", "data"), "results", auto_output_subdir()))
   }
 
   output_dir
+}
+
+#' Check whether a path is absolute
+#'
+#' @description
+#' Recognises POSIX roots (`/foo`), Windows drive letters (`C:\\foo`, `C:/foo`)
+#' and UNC paths (`\\\\server\\share`).
+#'
+#' @param path *\[character\]* The path to test.
+#' @return *\[logical\]* `TRUE` when the path is absolute.
+#' @keywords internal
+is_absolute_path <- function(path) {
+  if (length(path) != 1L || is.na(path) || !nzchar(path)) {
+    return(FALSE)
+  }
+  grepl("^(?:[A-Za-z]:[/\\\\]|[/\\\\])", path)
 }
 
 #' Resolve the graphics subdirectory path
 #'
 #' @description
 #' Reads the `artma.visualization.export_path` option (default: `"graphics"`)
-#' and resolves it relative to the given output directory.
+#' and resolves it relative to the given output directory. A `~` is expanded
+#' first, so `~/figures` is treated as the absolute path it denotes. An absolute
+#' `export_path` is returned as-is; joining it to `output_dir` would otherwise
+#' produce a nested copy of the whole absolute path under the results directory.
+#'
+#' This is the single place graphics paths are resolved. Every caller that needs
+#' the directory plots are written to must route through it, otherwise the
+#' directory that gets created and the directory that gets written to drift
+#' apart for absolute paths.
 #'
 #' @param output_dir *\[character\]* The base output directory.
+#' @param export_path *\[character, optional\]* The configured export path.
+#'   Defaults to the `artma.visualization.export_path` option.
 #' @return *\[character\]* The resolved graphics directory path.
-resolve_graphics_dir <- function(output_dir) {
-  export_path <- getOption("artma.visualization.export_path", "graphics")
+resolve_graphics_dir <- function(output_dir, export_path = NULL) {
+  export_path <- export_path %||% getOption("artma.visualization.export_path", "graphics")
+  if (length(export_path) == 1L && !is.na(export_path) && nzchar(export_path)) {
+    export_path <- path.expand(export_path)
+  }
+  if (is_absolute_path(export_path)) {
+    return(export_path)
+  }
   file.path(output_dir, export_path)
 }
 
@@ -90,28 +106,92 @@ resolve_graphics_dir <- function(output_dir) {
 ensure_output_dirs <- function(output_dir) {
   dir.create(file.path(output_dir, "tables"), recursive = TRUE, showWarnings = FALSE)
   dir.create(resolve_graphics_dir(output_dir), recursive = TRUE, showWarnings = FALSE)
-
-  if (is_auto_output_dir(getOption("artma.output.dir", "auto"))) {
-    persist_auto_output_dir(output_dir)
-  }
 }
 
-#' Save a data frame as CSV
+SUPPORTED_TABLE_FORMATS <- c("csv", "tex")
+
+#' Resolve the table export formats
+#'
+#' @description
+#' Reads the `artma.output.table_formats` option and normalises it: values are
+#' lowercased and de-duplicated, unsupported ones are dropped with a warning,
+#' and an empty result falls back to CSV so a run never silently produces no
+#' tables.
+#'
+#' @return *\[character\]* The requested formats, a subset of `csv` and `tex`.
+#' @keywords internal
+resolve_table_formats <- function() {
+  box::use(artma / libs / core / utils[get_verbosity])
+
+  requested <- getOption("artma.output.table_formats", "csv")
+  formats <- unique(tolower(as.character(requested)))
+  formats <- formats[!is.na(formats)]
+
+  unsupported <- setdiff(formats, SUPPORTED_TABLE_FORMATS)
+  if (length(unsupported) > 0 && get_verbosity() >= 2) {
+    cli::cli_alert_warning(
+      "Ignoring unsupported table format{?s}: {.val {unsupported}}."
+    )
+  }
+
+  formats <- intersect(SUPPORTED_TABLE_FORMATS, formats)
+  if (length(formats) == 0) "csv" else formats
+}
+
+#' Turn a table basename into a human-readable caption
+#'
+#' @param name *\[character\]* The table basename.
+#' @return *\[character\]* The caption text.
+#' @keywords internal
+table_caption <- function(name) {
+  words <- strsplit(gsub("_", " ", name), " ", fixed = TRUE)[[1]]
+  words <- words[nzchar(words)]
+  if (length(words) == 0) {
+    return(name)
+  }
+  substr(words, 1, 1) <- toupper(substr(words, 1, 1))
+  paste(words, collapse = " ")
+}
+
+#' Save a data frame in the configured table formats
 #'
 #' @param df *\[data.frame\]* The data frame to save.
 #' @param name *\[character\]* File name (without extension).
 #' @param output_dir *\[character\]* The base output directory.
-save_table <- function(df, name, output_dir) {
-  path <- file.path(output_dir, "tables", paste0(name, ".csv"))
-  utils::write.csv(df, file = path, row.names = FALSE)
+#' @param formats *\[character\]* The formats to write, from `resolve_table_formats()`.
+save_table <- function(df, name, output_dir, formats = resolve_table_formats()) {
+  box::use(artma / libs / infrastructure / output_files[record_output_file])
+
+  tables_dir <- file.path(output_dir, "tables")
+
+  if ("csv" %in% formats) {
+    csv_path <- file.path(tables_dir, paste0(name, ".csv"))
+    utils::write.csv(df, file = csv_path, row.names = FALSE)
+    record_output_file(csv_path)
+  }
+
+  if ("tex" %in% formats) {
+    box::use(artma / output / latex[write_latex_table])
+    tex_path <- file.path(tables_dir, paste0(name, ".tex"))
+    write_latex_table(
+      df,
+      path = tex_path,
+      caption = table_caption(name),
+      label = paste0("tab:", name)
+    )
+    record_output_file(tex_path)
+  }
+
+  invisible()
 }
 
 #' Export all results to the output directory
 #'
 #' @description
 #' Iterates over a named list of method results and exports each method's
-#' tabular data as CSV files. Graphics-only methods are skipped (they are
-#' handled by per-method export during execution).
+#' tabular data (the `estimates` and `tables` slots of the standard return
+#' contract). Graphics are written by each method during execution, so
+#' plot-only methods simply contribute no tables here.
 #'
 #' @param results *\[list\]* Named list of method results from `invoke_runtime_methods()`.
 #' @param output_dir *\[character\]* The base output directory.
@@ -134,42 +214,91 @@ export_results <- function(results, output_dir) {
   write_last_export_marker(output_dir)
 }
 
+#' Resolve the CSV basename for a table in the standard return contract
+#'
+#' @description
+#' A table keyed with a generic label (`summary`, `coefficients`, `table`), an
+#' empty key, or the method name itself is written as `<method_name>.csv`. Any
+#' other key is treated as a sub-table and written as `<method_name>_<key>.csv`
+#' (for example the caliper/elliott/maive tables of `p_hacking_tests`).
+#'
+#' @param method_name *\[character\]* The method name.
+#' @param key *\[character\]* The table's name within the `tables` list.
+#' @return *\[character\]* The CSV basename (without extension).
+#' @keywords internal
+resolve_table_basename <- function(method_name, key) {
+  generic_keys <- c("summary", "coefficients", "table")
+  if (is.null(key) || is.na(key) || !nzchar(key) ||
+    identical(key, method_name) || key %in% generic_keys) {
+    return(method_name)
+  }
+  paste0(method_name, "_", key)
+}
+
 #' Export a single method's result
 #'
-#' @param result The method's return value.
+#' @description
+#' A generic walk over the standard return contract. When the result carries an
+#' `estimates` frame with at least one row, that frame is the machine-readable
+#' artifact and takes the `<method_name>.csv` name: it is written unrounded,
+#' exactly as the method produced it, and the display table that would otherwise
+#' own that name moves to `<method_name>_display.csv`. An empty `estimates`
+#' frame (a plot-only method) is treated as no estimates at all, so no
+#' header-only CSV is written. LaTeX output is inherently presentational, so it
+#' stays driven by the display tables under their original names and the
+#' `estimates` frame is never written as `.tex`.
+#'
+#' Everything else (`plots`, `meta`) is ignored here. There are no per-method
+#' branches.
+#'
+#' @param result The method's return value (a `list` with `tables` and
+#'   `estimates` slots).
 #' @param method_name *\[character\]* The method name.
 #' @param output_dir *\[character\]* The base output directory.
 #' @keywords internal
 export_method_result <- function(result, method_name, output_dir) {
-  if (is.data.frame(result)) {
-    save_table(result, method_name, output_dir)
+  if (!is.list(result)) {
     return(invisible())
   }
 
-  if (!is.list(result)) return(invisible())
+  formats <- resolve_table_formats()
+  write_csv <- "csv" %in% formats
+  write_tex <- "tex" %in% formats
 
-  # Methods with $summary
-  if (!is.null(result$summary) && is.data.frame(result$summary)) {
-    save_table(result$summary, method_name, output_dir)
+  estimates <- result$estimates
+  # A plot-only method contributes an empty frame (or none at all). Writing it
+  # would leave a header-only CSV next to the graphics and push the display
+  # table to a `_display` name for no reason, so treat it as absent.
+  has_estimates <- is.data.frame(estimates) && nrow(estimates) > 0L
+  if (has_estimates && write_csv) {
+    save_table(estimates, method_name, output_dir, formats = "csv")
+  }
+
+  tables <- result$tables
+  if (!is.list(tables) || length(tables) == 0L) {
     return(invisible())
   }
 
-  # Methods with $coefficients (bma, fma)
-  if (!is.null(result$coefficients) && is.data.frame(result$coefficients)) {
-    save_table(result$coefficients, method_name, output_dir)
-    return(invisible())
-  }
+  table_names <- names(tables)
+  for (i in seq_along(tables)) {
+    tbl <- tables[[i]]
+    if (!is.data.frame(tbl)) next
+    key <- if (is.null(table_names)) NULL else table_names[[i]]
+    table_basename <- resolve_table_basename(method_name, key)
 
-  # p_hacking_tests: multiple sub-tables
-  sub_tables <- c("caliper", "elliott", "maive")
-  exported_any <- FALSE
-  for (sub in sub_tables) {
-    if (!is.null(result[[sub]]) && is.data.frame(result[[sub]])) {
-      save_table(result[[sub]], paste0(method_name, "_", sub), output_dir)
-      exported_any <- TRUE
+    if (write_csv) {
+      csv_basename <- if (has_estimates && identical(table_basename, method_name)) {
+        paste0(method_name, "_display")
+      } else {
+        table_basename
+      }
+      save_table(tbl, csv_basename, output_dir, formats = "csv")
+    }
+
+    if (write_tex) {
+      save_table(tbl, table_basename, output_dir, formats = "tex")
     }
   }
-  if (exported_any) return(invisible())
 
   invisible()
 }
@@ -190,6 +319,8 @@ write_last_export_marker <- function(output_dir) {
 }
 
 box::export(
+  auto_output_subdir,
+  is_auto_output_dir,
   resolve_output_dir,
   resolve_graphics_dir,
   ensure_output_dirs,

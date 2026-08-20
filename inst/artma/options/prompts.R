@@ -1,13 +1,6 @@
 # Each function in this module should take a single argument, `opt`, which is the option to prompt the user for.
 # These functions are imported into the `template.R` file, which is used to prompt the user for options.
 
-prompt_data_config <- function(opt, ...) {
-  box::use(artma / libs / core / utils[get_verbosity])
-  if (get_verbosity() >= 2) {
-    cli::cli_alert_warning("This option is not yet implemented.")
-  }
-}
-
 prompt_winsorization_level <- function(opt, ...) {
   box::use(artma / const[CONST])
 
@@ -44,7 +37,7 @@ prompt_na_handling <- function(opt, ...) {
   box::use(artma / const[CONST])
 
   choices <- c(
-    "Stop (abort if missing values found)" = "stop",
+    "Stop (leave optional columns as-is; required columns must be complete)" = "stop",
     "Remove rows (listwise deletion)" = "remove",
     "Median imputation (replace with column median)" = "median",
     "Mean imputation (replace with column mean)" = "mean",
@@ -59,7 +52,7 @@ prompt_na_handling <- function(opt, ...) {
 
   cli::cli_h3("Available strategies:")
   cli::cli_ul(c(
-    "{.strong stop}: Abort analysis if any missing values are found (safest, ensures data quality)",
+    "{.strong stop}: Leave missing values in these columns as-is and report them (safest, does not touch your data). Required columns must always be complete regardless of this setting.",
     "{.strong remove}: Remove entire rows with any missing values (listwise deletion)",
     "{.strong median}: Replace missing values with the variable's median (robust to outliers)",
     "{.strong mean}: Replace missing values with the variable's mean (assumes normality)",
@@ -94,34 +87,79 @@ prompt_na_handling <- function(opt, ...) {
   selected_value
 }
 
+prompt_se_zero_handling <- function(opt, ...) {
+  box::use(artma / const[CONST])
+
+  choices <- c(
+    "Remove rows with zero SE, with a warning (default)" = "remove",
+    "Stop (abort if zero SE found)" = "stop",
+    "Warn but keep rows with zero SE" = "warn",
+    "Ignore silently" = "ignore"
+  )
+
+  cli::cli_h1("Zero Standard Error Handling")
+  cli::cli_text("Standard errors equal to zero cause division-by-zero errors (e.g. infinite t-statistics).")
+  cli::cat_line()
+
+  cli::cli_h3("Available strategies:")
+  cli::cli_ul(c(
+    "{.strong remove}: Remove rows with zero standard errors, with a warning (recommended)",
+    "{.strong stop}: Abort analysis if any zero standard errors are found (strictest)",
+    "{.strong warn}: Warn but keep rows with zero standard errors",
+    "{.strong ignore}: Silently ignore zero standard errors"
+  ))
+  cli::cat_line()
+
+  selected <- climenu::select(
+    choices = names(choices),
+    prompt = "Select zero standard error handling strategy",
+    selected = 1 # "remove" as default
+  )
+
+  if (rlang::is_empty(selected)) {
+    cli::cli_alert_info("No selection made. Using default: {CONST$STYLES$OPTIONS$VALUE('remove')}")
+    return("remove")
+  }
+
+  selected_value <- choices[selected][[1]]
+
+  if (selected_value == "stop") {
+    cli::cli_alert_warning("Strict mode: analysis will abort if any zero standard errors are found.")
+  }
+
+  cli::cli_alert_success("Selected strategy: {CONST$STYLES$OPTIONS$VALUE(selected_value)}")
+  cli::cat_line()
+
+  selected_value
+}
+
 prompt_autonomy_level <- function(opt, ...) {
   box::use(
     artma / const[CONST],
-    artma / libs / core / autonomy[get_autonomy_levels, get_default_autonomy_level]
+    artma / libs / core / autonomy[get_default_autonomy_level]
   )
 
-  levels <- get_autonomy_levels()
+  descriptions <- c(
+    ask_more = "Prompt for most decisions, including non-critical ones.",
+    balanced = "Prompt for important decisions only.",
+    autonomous = "Minimal prompts; use defaults and auto-detection for most decisions."
+  )
+
+  levels <- CONST$AUTONOMY$LEVELS
   default_level <- get_default_autonomy_level()
+  default_index <- match(default_level, levels)
 
   cli::cli_h1("Autonomy Level")
   cli::cli_text("Autonomy controls how much user interaction is required during analysis.")
-  cli::cli_text("Higher levels mean less user interaction and more automatic decision-making.")
+  cli::cli_text("{.code interactive()} is the hard gate: non-interactive sessions never prompt, regardless of this setting.")
   cli::cat_line()
 
-  # Create a named vector where names are display text and values are the level numbers
+  # Create a named vector where names are display text and values are the level names
   choices <- stats::setNames(
-    as.integer(names(levels)), # Values: 1, 2, 3, 4, 5
+    levels,
     vapply(
-      names(levels),
-      function(lvl) {
-        level_def <- levels[[lvl]]
-        sprintf(
-          "Level %s - %s: %s",
-          lvl,
-          level_def$name,
-          level_def$description
-        )
-      },
+      levels,
+      function(lvl) sprintf("%s: %s", lvl, descriptions[[lvl]]),
       character(1)
     )
   )
@@ -129,7 +167,7 @@ prompt_autonomy_level <- function(opt, ...) {
   selected <- climenu::select(
     choices = names(choices), # Display the descriptive text
     prompt = "Select your preferred autonomy level",
-    selected = default_level # Default is index 4
+    selected = default_index
   )
 
   if (rlang::is_empty(selected)) {
@@ -147,7 +185,7 @@ prompt_autonomy_level <- function(opt, ...) {
 
 box::export(
   prompt_autonomy_level,
-  prompt_data_config,
   prompt_winsorization_level,
-  prompt_na_handling
+  prompt_na_handling,
+  prompt_se_zero_handling
 )

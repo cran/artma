@@ -33,20 +33,16 @@ handle_bma_params <- function(bma_params) {
   validate(is.list(bma_params))
 
   adj_bma_params <- list()
-  param_counts <- unique(vapply(bma_params, length, integer(1)))
+  param_lengths <- vapply(bma_params, length, integer(1))
+  multi_lengths <- unique(param_lengths[param_lengths != 1])
 
-  if (length(param_counts) == 1) {
+  if (length(multi_lengths) == 0) {
     adj_bma_params[[1]] <- bma_params
-  } else if (length(param_counts) == 2) {
-    model_count <- param_counts[!param_counts == 1]
+  } else if (length(multi_lengths) == 1) {
+    model_count <- multi_lengths
     for (i in seq_len(model_count)) {
-      single_model_params <- lapply(bma_params, function(x) x[1])
-      adj_bma_params[[i]] <- single_model_params
-      bma_params <- lapply(bma_params, function(x) {
-        if (length(x) > 1) {
-          return(x[-1])
-        }
-        x
+      adj_bma_params[[i]] <- lapply(bma_params, function(x) {
+        if (length(x) > 1) x[i] else x
       })
     }
   } else {
@@ -113,90 +109,6 @@ get_bma_formula <- function(input_var, input_data, get_var_vector_instead = FALS
 }
 
 
-#' Test the Variance Inflation Factor of a Linear Regression Model
-#'
-#' @description
-#' Tests the Variance Inflation Factor (VIF) of a linear regression model.
-#' It takes three arguments: input_var, input_data, and print_all_coefs. The function tests
-#' whether the input_var is either a vector or a formula. If it is a vector of variables, it
-#' transforms it into a formula. Then, it calculates the VIF coefficients using the vif function
-#' from the car package. If print_all_coefs is set to TRUE, the function prints all the VIF
-#' coefficients. If any of the VIF coefficients is larger than 10, the function prints a message
-#' indicating the variables with a high VIF. Otherwise, it prints a message indicating that all
-#' variables have a VIF lower than 10. Finally, the function returns the VIF coefficients as a
-#' numeric vector.
-#'
-#' @note If you input the formula, all data for these variables must be a vector with at least some variation.
-#' Otherwise the function will return an error.
-#'
-#' @param input_var *\[character | formula\]* One of - vector of variable names, formula. If it is a vector,
-#' the function transforms the input into a formula.
-#' @param input_data *\[data.frame\]* Data to run the test on.
-#' @param print_all_coefs *\[logical\]* A logical value indicating whether to print all the VIF coefficients
-#' into the console. Defaults to FALSE.
-#' @param verbose *\[logical\]* If TRUE, print out the information about the output. Defaults to TRUE.
-#'
-#' @return A numeric vector with the VIF coefficients.
-#'
-#' @export
-run_vif_test <- function(input_var, input_data, print_all_coefs = FALSE, verbose = TRUE) {
-  box::use(
-    artma / libs / core / validation[validate],
-    artma / libs / core / utils[get_verbosity]
-  )
-
-  validate(
-    any(
-      inherits(input_var, "formula"),
-      is.vector(input_var)
-    ),
-    is.data.frame(input_data),
-    is.logical(print_all_coefs),
-    is.logical(verbose)
-  )
-
-  if (is.vector(input_var)) {
-    bma_formula <- get_bma_formula(input_var, input_data)
-  } else {
-    const_cols <- vapply(input_data, function(col) length(unique(col)) > 1, logical(1))
-    if (!all(const_cols)) {
-      cli::cli_abort("All data must have at least some variation.")
-    }
-    bma_formula <- input_var
-  }
-
-  bma_reg_test <- stats::lm(formula = bma_formula, data = input_data)
-
-  if (any(is.na(stats::coef(bma_reg_test)))) {
-    problematic_vars <- names(stats::coef(bma_reg_test))[which(is.na(stats::coef(bma_reg_test)))]
-    cli::cli_abort(c(
-      "Aliased coefficients in a suggested BMA model.",
-      "i" = "There are some aliased coefficients in one of the suggested BMA model configurations.",
-      "i" = "Check colinearity in the data, remove the correlated variables, or try changing the model.",
-      "i" = "These are the problematic variables for the model: {.val {problematic_vars}}",
-      "i" = "Note that the problem may lie elsewhere too, so removing these variables may not necessarily help."
-    ))
-  }
-
-  vif_coefs <- car::vif(bma_reg_test)
-
-  if (verbose && get_verbosity() >= 3) {
-    if (print_all_coefs) {
-      cli::cli_alert_info("Variance Inflation Coefficients:")
-      cli::cat_print(vif_coefs)
-    }
-    if (any(vif_coefs > 10)) {
-      coefs_above_10_vif <- names(vif_coefs)[vif_coefs > 10]
-      cli::cli_alert_warning("These variables have a VIF larger than 10: {.val {coefs_above_10_vif}}")
-    } else {
-      cli::cli_alert_success("All BMA variables have a VIF lower than 10.")
-    }
-  }
-
-  vif_coefs
-}
-
-
 #' Search for an optimal Bayesian Model Averaging formula
 #'
 #' @description
@@ -234,6 +146,10 @@ find_optimal_bma_formula <- function(input_data, input_var_list, max_groups_to_r
     all(c("bma", "var_name", "group_category") %in% colnames(input_var_list))
   )
 
+  if (!requireNamespace("car", quietly = TRUE)) {
+    cli::cli_abort("Package {.pkg car} is required for BMA collinearity checks. Install with: install.packages('car')")
+  }
+
   input_data <- input_data[, colnames(input_data) %in% input_var_list$var_name, drop = FALSE]
 
   non_const_cols <- vapply(input_data, function(col) {
@@ -241,7 +157,11 @@ find_optimal_bma_formula <- function(input_data, input_var_list, max_groups_to_r
   }, logical(1))
   input_data <- input_data[, non_const_cols, drop = FALSE]
 
-  bma_potential_vars_bool <- input_var_list$bma & non_const_cols
+  # Mask in var-list row order: a row is usable only if its column survived the
+  # constancy filter above. Indexing by data-frame column order would pair the
+  # mask with the wrong rows whenever the orders (or lengths) differ.
+  var_is_usable <- input_var_list$var_name %in% colnames(input_data)
+  bma_potential_vars_bool <- input_var_list$bma & var_is_usable
   potential_vars <- input_var_list$var_name[bma_potential_vars_bool]
   var_grouping <- input_var_list$group_category[bma_potential_vars_bool]
 
@@ -264,9 +184,19 @@ find_optimal_bma_formula <- function(input_data, input_var_list, max_groups_to_r
     highest_vif_coef_idx <- which(potential_vars == highest_vif_coef_name)
     highest_vif_group <- var_grouping[highest_vif_coef_idx]
 
-    vars_to_remove <- potential_vars[var_grouping == highest_vif_group]
-    potential_vars <- potential_vars[!potential_vars %in% vars_to_remove]
-    var_grouping <- var_grouping[!var_grouping %in% highest_vif_group]
+    # "other" is the catch-all for unconfigured variables, not a real dummy
+    # group; removing it wholesale would wipe out every ungrouped moderator.
+    remove_whole_group <- length(highest_vif_group) == 1 &&
+      !is.na(highest_vif_group) &&
+      highest_vif_group != "other"
+    vars_to_remove <- if (remove_whole_group) {
+      potential_vars[var_grouping == highest_vif_group]
+    } else {
+      highest_vif_coef_name
+    }
+    keep_mask <- !potential_vars %in% vars_to_remove
+    potential_vars <- potential_vars[keep_mask]
+    var_grouping <- var_grouping[keep_mask]
 
     bma_formula <- get_bma_formula(potential_vars, input_data)
     bma_lm <- stats::lm(bma_formula, data = input_data)
@@ -281,7 +211,7 @@ find_optimal_bma_formula <- function(input_data, input_var_list, max_groups_to_r
     removed_groups_verbose <- c(removed_groups_verbose, vars_to_remove)
   }
 
-  if (max_groups_to_remove == 0) {
+  if (any(vif_coefs > 10)) {
     cli::cli_abort("Maximum number of groups to remove reached. Optimal BMA formula not found.")
   }
 
@@ -381,19 +311,107 @@ get_bma_data <- function(input_data, input_var_list, variable_info, scale_data =
 
   if (scale_data) {
     source_colnames <- colnames(bma_data)
+    # NA is not a level: a 0/1 dummy with missing values must stay a dummy,
+    # not get z-scored because NA inflated its unique count.
     is_binary <- function(x) {
-      length(unique(x)) == 2
+      length(unique(stats::na.omit(x))) == 2
     }
     binary_cols <- vapply(bma_data, is_binary, logical(1))
-    bma_data[, !binary_cols] <- lapply(bma_data[, !binary_cols, drop = FALSE], function(x) {
-      as.numeric(scale(x))
-    })
-    colnames(bma_data) <- source_colnames
+    centers <- stats::setNames(rep(0, length(source_colnames)), source_colnames)
+    scales <- stats::setNames(rep(1, length(source_colnames)), source_colnames)
+    for (column in source_colnames[!binary_cols]) {
+      scaled <- scale(bma_data[[column]])
+      bma_data[[column]] <- as.numeric(scaled)
+      centers[[column]] <- as.numeric(attr(scaled, "scaled:center"))
+      scales[[column]] <- as.numeric(attr(scaled, "scaled:scale"))
+    }
+    # Consumed by the best-practice estimate to move raw-scale overrides onto
+    # the standardized scale and to move its outputs back off it.
+    attr(bma_data, "bpe_scale_centers") <- centers
+    attr(bma_data, "bpe_scale_scales") <- scales
   }
 
   bma_data
 }
 
+
+#' The wall-clock reseed call embedded in `BMS::bms` (as of BMS 0.3.5)
+#'
+#' `BMS::bms` reseeds the session RNG from the wall clock right before its
+#' sampling loop, wiping whatever seed the caller (or the orchestrator's
+#' per-method RNG stream) had set. `set.seed` truncates the timestamp to whole
+#' seconds, so two calls landing in the same second coincide and any slower
+#' cadence produces a different chain every run; no amount of external seeding
+#' can make results reproducible while this call is in place.
+#'
+#' @keywords internal
+BMS_TIME_RESEED_CALL <- quote(set.seed(as.numeric(Sys.time())))
+
+#' Strip the wall-clock reseed from a copy of `BMS::bms`
+#'
+#' @description
+#' Return a copy of `fn` whose body has every occurrence of
+#' `set.seed(as.numeric(Sys.time()))` replaced with `invisible(NULL)`. The
+#' copy keeps its original environment, so a namespaced function still
+#' resolves all of its internal helpers; the installed package itself is never
+#' modified. When the pattern does not occur (for example after an upstream
+#' BMS release drops the reseed), `fn` is returned unchanged.
+#'
+#' @param fn *\[function\]* The function to copy and patch.
+#' @return *\[function\]* The patched copy, or `fn` itself when nothing matched.
+#'
+#' @export
+strip_bms_time_reseed <- function(fn) {
+  box::use(
+    artma / libs / core / validation[validate]
+  )
+
+  validate(is.function(fn))
+
+  replaced <- FALSE
+  walk <- function(expr) {
+    if (identical(expr, BMS_TIME_RESEED_CALL)) {
+      replaced <<- TRUE
+      return(quote(invisible(NULL)))
+    }
+    if (is.call(expr)) {
+      for (i in seq_along(expr)) {
+        if (!is.null(expr[[i]])) {
+          expr[[i]] <- walk(expr[[i]])
+        }
+      }
+    }
+    expr
+  }
+
+  patched_body <- walk(body(fn))
+  if (!replaced) {
+    return(fn)
+  }
+
+  body(fn) <- patched_body
+  fn
+}
+
+# Session cache for the patched `BMS::bms` copy, so the body surgery runs once
+# rather than on every model fit.
+bms_patch_cache <- new.env(parent = emptyenv())
+
+#' A deterministic copy of `BMS::bms`
+#'
+#' @description
+#' `BMS::bms` with its internal wall-clock reseed neutralized (see
+#' `strip_bms_time_reseed`), so the sampler draws from the session RNG state
+#' the caller controls. Callers must ensure the BMS namespace is available.
+#'
+#' @return *\[function\]* The patched `bms` function.
+#' @keywords internal
+deterministic_bms <- function() {
+  if (is.null(bms_patch_cache$fn)) {
+    bms_patch_cache$fn <- strip_bms_time_reseed(BMS::bms)
+  }
+  bms_patch_cache$fn
+}
 
 #' Run a Bayesian model averaging estimation
 #'
@@ -403,6 +421,11 @@ get_bma_data <- function(input_data, input_var_list, variable_info, scale_data =
 #' estimation inside the 'bms' function. Validate correct input, run the estimation, and
 #' return the BMA model without printing any results.
 #'
+#' The estimation runs on a copy of `BMS::bms` whose internal wall-clock
+#' reseed has been removed, so the MCMC draws are governed entirely by the
+#' session RNG state on entry: seed beforehand (or run under the
+#' orchestrator's per-method RNG streams) and the fit is reproducible.
+#'
 #' @param bma_data *\[data.frame\]* The data for BMA. "effect" must be in the first column.
 #' @param bma_params *\[list\]* Parameters to be used inside the "bms" function. These are:
 #' burn, iter, g, mprior, nmodel, mcmc. For more info see the "bms" function documentation.
@@ -410,7 +433,7 @@ get_bma_data <- function(input_data, input_var_list, variable_info, scale_data =
 #' @return The bma model object
 #'
 #' @export
-run_bma <- function(bma_data, bma_params) {
+run_bma <- function(bma_data, bma_params, quiet = TRUE) {
   box::use(
     artma / libs / core / validation[validate]
   )
@@ -421,6 +444,10 @@ run_bma <- function(bma_data, bma_params) {
     all(vapply(bma_data, is.numeric, logical(1))),
     colnames(bma_data)[1] == "effect"
   )
+
+  if (!requireNamespace("BMS", quietly = TRUE)) {
+    cli::cli_abort("Package {.pkg BMS} is required for Bayesian model averaging. Install with: install.packages('BMS')")
+  }
 
   all_bma_params <- c(
     list(bma_data),
@@ -436,8 +463,14 @@ run_bma <- function(bma_data, bma_params) {
     }
   )
 
-  set.seed(123)
-  bma_model <- do.call(BMS::bms, all_bma_params)
+  bms_fun <- deterministic_bms()
+  if (quiet) {
+    invisible(utils::capture.output(
+      bma_model <- do.call(bms_fun, all_bma_params)
+    ))
+  } else {
+    bma_model <- do.call(bms_fun, all_bma_params)
+  }
 
   bma_model
 }
@@ -468,8 +501,9 @@ rename_bma_model <- function(bma_model, input_var_list) {
 
   bma_names <- bma_model$reg.names
   idx <- match(bma_names, input_var_list$var_name)
-  bma_names[!is.na(idx)] <- input_var_list$var_name_verbose[stats::na.omit(idx)]
-  bma_names[is.na(idx)] <- "Intercept"
+  # Names absent from the var list stay as they are; renaming them would
+  # corrupt the labels and the downstream ma_table join.
+  bma_names[!is.na(idx)] <- input_var_list$var_name_verbose[idx[!is.na(idx)]]
   bma_model$reg.names <- bma_names
 
   bma_model
@@ -501,7 +535,8 @@ extract_bma_results <- function(bma_model, bma_data, input_var_list, print_resul
   box::use(
     artma / libs / core / validation[validate],
     artma / libs / core / utils[get_verbosity],
-    artma / visualization / colors[get_colors]
+    artma / visualization / colors[get_colors],
+    artma / libs / formatting / results[capture_print_wide]
   )
 
   validate(
@@ -527,12 +562,12 @@ extract_bma_results <- function(bma_model, bma_data, input_var_list, print_resul
     cli::cli_h3("Bayesian Model Averaging Results")
   }
 
-  if (print_results %in% c("verbose", "all")) {
+  if (print_results %in% c("verbose", "all") && get_verbosity() >= 2) {
     cli::cat_print(bma_model)
     cli::cat_print(bma_model$topmod[1])
   } else if (print_results == "fast") {
     if (get_verbosity() >= 3) {
-      cli::cat_print(bma_coefs)
+      cli::cli_verbatim(capture_print_wide(bma_coefs))
     }
   }
 
@@ -541,15 +576,20 @@ extract_bma_results <- function(bma_model, bma_data, input_var_list, print_resul
 
     main_plot_call <- bquote(
       graphics::image(bma_model,
-        col = .(color_spectrum), yprop2pip = FALSE, order.by.pip = TRUE,
+        col = .(color_spectrum), yprop2pip = FALSE, order.by.pip = TRUE, # nolint: box_usage_linter. # bquote substitution
         do.par = TRUE, do.grid = TRUE, do.axis = TRUE, xlab = "", main = ""
       )
     )
 
     dist_color_spectrum <- color_spectrum[color_spectrum != "white"]
     bma_dist_call <- bquote(
-      base::plot(bma_model, col = .(dist_color_spectrum))
+      base::plot(bma_model, col = .(dist_color_spectrum)) # nolint: box_usage_linter. # bquote substitution
     )
+
+    has_corrplot <- requireNamespace("corrplot", quietly = TRUE)
+    if (!has_corrplot && get_verbosity() >= 2) {
+      cli::cli_alert_info("Package {.pkg corrplot} is not installed; skipping the BMA correlation plot. Install with: install.packages('corrplot')")
+    }
 
     bma_matrix <- stats::cor(bma_data)
     dimnames(bma_matrix) <- lapply(dimnames(bma_matrix), function(x) {
@@ -564,17 +604,43 @@ extract_bma_results <- function(bma_model, bma_data, input_var_list, print_resul
         number.cex = 0.5, cl.cex = 0.8, cl.ratio = 0.1
       )
     )
+
+    # BMS:::image.bma drops a matrix dimension for small models and errors for
+    # 2 to 3 regressors, so only attempt the image plot once there are >= 4.
+    n_regressors <- length(bma_model$reg.names)
+    image_supported <- n_regressors >= 4L
+
+    plot_env <- environment()
+    safe_render_plot <- function(plot_call, description) {
+      tryCatch(
+        eval(plot_call, envir = plot_env),
+        error = function(e) {
+          cli::cli_warn("Could not render the BMA {description}: {conditionMessage(e)}")
+        }
+      )
+    }
+    render_bma_image <- function() {
+      if (!image_supported) {
+        cli::cli_alert_info(
+          "Skipping the BMA image plot: it needs at least 4 regressors (model has {n_regressors})."
+        )
+        return(invisible(NULL))
+      }
+      safe_render_plot(main_plot_call, "image plot")
+    }
   }
 
   if (print_results == "all" && get_verbosity() >= 3) {
     cli::cli_alert_info("Printing BMA plots...")
-    eval(main_plot_call, envir = environment())
-    eval(bma_dist_call, envir = environment())
-    eval(corrplot_mixed_call, envir = environment())
+    render_bma_image()
+    safe_render_plot(bma_dist_call, "distribution plot")
+    if (has_corrplot) {
+      safe_render_plot(corrplot_mixed_call, "correlation plot")
+    }
   }
 
   if (export_graphics) {
-    box::use(artma / visualization / export[ensure_export_dir])
+    box::use(artma / visualization / export[ensure_export_dir, open_png_device])
 
     gprior <- bma_model$gprior.info$gtype
     mprior <- bma_model$mprior.info$origargs$mpmode
@@ -591,39 +657,164 @@ extract_bma_results <- function(bma_model, bma_data, input_var_list, print_resul
       }
     }
 
-    grDevices::png(main_path,
-      width = 933 * graph_scale, height = 894 * graph_scale, units = "px",
-      res = 70 * graph_scale
-    )
-    eval(main_plot_call, envir = environment())
-    grDevices::dev.off()
+    if (image_supported) {
+      open_png_device(main_path,
+        width = 933 * graph_scale, height = 894 * graph_scale, units = "px",
+        res = 70 * graph_scale
+      )
+      safe_render_plot(main_plot_call, "image plot")
+      grDevices::dev.off()
+    } else if (get_verbosity() >= 3) {
+      cli::cli_alert_info(
+        "Skipping the BMA image plot export: it needs at least 4 regressors (model has {n_regressors})."
+      )
+    }
 
-    grDevices::png(dist_path,
+    open_png_device(dist_path,
       width = 528 * graph_scale, height = 506 * graph_scale, units = "px",
       res = 90 * graph_scale
     )
-    eval(bma_dist_call, envir = environment())
+    safe_render_plot(bma_dist_call, "distribution plot")
     grDevices::dev.off()
 
-    grDevices::png(corrplot_path,
-      width = 700 * graph_scale, height = 669 * graph_scale, units = "px",
-      res = 90 * graph_scale
-    )
-    eval(corrplot_mixed_call, envir = environment())
-    grDevices::dev.off()
+    if (has_corrplot) {
+      open_png_device(corrplot_path,
+        width = 700 * graph_scale, height = 669 * graph_scale, units = "px",
+        res = 90 * graph_scale
+      )
+      safe_render_plot(corrplot_mixed_call, "correlation plot")
+      grDevices::dev.off()
+    }
   }
 
   bma_coefs
 }
 
 
+#' Build human-readable labels distinguishing multiple BMA parameter sets
+#'
+#' @description
+#' Given the per-model parameter lists returned by `handle_bma_params()`, build a
+#' label for each model listing only the parameters that actually differ between
+#' them (e.g. "g=UIP, mprior=uniform"). Falls back to "Model N" if every parameter
+#' set is identical.
+#'
+#' @param bma_params_list *\[list\]* A list of per-model parameter lists, as returned
+#' by `handle_bma_params()`.
+#'
+#' @return *\[character\]* A vector of labels, one per entry in `bma_params_list`.
+#'
+#' @export
+build_bma_model_labels <- function(bma_params_list) {
+  box::use(
+    artma / libs / core / validation[validate]
+  )
+
+  validate(is.list(bma_params_list), length(bma_params_list) >= 1)
+
+  if (length(bma_params_list) == 1) {
+    return("Model 1")
+  }
+
+  param_names <- names(bma_params_list[[1]])
+  varying_params <- Filter(function(param_name) {
+    values <- vapply(bma_params_list, function(params) as.character(params[[param_name]]), character(1))
+    length(unique(values)) > 1
+  }, param_names)
+
+  if (!length(varying_params)) {
+    return(paste0("Model ", seq_along(bma_params_list)))
+  }
+
+  vapply(bma_params_list, function(params) {
+    paste(
+      vapply(varying_params, function(param_name) {
+        paste0(param_name, "=", params[[param_name]])
+      }, character(1)),
+      collapse = ", "
+    )
+  }, character(1))
+}
+
+
+#' Render a BMA prior-comparison plot across multiple parameter sets
+#'
+#' @description
+#' When more than one BMA parameter set is run (e.g. to compare priors), overlay
+#' their posterior statistics with `BMS::plotComp` so the effect of different
+#' configurations can be compared visually.
+#'
+#' @param bma_models *\[list\]* A named list of two or more fitted `bma` model objects
+#' to compare. The names are used as the plot legend labels.
+#' @param comp *\[character\]* The statistic to compare: "PIP", "Post Mean", "Post SD",
+#' "Std Mean", or "Std SD". Defaults to "PIP".
+#' @param export_graphics *\[logical\]* If TRUE, export the comparison plot to a file. Defaults to TRUE.
+#' @param export_path *\[character\]* Path to the export folder. Defaults to "graphics".
+#' @param graph_scale *\[numeric\]* Scale the plot by this number. Defaults to 1.
+#' @param print_plot *\[logical\]* If TRUE, also render the plot to the current graphics device. Defaults to FALSE.
+#'
+#' @return NULL (invisibly). Called for its plotting side effect.
+#'
+#' @export
+render_bma_comparison_plot <- function(bma_models, comp = "PIP", export_graphics = TRUE,
+                                       export_path = "graphics", graph_scale = 1,
+                                       print_plot = FALSE) {
+  box::use(
+    artma / libs / core / validation[validate],
+    artma / visualization / export[ensure_export_dir, open_png_device]
+  )
+
+  validate(
+    is.list(bma_models),
+    length(bma_models) >= 2,
+    all(vapply(bma_models, inherits, logical(1), what = "bma")),
+    is.character(comp),
+    is.logical(export_graphics),
+    is.character(export_path),
+    is.numeric(graph_scale),
+    is.logical(print_plot)
+  )
+
+  safe_render <- function() {
+    tryCatch(
+      do.call(BMS::plotComp, c(bma_models, list(comp = comp))),
+      error = function(e) {
+        cli::cli_warn("Could not render the BMA comparison plot: {conditionMessage(e)}")
+      }
+    )
+  }
+
+  if (print_plot) {
+    safe_render()
+  }
+
+  if (export_graphics) {
+    ensure_export_dir(export_path)
+    comparison_path <- file.path(export_path, "bma_comparison.png")
+    if (file.exists(comparison_path)) {
+      file.remove(comparison_path)
+    }
+    open_png_device(comparison_path,
+      width = 800 * graph_scale, height = 600 * graph_scale, units = "px",
+      res = 90 * graph_scale
+    )
+    safe_render()
+    grDevices::dev.off()
+  }
+
+  invisible(NULL)
+}
+
+
 box::export(
   handle_bma_params,
   get_bma_formula,
-  run_vif_test,
   find_optimal_bma_formula,
   get_bma_data,
   run_bma,
   rename_bma_model,
-  extract_bma_results
+  extract_bma_results,
+  build_bma_model_labels,
+  render_bma_comparison_plot,
+  strip_bms_time_reseed
 )

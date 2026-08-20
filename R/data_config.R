@@ -10,7 +10,7 @@
 #'   files. If `NULL` (default), the default directory is used.
 #' @return *\[list\]* The fully-resolved data config (or a single entry).
 #' @export
-config.get <- function(var_name = NULL, options_file_name = NULL, options_dir = NULL) {
+config_get <- function(var_name = NULL, options_file_name = NULL, options_dir = NULL) {
   runtime_setup( # nolint: box_usage_linter. # Imported on a package-level
     options_file_name = options_file_name,
     options_dir = options_dir,
@@ -34,14 +34,17 @@ config.get <- function(var_name = NULL, options_file_name = NULL, options_dir = 
 #'   values are persisted to the options file.
 #' @param var_name *\[character\]* The variable name to configure.
 #' @param ... Named arguments for config fields to set
-#'   (e.g., `bma = TRUE, bma_to_log = TRUE`).
+#'   (e.g., `bma = TRUE, bma_to_log = TRUE`). Column mappings are set the same
+#'   way: `source_name = "study_name"` maps the variable to that column in the
+#'   data file, and `drop_conflicting_raw = TRUE` keeps such a mapping while
+#'   dropping a different raw column that occupies the standard name.
 #' @param options_file_name *\[character, optional\]* The name of the options
 #'   file. If `NULL` (default), the user will be prompted interactively.
 #' @param options_dir *\[character, optional\]* The directory containing options
 #'   files. If `NULL` (default), the default directory is used.
 #' @return *\[list\]* The updated fully-resolved data config (invisibly).
 #' @export
-config.set <- function(var_name, ..., options_file_name = NULL, options_dir = NULL) {
+config_set <- function(var_name, ..., options_file_name = NULL, options_dir = NULL) {
   runtime_setup( # nolint: box_usage_linter. # Imported on a package-level
     options_file_name = options_file_name,
     options_dir = options_dir,
@@ -49,7 +52,11 @@ config.set <- function(var_name, ..., options_file_name = NULL, options_dir = NU
       box::use(artma / data_config / write[update_data_config])
       fields <- list(...)
       if (length(fields) == 0) {
-        cli::cli_abort("No config fields provided. Use named arguments, e.g., {.code bma = TRUE}.")
+        cli::cli_abort(c(
+          "x" = "No config fields provided.",
+          "i" = "Usage: {.code artma::config_set(\"<variable>\", <field> = <value>)}, e.g. {.code artma::config_set(\"study_id\", source_name = \"study_name\")}.",
+          "i" = "To inspect current values, use {.code artma::config_get()}."
+        ))
       }
       changes <- list()
       changes[[make.names(var_name)]] <- fields
@@ -69,7 +76,7 @@ config.set <- function(var_name, ..., options_file_name = NULL, options_dir = NU
 #'   files. If `NULL` (default), the default directory is used.
 #' @return *\[list\]* The updated fully-resolved data config (invisibly).
 #' @export
-config.reset <- function(var_name = NULL, options_file_name = NULL, options_dir = NULL) {
+config_reset <- function(var_name = NULL, options_file_name = NULL, options_dir = NULL) {
   runtime_setup( # nolint: box_usage_linter. # Imported on a package-level
     options_file_name = options_file_name,
     options_dir = options_dir,
@@ -89,13 +96,15 @@ config.reset <- function(var_name = NULL, options_file_name = NULL, options_dir 
 #'   files. If `NULL` (default), the default directory is used.
 #' @return *\[list\]* The sparse overrides (only non-default values).
 #' @export
-config.overrides <- function(options_file_name = NULL, options_dir = NULL) {
+config_overrides <- function(options_file_name = NULL, options_dir = NULL) {
   runtime_setup( # nolint: box_usage_linter. # Imported on a package-level
     options_file_name = options_file_name,
     options_dir = options_dir,
     FUN = function() {
-      overrides <- getOption("artma.data.config")
-      if (!is.list(overrides)) return(list())
+      overrides <- getOption("artma.data.columns", list())
+      if (!is.list(overrides)) {
+        return(list())
+      }
       overrides
     }
   )
@@ -110,11 +119,48 @@ config.overrides <- function(options_file_name = NULL, options_dir = NULL) {
 #'   files. If `NULL` (default), the default directory is used.
 #' @return *\[list\]* The fixed data config.
 #' @export
-config.fix <- function(options_file_name = NULL, options_dir = NULL) {
+config_fix <- function(options_file_name = NULL, options_dir = NULL) {
   box::use(artma / data_config / write[fix_data_config])
   runtime_setup( # nolint: box_usage_linter. # Imported on a package-level
     options_file_name = options_file_name,
     options_dir = options_dir,
     FUN = fix_data_config
   )
+}
+
+# Deprecated dotted aliases (see contributingGuides/API.md). Removed after 1.0.
+
+#' @rdname artma-deprecated
+#' @export
+config.get <- function(...) {
+  lifecycle::deprecate_warn("0.4.0", "config.get()", "config_get()")
+  config_get(...)
+}
+
+#' @rdname artma-deprecated
+#' @export
+config.set <- function(...) {
+  lifecycle::deprecate_warn("0.4.0", "config.set()", "config_set()")
+  config_set(...)
+}
+
+#' @rdname artma-deprecated
+#' @export
+config.reset <- function(...) {
+  lifecycle::deprecate_warn("0.4.0", "config.reset()", "config_reset()")
+  config_reset(...)
+}
+
+#' @rdname artma-deprecated
+#' @export
+config.overrides <- function(...) {
+  lifecycle::deprecate_warn("0.4.0", "config.overrides()", "config_overrides()")
+  config_overrides(...)
+}
+
+#' @rdname artma-deprecated
+#' @export
+config.fix <- function(...) {
+  lifecycle::deprecate_warn("0.4.0", "config.fix()", "config_fix()")
+  config_fix(...)
 }

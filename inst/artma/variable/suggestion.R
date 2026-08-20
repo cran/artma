@@ -44,7 +44,7 @@ suggest_variables_for_effect_summary <- function(df, config = NULL,
   box::use(
     artma / variable / detection[detect_variable_groups],
     artma / libs / core / validation[validate, assert],
-    artma / data / utils[determine_vector_type],
+    artma / data / utils[determine_vector_type, get_reserved_colnames],
     artma / const[CONST]
   )
 
@@ -64,7 +64,7 @@ suggest_variables_for_effect_summary <- function(df, config = NULL,
   groups <- detect_variable_groups(df, config = config)
 
   # Reserved columns that should never be suggested
-  reserved <- c("effect", "se", "study_id", "study_label", "study_size", "sample_size", "dof")
+  reserved <- get_reserved_colnames()
 
   results <- list()
 
@@ -129,11 +129,16 @@ suggest_variables_for_effect_summary <- function(df, config = NULL,
       next
     }
 
-    # Determine data type
-    data_type <- tryCatch(
-      determine_vector_type(var_data, CONST$DATA_CONFIG$DATA_TYPES),
-      error = function(e) "unknown"
-    )
+    # Determine data type, honoring an explicit config override
+    var_config <- config[[make.names(var_name)]]
+    data_type <- if (!is.null(var_config$data_type) && !is.na(var_config$data_type)) {
+      var_config$data_type
+    } else {
+      tryCatch(
+        determine_vector_type(var_data, CONST$DATA_CONFIG$DATA_TYPES),
+        error = function(e) "unknown"
+      )
+    }
 
     # Decision logic based on data type and values
     suggestion <- decide_variable_suggestion(
@@ -174,6 +179,31 @@ suggest_variables_for_effect_summary <- function(df, config = NULL,
 }
 
 
+#' Build a negative suggestion decision
+#'
+#' @keywords internal
+not_suggested <- function(reason) {
+  list(
+    suggested = FALSE,
+    split_method = NA_character_,
+    split_value = NA_character_,
+    reason = reason
+  )
+}
+
+#' Build a positive suggestion decision
+#'
+#' @keywords internal
+suggest_split <- function(split_method, split_value, reason) {
+  list(
+    suggested = TRUE,
+    split_method = split_method,
+    split_value = split_value,
+    reason = reason
+  )
+}
+
+
 #' Decide whether to suggest a variable
 #'
 #' @description
@@ -201,7 +231,10 @@ decide_variable_suggestion <- function(var_data, effect_data, data_type,
                                        is_reference, group_type,
                                        min_obs_per_split, min_variance_ratio,
                                        exclude_reference) {
-  box::use(artma / libs / core / validation[validate])
+  box::use(
+    artma / libs / core / validation[validate],
+    artma / data / profile[is_binary_column]
+  )
 
   validate(
     is.numeric(var_data),
@@ -213,19 +246,15 @@ decide_variable_suggestion <- function(var_data, effect_data, data_type,
 
   # Exclude reference variables in dummy groups
   if (exclude_reference && is_reference && group_type == "dummy") {
-    return(list(
-      suggested = FALSE,
-      split_method = NA_character_,
-      split_value = NA_character_,
-      reason = "reference_variable"
-    ))
+    return(not_suggested("reference_variable"))
   }
 
   unique_vals <- unique(var_data)
   n_unique <- length(unique_vals)
 
-  # DUMMY VARIABLES (binary 0/1)
-  if (data_type == "dummy" || (n_unique == 2 && all(unique_vals %in% c(0, 1)))) {
+  # DUMMY VARIABLES (binary 0/1). var_data is numeric here, so is_binary_column
+  # (which allows 0/1/TRUE/FALSE) is equivalent to the previous 0/1-only test.
+  if (data_type == "dummy" || is_binary_column(var_data)) {
     # Check both splits have sufficient observations
     n_zero <- sum(var_data == 0)
     n_one <- sum(var_data == 1)
@@ -241,30 +270,15 @@ decide_variable_suggestion <- function(var_data, effect_data, data_type,
       # Suggest if there's at least some difference (not requiring significance)
       if (is.finite(mean_diff) && is.finite(pooled_sd) && pooled_sd > 0) {
         effect_size <- mean_diff / pooled_sd
-        if (effect_size > 0.1) {  # Small effect threshold
-          return(list(
-            suggested = TRUE,
-            split_method = "equal",
-            split_value = "1",
-            reason = "informative_dummy"
-          ))
+        if (effect_size > 0.1) { # Small effect threshold
+          return(suggest_split("equal", "1", "informative_dummy"))
         }
       }
 
-      return(list(
-        suggested = TRUE,
-        split_method = "equal",
-        split_value = "1",
-        reason = "dummy_sufficient_obs"
-      ))
+      return(suggest_split("equal", "1", "dummy_sufficient_obs"))
     }
 
-    return(list(
-      suggested = FALSE,
-      split_method = NA_character_,
-      split_value = NA_character_,
-      reason = "insufficient_obs_per_category"
-    ))
+    return(not_suggested("insufficient_obs_per_category"))
   }
 
   # PERCENTAGE/RATIO VARIABLES (0 to 1)
@@ -274,20 +288,10 @@ decide_variable_suggestion <- function(var_data, effect_data, data_type,
     n_above <- sum(var_data >= 0.5)
 
     if (n_below >= min_obs_per_split && n_above >= min_obs_per_split) {
-      return(list(
-        suggested = TRUE,
-        split_method = "gltl",
-        split_value = "0.5",
-        reason = "ratio_variable"
-      ))
+      return(suggest_split("gltl", "0.5", "ratio_variable"))
     }
 
-    return(list(
-      suggested = FALSE,
-      split_method = NA_character_,
-      split_value = NA_character_,
-      reason = "insufficient_obs_per_split"
-    ))
+    return(not_suggested("insufficient_obs_per_split"))
   }
 
   # INTEGER AND FLOAT VARIABLES
@@ -297,23 +301,13 @@ decide_variable_suggestion <- function(var_data, effect_data, data_type,
     var_sd <- stats::sd(var_data, na.rm = TRUE)
 
     if (!is.finite(var_mean) || !is.finite(var_sd) || var_mean == 0) {
-      return(list(
-        suggested = FALSE,
-        split_method = NA_character_,
-        split_value = NA_character_,
-        reason = "undefined_variance"
-      ))
+      return(not_suggested("undefined_variance"))
     }
 
     coef_variation <- var_sd / abs(var_mean)
 
     if (coef_variation < min_variance_ratio) {
-      return(list(
-        suggested = FALSE,
-        split_method = NA_character_,
-        split_value = NA_character_,
-        reason = "low_variance"
-      ))
+      return(not_suggested("low_variance"))
     }
 
     # Decide between mean and median based on skewness
@@ -334,20 +328,10 @@ decide_variable_suggestion <- function(var_data, effect_data, data_type,
     if (n_below >= min_obs_per_split && n_above >= min_obs_per_split) {
       split_method <- if (abs(skewness) > 1) "median" else "mean"
 
-      return(list(
-        suggested = TRUE,
-        split_method = "gltl",
-        split_value = split_method,
-        reason = "informative_numeric"
-      ))
+      return(suggest_split("gltl", split_method, "informative_numeric"))
     }
 
-    return(list(
-      suggested = FALSE,
-      split_method = NA_character_,
-      split_value = NA_character_,
-      reason = "insufficient_obs_per_split"
-    ))
+    return(not_suggested("insufficient_obs_per_split"))
   }
 
   # CATEGORICAL VARIABLES (few unique values)
@@ -360,20 +344,10 @@ decide_variable_suggestion <- function(var_data, effect_data, data_type,
       # Suggest the most common category
       most_common <- names(val_counts)[which.max(val_counts)]
 
-      return(list(
-        suggested = TRUE,
-        split_method = "equal",
-        split_value = as.character(most_common),
-        reason = "categorical_variable"
-      ))
+      return(suggest_split("equal", as.character(most_common), "categorical_variable"))
     }
 
-    return(list(
-      suggested = FALSE,
-      split_method = NA_character_,
-      split_value = NA_character_,
-      reason = "insufficient_obs_per_category"
-    ))
+    return(not_suggested("insufficient_obs_per_category"))
   }
 
   # DEFAULT: Treat as numeric with mean split
@@ -382,20 +356,10 @@ decide_variable_suggestion <- function(var_data, effect_data, data_type,
   n_above <- sum(var_data >= var_mean)
 
   if (n_below >= min_obs_per_split && n_above >= min_obs_per_split) {
-    return(list(
-      suggested = TRUE,
-      split_method = "gltl",
-      split_value = "mean",
-      reason = "default_numeric"
-    ))
+    return(suggest_split("gltl", "mean", "default_numeric"))
   }
 
-  list(
-    suggested = FALSE,
-    split_method = NA_character_,
-    split_value = NA_character_,
-    reason = "insufficient_obs_per_split"
-  )
+  not_suggested("insufficient_obs_per_split")
 }
 
 box::export(

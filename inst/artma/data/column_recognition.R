@@ -1,3 +1,22 @@
+box::use(
+  artma / data / profile[profile_column]
+)
+
+#' Single home for every confidence threshold the column-matching engine uses.
+#' Both the recognition flow (options creation, auto-detection) and the schema
+#' reconciliation flow (rename proposals) read from this list, so the
+#' thresholds cannot drift apart again.
+#' - required_confidence: minimum score to auto-accept a match for a required column
+#' - optional_confidence: stricter minimum for optional columns (fewer false positives)
+#' - rename_suggest: minimum score for a rename proposal to be shown to the user
+#' - rename_auto: minimum score for a rename to be accepted without confirmation
+MATCH_THRESHOLDS <- list(
+  required_confidence = 0.7,
+  optional_confidence = 0.95,
+  rename_suggest = 0.5,
+  rename_auto = 0.75
+)
+
 #' @title Define column patterns for recognition
 #' @description Returns a list of patterns for recognizing standard columns
 #' @return *\[list\]* Named list of regex patterns and keywords for each standard column
@@ -225,69 +244,12 @@ match_column_name <- function(col_name, patterns) {
 
 
 #' @title Analyze column values to determine semantic type
-#' @description Analyzes actual data values to help discriminate between ambiguous column matches
+#' @description Analyzes actual data values to help discriminate between
+#'   ambiguous column matches. Thin re-export of the shared
+#'   `data/profile.R::profile_column` profiler.
 #' @param values *\[vector\]* Column values to analyze
 #' @return *\[list\]* Analysis results with various heuristics
-analyze_column_values <- function(values) {
-  # Remove NA values for analysis
-  values_clean <- values[!is.na(values)]
-
-  if (length(values_clean) == 0) {
-    return(list(
-      is_sequential = FALSE,
-      is_unique = FALSE,
-      is_numeric = FALSE,
-      uniqueness_ratio = 0,
-      mean = NA,
-      variance = NA,
-      min = NA,
-      max = NA
-    ))
-  }
-
-  # Check if numeric (coercible to numeric)
-  is_numeric <- is.numeric(values_clean) || !any(is.na(suppressWarnings(as.numeric(values_clean))))
-  numeric_values <- if (is_numeric) {
-    if (is.numeric(values_clean)) values_clean else as.numeric(values_clean)
-  } else {
-    numeric(0)
-  }
-
-  # Sequential pattern detection (like 1, 2, 3, 4, 5...)
-  is_sequential <- FALSE
-  if (is_numeric && length(numeric_values) >= 3) {
-    diffs <- diff(numeric_values)
-    # Check if differences are constant (allowing for some tolerance)
-    is_sequential <- all(abs(diffs - diffs[1]) < 1e-10) && abs(diffs[1] - 1) < 1e-10
-  }
-
-  # Uniqueness analysis
-  is_unique <- length(unique(values_clean)) == length(values_clean)
-  uniqueness_ratio <- length(unique(values_clean)) / length(values_clean)
-
-  # Statistical properties
-  stats <- if (is_numeric && length(numeric_values) > 0) {
-    list(
-      mean = mean(numeric_values, na.rm = TRUE),
-      variance = stats::var(numeric_values, na.rm = TRUE),
-      min = min(numeric_values, na.rm = TRUE),
-      max = max(numeric_values, na.rm = TRUE)
-    )
-  } else {
-    list(mean = NA, variance = NA, min = NA, max = NA)
-  }
-
-  list(
-    is_sequential = is_sequential,
-    is_unique = is_unique,
-    is_numeric = is_numeric,
-    uniqueness_ratio = uniqueness_ratio,
-    mean = stats$mean,
-    variance = stats$variance,
-    min = stats$min,
-    max = stats$max
-  )
-}
+analyze_column_values <- profile_column
 
 
 #' @title Detect if a column is likely a numeric identifier
@@ -539,12 +501,42 @@ resolve_multiple_matches <- function(df, candidates, std_col, matches) {
 }
 
 
+#' @title Score a rename candidate
+#' @description Scores how likely `candidate` is a rename of `stored_name`.
+#'   Combines the string-similarity signal with the pattern-based recognition
+#'   signal when the standard column the record maps to is known, so both the
+#'   recognition flow and schema reconciliation share one matching engine.
+#' @param stored_name *\[character\]* The column name stored in the config that
+#'   is now missing from the data frame.
+#' @param candidate *\[character\]* An unmatched column present in the data frame.
+#' @param std_name *\[character, optional\]* The standard column (role) the
+#'   stored name maps to, if any. Enables the pattern/value-analysis signal.
+#' @param df *\[data.frame, optional\]* The data frame, for value analysis.
+#' @return *\[numeric\]* Similarity score between 0 and 1.
+score_rename_candidate <- function(stored_name, candidate, std_name = NULL, df = NULL) {
+  score <- string_similarity(stored_name, candidate)
+
+  patterns <- get_column_patterns()
+  if (!is.null(std_name) && std_name %in% names(patterns)) {
+    match_result <- match_column_name(candidate, patterns[std_name])
+    if (!is.na(match_result$match)) {
+      pattern_score <- match_result$score
+      if (!is.null(df) && candidate %in% names(df)) {
+        pattern_score <- score_candidate_values(df, candidate, std_name, pattern_score)
+      }
+      score <- max(score, pattern_score)
+    }
+  }
+
+  score
+}
+
 #' @title Recognize columns in data frame
 #' @description Automatically recognize which columns correspond to standard columns
 #' @param df *\[data.frame\]* The data frame
 #' @param min_confidence *\[numeric\]* Minimum confidence score (0-1) to accept a match
 #' @return *\[list\]* Named list mapping standard columns to data frame columns
-recognize_columns <- function(df, min_confidence = 0.7) {
+recognize_columns <- function(df, min_confidence = MATCH_THRESHOLDS$required_confidence) {
   box::use(
     artma / libs / core / validation[validate],
     artma / libs / core / utils[get_verbosity]
@@ -575,15 +567,15 @@ recognize_columns <- function(df, min_confidence = 0.7) {
   for (std_col in sorted_std_cols) {
     # Higher confidence threshold for optional columns to reduce false positives
     is_required <- std_col %in% required_cols
-    confidence_threshold <- if (is_required) min_confidence else 0.95
+    confidence_threshold <- if (is_required) min_confidence else MATCH_THRESHOLDS$optional_confidence
 
     # Find all columns that matched this standard column
-    candidates <- names(matches)[vapply(matches, function(m) {
+    all_candidates <- names(matches)[vapply(matches, function(m) {
       !is.na(m$match) && m$match == std_col && m$score >= confidence_threshold
     }, logical(1))]
 
     # Remove already used columns
-    candidates <- setdiff(candidates, used_cols)
+    candidates <- setdiff(all_candidates, used_cols)
 
     if (length(candidates) > 0) {
       # If multiple candidates, use value analysis to resolve
@@ -600,9 +592,7 @@ recognize_columns <- function(df, min_confidence = 0.7) {
         score <- matches[[best_candidate]]$score
         method <- matches[[best_candidate]]$method
         req_label <- if (is_required) "required" else "optional"
-        n_candidates <- length(candidates) + length(intersect(names(matches)[vapply(matches, function(m) {
-          !is.na(m$match) && m$match == std_col && m$score >= confidence_threshold
-        }, logical(1))], used_cols))
+        n_candidates <- length(candidates) + length(intersect(all_candidates, used_cols))
         multi_label <- if (n_candidates > 1) paste0(" [", n_candidates, " candidates]") else ""
         cli::cli_inform("Recognized {.field {best_candidate}} as {.field {std_col}} ({req_label}, score: {round(score, 2)}, method: {method}){multi_label}")
       }
@@ -615,10 +605,12 @@ recognize_columns <- function(df, min_confidence = 0.7) {
 
 
 #' @title Get required column names for artma
-#' @description Returns the list of required column names for artma to function
+#' @description Returns the list of required column names for artma to function.
+#'   Delegates to the template-derived single source of truth.
 #' @return *\[character\]* Vector of required column names
 get_required_column_names <- function() {
-  c("study_id", "effect", "se", "n_obs")
+  box::use(artma / data / utils[get_required_colnames])
+  get_required_colnames()
 }
 
 
@@ -640,16 +632,14 @@ check_mapping_completeness <- function(mapping) {
 }
 
 
-# Helper for NULL coalescing
-`%||%` <- function(x, y) if (is.null(x)) y else x # nolint
-
-
 box::export(
+  MATCH_THRESHOLDS,
   get_column_patterns,
   match_column_name,
   recognize_columns,
   get_required_column_names,
   check_mapping_completeness,
+  score_rename_candidate,
   string_similarity,
   analyze_column_values,
   is_likely_numeric_id,

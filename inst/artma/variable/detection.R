@@ -2,6 +2,19 @@
 #' @description
 #' Provides functionality to automatically detect variable groups in a dataset.
 #' Identifies patterns in data (dummy groups, transformations, etc.).
+#'
+#' The column-profiling primitives (`empty_group_df`, `group_row`,
+#' `bind_group_rows`, `detect_dummy_groups`) live in `data/profile.R` so the
+#' data layer can reuse them without importing from `variable/`.
+
+box::use(
+  artma / data / profile[
+    empty_group_df,
+    group_row,
+    bind_group_rows,
+    detect_dummy_groups
+  ]
+)
 
 #' Detect variable groups in a dataset
 #'
@@ -17,7 +30,12 @@
 #' @param var_names *\[character, optional\]* Vector of variable names to analyze.
 #' If NULL, all columns except reserved names are analyzed.
 #' @param config *\[list, optional\]* Data configuration list. If provided,
-#' uses existing group_category values where available.
+#' uses existing group_category values as the group_id/group_base for variables
+#' that set it, instead of a detected group name. Structural type detection
+#' (dummy, transformation, power, categorical) still runs and populates
+#' group_type even for these variables, so setting group_category only
+#' overrides the group's display label, not whether it is detected as a
+#' structural group.
 #'
 #' @return A data frame with columns:
 #' - var_name: Variable name
@@ -29,28 +47,18 @@
 #' @export
 detect_variable_groups <- function(df, var_names = NULL, config = NULL) {
   box::use(
-    artma / const[CONST],
+    artma / data / utils[get_reserved_colnames],
     artma / libs / core / validation[validate]
   )
 
   validate(is.data.frame(df))
 
-  # Reserved column names that should not be grouped
-  reserved_names <- c("effect", "se", "study_id", "study_label", "study_size", "sample_size", "dof")
-
   if (is.null(var_names)) {
-    var_names <- setdiff(names(df), reserved_names)
+    var_names <- setdiff(names(df), get_reserved_colnames())
   }
 
   if (!length(var_names)) {
-    return(data.frame(
-      var_name = character(0),
-      group_id = character(0),
-      group_type = character(0),
-      group_base = character(0),
-      is_reference = logical(0),
-      stringsAsFactors = FALSE
-    ))
+    return(empty_group_df())
   }
 
   # Check if we can use existing group categories from config
@@ -114,11 +122,17 @@ detect_variable_groups <- function(df, var_names = NULL, config = NULL) {
   for (i in seq_len(nrow(all_detected))) {
     var_idx <- which(groups$var_name == all_detected$var_name[i])
     if (length(var_idx)) {
-      # Only override if not already set from config
       if (is.na(groups$group_id[var_idx])) {
+        # Not set from config: adopt the detected group wholesale
         groups$group_id[var_idx] <- all_detected$group_id[i]
         groups$group_type[var_idx] <- all_detected$group_type[i]
         groups$group_base[var_idx] <- all_detected$group_base[i]
+        groups$is_reference[var_idx] <- all_detected$is_reference[i]
+      } else if (groups$group_type[var_idx] == "singleton") {
+        # group_id/group_base came from config (group_category): keep them as
+        # the display grouping, but still record the structural type detected
+        # from the data so methods like prima_facie_graphs can find the group.
+        groups$group_type[var_idx] <- all_detected$group_type[i]
         groups$is_reference[var_idx] <- all_detected$is_reference[i]
       }
     }
@@ -132,119 +146,6 @@ detect_variable_groups <- function(df, var_names = NULL, config = NULL) {
   }
 
   groups
-}
-
-
-#' Detect dummy variable groups
-#'
-#' @description
-#' Identifies groups of dummy (binary 0/1) variables that share a common prefix,
-#' suggesting they represent categories of the same underlying variable.
-#'
-#' @param var_names *\[character\]* Vector of variable names
-#' @param df *\[data.frame\]* Data frame to check if variables are binary
-#'
-#' @return Data frame with group information for dummy variables
-#'
-#' @keywords internal
-detect_dummy_groups <- function(var_names, df) {
-  box::use(artma / libs / core / validation[validate])
-
-  validate(is.character(var_names), is.data.frame(df))
-
-  results <- list()
-
-  # Check if variable is binary (0/1 or TRUE/FALSE)
-  is_binary <- function(var_name) {
-    if (!var_name %in% names(df)) return(FALSE)
-    vals <- unique(df[[var_name]][!is.na(df[[var_name]])])
-    length(vals) == 2 && all(vals %in% c(0, 1, TRUE, FALSE))
-  }
-
-  # Find variables with common prefixes
-  binary_vars <- var_names[vapply(var_names, is_binary, logical(1))]
-
-  if (!length(binary_vars)) {
-    return(data.frame(
-      var_name = character(0),
-      group_id = character(0),
-      group_type = character(0),
-      group_base = character(0),
-      is_reference = logical(0),
-      stringsAsFactors = FALSE
-    ))
-  }
-
-  # Extract potential base names (everything before last underscore)
-  extract_base <- function(name) {
-    parts <- strsplit(name, "_")[[1]]
-    if (length(parts) > 1) {
-      paste(parts[-length(parts)], collapse = "_")
-    } else {
-      NA_character_
-    }
-  }
-
-  bases <- vapply(binary_vars, extract_base, character(1))
-  base_table <- table(bases[!is.na(bases)])
-
-  # Only consider groups with 2+ variables
-  valid_bases <- names(base_table)[base_table >= 2]
-
-  if (!length(valid_bases)) {
-    return(data.frame(
-      var_name = character(0),
-      group_id = character(0),
-      group_type = character(0),
-      group_base = character(0),
-      is_reference = logical(0),
-      stringsAsFactors = FALSE
-    ))
-  }
-
-  for (base in valid_bases) {
-    group_vars <- binary_vars[!is.na(bases) & bases == base]
-
-    # Try to detect reference variable (often has "other", "ref", "base" suffix)
-    ref_patterns <- c("other", "ref", "reference", "base", "baseline")
-    is_ref <- rep(FALSE, length(group_vars))
-
-    for (i in seq_along(group_vars)) {
-      suffix <- tolower(sub(paste0("^", base, "_"), "", group_vars[i]))
-      if (suffix %in% ref_patterns) {
-        is_ref[i] <- TRUE
-      }
-    }
-
-    # If no explicit reference, mark the first as reference
-    if (!any(is_ref) && length(group_vars) > 0) {
-      is_ref[1] <- TRUE
-    }
-
-    for (i in seq_along(group_vars)) {
-      results[[length(results) + 1]] <- data.frame(
-        var_name = group_vars[i],
-        group_id = paste0("dummy_", base),
-        group_type = "dummy",
-        group_base = base,
-        is_reference = is_ref[i],
-        stringsAsFactors = FALSE
-      )
-    }
-  }
-
-  if (length(results)) {
-    do.call(rbind, results)
-  } else {
-    data.frame(
-      var_name = character(0),
-      group_id = character(0),
-      group_type = character(0),
-      group_base = character(0),
-      is_reference = logical(0),
-      stringsAsFactors = FALSE
-    )
-  }
 }
 
 
@@ -275,42 +176,29 @@ detect_transformation_groups <- function(var_names) {
         base <- sub(paste0("^", pattern), "", var)
         transform_type <- sub("_$", "", pattern)
 
-        results[[length(results) + 1]] <- data.frame(
+        results[[length(results) + 1]] <- group_row(
           var_name = var,
           group_id = paste0("transform_", base),
           group_type = "transformation",
           group_base = base,
-          is_reference = FALSE,
-          stringsAsFactors = FALSE
+          is_reference = FALSE
         )
 
         # Check if base variable exists (would be the reference)
         if (base %in% var_names) {
-          results[[length(results) + 1]] <- data.frame(
+          results[[length(results) + 1]] <- group_row(
             var_name = base,
             group_id = paste0("transform_", base),
             group_type = "transformation",
             group_base = base,
-            is_reference = TRUE,
-            stringsAsFactors = FALSE
+            is_reference = TRUE
           )
         }
       }
     }
   }
 
-  if (length(results)) {
-    do.call(rbind, results)
-  } else {
-    data.frame(
-      var_name = character(0),
-      group_id = character(0),
-      group_type = character(0),
-      group_base = character(0),
-      is_reference = logical(0),
-      stringsAsFactors = FALSE
-    )
-  }
+  bind_group_rows(results)
 }
 
 
@@ -340,42 +228,29 @@ detect_power_groups <- function(var_names) {
       if (grepl(paste0(pattern, "$"), var)) {
         base <- sub(paste0(pattern, "$"), "", var)
 
-        results[[length(results) + 1]] <- data.frame(
+        results[[length(results) + 1]] <- group_row(
           var_name = var,
           group_id = paste0("power_", base),
           group_type = "power",
           group_base = base,
-          is_reference = FALSE,
-          stringsAsFactors = FALSE
+          is_reference = FALSE
         )
 
         # Check if base variable exists (would be the reference)
         if (base %in% var_names) {
-          results[[length(results) + 1]] <- data.frame(
+          results[[length(results) + 1]] <- group_row(
             var_name = base,
             group_id = paste0("power_", base),
             group_type = "power",
             group_base = base,
-            is_reference = TRUE,
-            stringsAsFactors = FALSE
+            is_reference = TRUE
           )
         }
       }
     }
   }
 
-  if (length(results)) {
-    do.call(rbind, results)
-  } else {
-    data.frame(
-      var_name = character(0),
-      group_id = character(0),
-      group_type = character(0),
-      group_base = character(0),
-      is_reference = logical(0),
-      stringsAsFactors = FALSE
-    )
-  }
+  bind_group_rows(results)
 }
 
 
@@ -430,13 +305,12 @@ detect_categorical_groups <- function(var_names) {
           # Add all related variables
           all_vars <- c(var, other_vars)
           for (v in all_vars) {
-            results[[length(results) + 1]] <- data.frame(
+            results[[length(results) + 1]] <- group_row(
               var_name = v,
               group_id = paste0("categorical_", base),
               group_type = "categorical",
               group_base = base,
-              is_reference = FALSE,
-              stringsAsFactors = FALSE
+              is_reference = FALSE
             )
           }
         }
@@ -445,18 +319,7 @@ detect_categorical_groups <- function(var_names) {
     }
   }
 
-  if (length(results)) {
-    unique(do.call(rbind, results))
-  } else {
-    data.frame(
-      var_name = character(0),
-      group_id = character(0),
-      group_type = character(0),
-      group_base = character(0),
-      is_reference = logical(0),
-      stringsAsFactors = FALSE
-    )
-  }
+  unique(bind_group_rows(results))
 }
 
 box::export(

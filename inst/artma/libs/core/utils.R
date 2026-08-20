@@ -1,59 +1,3 @@
-#' Check whether an object is a function call (created using 'call').
-#' Return a boolean to indicate this.
-#'
-#' @param obj [any] The object to evaluate
-#' `logical` TRUE if the object is a function call, FALSE otherwise
-#' @export
-is_function_call <- function(obj) {
-  if (!is.call(obj))
-    return(FALSE)
-
-  func_name <- as.character(obj[[1]])
-  is_valid_function_call <- exists(func_name) && is.function(get(func_name))
-
-  if (!is_valid_function_call)
-    return(FALSE)
-
-  TRUE
-}
-
-
-#' Convert a number to a percentage
-#'
-#' @param x [numeric] The number to convert
-#' `character` The number as a percentage
-#' @export
-to_perc <- function(x) paste0(round(x * 100, 2), "%")
-
-
-#' @title Nullable lapply
-#' @description A version of lapply that disassigns items from a list in case their value is NULL. In case the result is empty, return NULL.
-#' @param x A list
-#' @param FUN A function
-#' @return *\[list\]* A list of the same length as x, with the same names. The values are the result of applying FUN to each element of x. If FUN returns NULL for an element, that element is removed from the list.
-#' @export
-nullable_lapply <- function(x, FUN) {
-  box::use(
-    artma / libs / core / validation[assert, validate]
-  )
-  validate(is.function(FUN))
-
-  out <- list()
-  names <- names(x)
-  argcount <- length(formals(FUN)) # Number of arguments
-
-  assert(argcount %in% c(1, 2), "Your function must contain either one or two arguments.")
-
-  for (i in seq_along(x)) {
-    name <- names[[i]]
-    fun_ <- if (argcount == 2) "FUN(i, x[[name]])" else "FUN(x[[name]])"
-    out[[name]] <- eval(parse(text = fun_)) # Assigns nothing if the return is NULL
-  }
-
-  if (length(out) == 0) NULL else out
-}
-
-
 #' @title Get verbosity
 #' @description Get the verbosity level
 #' @return [integer] The verbosity level
@@ -61,4 +5,57 @@ nullable_lapply <- function(x, FUN) {
 get_verbosity <- function() {
   box::use(artma / const[CONST])
   getOption("artma.verbose", CONST$DEFAULT_VERBOSITY)
+}
+
+#' @title Check whether R's data viewer can be opened
+#' @description `utils::View()` hands the data off to the front-end's spreadsheet
+#'   window. In a non-interactive session, or on a Unix system whose only viewer
+#'   is the X11 data entry window and where no display is reachable, there is no
+#'   window to attach to and R aborts the session instead of failing gracefully.
+#'   Call this before `utils::View()` and fall back to printing when it is
+#'   `FALSE`.
+#' @return *\[logical\]* `TRUE` when `utils::View()` is safe to call.
+#' @export
+data_viewer_available <- function() {
+  if (!interactive()) {
+    return(FALSE)
+  }
+  # Examples and tests run in a subprocess of `R CMD check`. A viewer crash
+  # there aborts the whole check rather than failing one expectation, so stay
+  # on the printing fallback whenever a check is in progress, no matter how
+  # the subprocess reports itself.
+  if (!identical(Sys.getenv("_R_CHECK_PACKAGE_NAME_"), "")) {
+    return(FALSE)
+  }
+  if (identical(.Platform$OS.type, "windows")) {
+    return(TRUE)
+  }
+  # Front-ends such as RStudio and Positron install their own viewer and never
+  # reach the X11 data entry window.
+  if (!identical(Sys.getenv("RSTUDIO"), "") || !identical(Sys.getenv("POSITRON"), "")) {
+    return(TRUE)
+  }
+  if (identical(.Platform$GUI, "AQUA")) {
+    return(TRUE)
+  }
+  isTRUE(unname(capabilities("X11"))) && !identical(Sys.getenv("DISPLAY"), "")
+}
+
+#' @title Get an option, treating NULL and scalar NA as unset
+#' @description `getOption()` wrapper for options whose template default is
+#'   `.na` (`allow_na`): those are loaded into `options()` as a literal `NA`,
+#'   which `getOption()` returns instead of the fallback. A stored `NULL` or
+#'   length-one `NA` falls through to `default`; longer vectors are returned
+#'   as-is even when they contain `NA`s.
+#' @param name *\[character\]* Full option name, e.g. `"artma.data.na_handling"`.
+#' @param default The value to return when the option is unset, `NULL`, or a
+#'   scalar `NA`.
+#' @return The option value, or `default`.
+#' @export
+opt_or <- function(name, default = NULL) {
+  value <- getOption(name, default = default)
+  if (is.null(value) || (length(value) == 1L && is.na(value))) {
+    return(default)
+  }
+  value
 }

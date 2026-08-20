@@ -1,3 +1,8 @@
+box::use(
+  artma / visualization / fork_safety[in_forked_worker],
+  artma / libs / core / log[is_info_enabled]
+)
+
 #' Format a numeric value with a fixed number of decimals
 format_decimal <- function(x, k) trimws(format(round(x, k), nsmall = k))
 
@@ -12,73 +17,27 @@ simulate_cdfs_block_cpp <- function(eps_block) {
   .Call("_artma_simulate_cdfs_block_cpp", PACKAGE = "artma", eps_block)
 }
 
-simulate_cdfs <- function(iterations = 10000, grid_points = 10000, show_progress = TRUE) {
-  use_cpp <- isTRUE(getOption("artma.methods.p_hacking_tests.simulate_cdfs.use_cpp", TRUE))
-  if (!use_cpp) {
-    return(simulate_cdfs_parallel(iterations, grid_points, show_progress = show_progress))
-  }
-
-  verbosity <- getOption("artma.verbose", 3)
-  show_pb <- show_progress && verbosity >= 3 && iterations >= 1000
-
-  if (!show_pb) {
-    res <- tryCatch(
-      simulate_cdfs_cpp(iterations, grid_points),
-      error = function(e) NULL
-    )
-    if (!is.null(res)) {
-      return(res)
-    }
-    return(simulate_cdfs_parallel(iterations, grid_points, show_progress = show_progress))
-  }
-
-  chunk_size <- as.integer(getOption("artma.methods.p_hacking_tests.simulate_cdfs.chunk_size", 512L))
-  chunk_size <- max(1L, chunk_size)
-  bb_sup <- numeric(iterations)
-  done <- 0L
-
-  cli::cli_inform("Pre-computing critical values for LCM test via Brownian bridge simulations")
-  Sys.sleep(0.1)
-  cli::cli_progress_bar(
-    "Simulating {iterations} iterations",
-    total = iterations,
-    format = "{cli::pb_spin} {cli::pb_current}/{cli::pb_total} | ETA: {cli::pb_eta}"
-  )
-
-  while (done < iterations) {
-    k <- min(chunk_size, iterations - done)
-    res <- tryCatch(
-      simulate_cdfs_cpp(k, grid_points),
-      error = function(e) NULL
-    )
-    if (is.null(res)) {
-      cli::cli_progress_done()
-      return(simulate_cdfs_parallel(iterations, grid_points, show_progress = show_progress))
-    }
-    idx <- (done + 1L):(done + k)
-    bb_sup[idx] <- res
-    done <- done + k
-    cli::cli_progress_update(set = done)
-  }
-
-  cli::cli_progress_done()
-  bb_sup
-}
-
 #' Simulate Brownian bridge suprema CDFs used by the LCM test in parallel
 #' @param iterations [integer] Number of simulations.
 #' @param grid_points [integer] Number of grid points per simulation.
 #' @param workers [integer] Number of workers to use.
 #' @param block_size [integer] Size of the block to process.
 #' @param show_progress [logical] Whether to show progress bar.
+#' @param seed [integer, optional] RNG seed to set before simulating. Leave
+#'   `NULL` to use (and consume) the caller's current RNG state.
 #' @return Numeric vector of simulated suprema.
 simulate_cdfs_parallel <- function(
   iterations = 10000,
   grid_points = 10000,
   workers = NULL,
   block_size = 256L,
-  show_progress = TRUE
+  show_progress = TRUE,
+  seed = NULL
 ) {
+  if (!is.null(seed)) {
+    set.seed(as.integer(seed))
+  }
+
   gp <- as.integer(grid_points)
   it <- as.integer(iterations)
   if (is.null(workers)) {
@@ -92,17 +51,18 @@ simulate_cdfs_parallel <- function(
   workers <- as.integer(max(1L, workers))
   block_size <- as.integer(max(1L, block_size))
 
-  inv_gp <- 1 / gp
-  inv_sqrt_gp <- 1 / sqrt(gp)
+  # This function forks its own workers via `mclapply()`/`makeCluster()`. When
+  # it runs inside a worker already forked by the method-execution orchestrator,
+  # forking again is unsafe, so stay sequential in that case.
+  if (in_forked_worker()) {
+    workers <- 1L
+  }
 
-  c_grid <- seq_len(gp) * inv_gp
-  c_values <- c(0, c_grid)
-  n_values <- gp + 1L
+  inv_sqrt_gp <- 1 / sqrt(gp)
 
   bb_sup <- numeric(it)
 
-  verbosity <- getOption("artma.verbose", 3L)
-  show_pb <- isTRUE(show_progress) && verbosity >= 3L && it >= 1000L
+  show_pb <- isTRUE(show_progress) && is_info_enabled() && it >= 1000L
 
   if (show_pb) {
     cli::cli_inform("Pre-computing critical values for LCM test via Brownian bridge simulations")
@@ -114,95 +74,28 @@ simulate_cdfs_parallel <- function(
     )
   }
 
-  use_cpp <- isTRUE(getOption("artma.methods.p_hacking_tests.simulate_cdfs.use_cpp", TRUE))
-  if (use_cpp) {
-    use_fork <- (.Platform$OS.type != "windows")
-    if (!use_fork && workers > 1L) {
-      workers <- 1L
-    }
-
-    done <- 0L
-    while (done < it) {
-      k <- min(block_size, it - done)
-      start <- done + 1L
-      end <- done + k
-
-      eps_block <- matrix(stats::rnorm(gp * k), nrow = gp) * inv_sqrt_gp
-
-      if (workers == 1L || k == 1L) {
-        bb_sup[start:end] <- simulate_cdfs_block_cpp(eps_block)
-      } else {
-        cols_split <- split(seq_len(k), rep_len(seq_len(min(workers, k)), k))
-        res_list <- parallel::mclapply(
-          cols_split,
-          function(cols) {
-            list(
-              idx = (start - 1L) + cols,
-              val = simulate_cdfs_block_cpp(eps_block[, cols, drop = FALSE])
-            )
-          },
-          mc.cores = min(workers, length(cols_split)),
-          mc.preschedule = TRUE
-        )
-        for (r in res_list) bb_sup[r$idx] <- r$val
-      }
-
-      done <- end
-      if (show_pb) cli::cli_progress_update(set = done)
-    }
-
-    if (show_pb) cli::cli_progress_done()
-    return(bb_sup)
-  }
-
-  worker_chunk <- function(eps_sub, idx_sub, c_grid, c_values, gp, inv_gp, n_values) {
-    out <- numeric(length(idx_sub))
-    b_values <- numeric(n_values)
-    y <- numeric(n_values)
-
-    for (jj in seq_along(idx_sub)) {
-      w <- cumsum(eps_sub[, jj])
-      w_end <- w[gp]
-
-      b_values[1L] <- 0
-      b_values[2L:n_values] <- w - c_grid * w_end
-
-      hull <- fdrtool::gcmlcm(c_values, b_values, type = "lcm")
-
-      y[] <- 0
-      y[1L] <- 0
-
-      hkx <- hull$x.knots
-      hky <- hull$y.knots
-      hks <- hull$slope.knots
-
-      # keep interpolation logic aligned with your original code
-      for (s in 2:length(hkx)) {
-        a <- hky[s] - hks[s - 1L] * hkx[s]
-        b_slope <- hks[s - 1L]
-        lower <- hkx[s - 1L] * gp + 1
-        upper <- hkx[s] * gp
-        idx <- lower:upper
-        y[idx] <- a + b_slope * (idx * inv_gp)
-      }
-
-      out[jj] <- max(abs(y - b_values))
-    }
-
-    list(idx = idx_sub, val = out)
+  # The compiled C++ kernel is the single production implementation. It ships
+  # with the package (LinkingTo Rcpp), so an unavailable kernel means a broken
+  # install rather than a supported configuration; abort with a clear message.
+  # The pure R equivalent survives only as a test-only numeric reference (see
+  # tests/testthat/modules/testing/reference/elliott.R).
+  cpp_available <- tryCatch(
+    {
+      simulate_cdfs_block_cpp(matrix(0, nrow = 1, ncol = 1))
+      TRUE
+    },
+    error = function(e) FALSE
+  )
+  if (!cpp_available) {
+    cli::cli_abort(c(
+      "The compiled C++ implementation for CDF simulation is unavailable.",
+      "i" = "artma ships this routine as compiled code. Reinstall the package so its C++ sources are built."
+    ))
   }
 
   use_fork <- (.Platform$OS.type != "windows")
-
-  cl <- NULL
   if (!use_fork && workers > 1L) {
-    cl <- parallel::makeCluster(workers)
-    on.exit(parallel::stopCluster(cl), add = TRUE)
-    parallel::clusterExport(
-      cl,
-      varlist = c("worker_chunk", "c_grid", "c_values", "gp", "inv_gp", "n_values"),
-      envir = environment()
-    )
+    workers <- 1L
   }
 
   done <- 0L
@@ -211,59 +104,23 @@ simulate_cdfs_parallel <- function(
     start <- done + 1L
     end <- done + k
 
-    # Critical: pre-generate RNG in master in serial order
-    # This preserves the same random stream as the non-parallel version.
     eps_block <- matrix(stats::rnorm(gp * k), nrow = gp) * inv_sqrt_gp
 
     if (workers == 1L || k == 1L) {
-      res <- worker_chunk(
-        eps_sub = eps_block,
-        idx_sub = start:end,
-        c_grid = c_grid, c_values = c_values,
-        gp = gp, inv_gp = inv_gp, n_values = n_values
-      )
-      bb_sup[res$idx] <- res$val
+      bb_sup[start:end] <- simulate_cdfs_block_cpp(eps_block)
     } else {
       cols_split <- split(seq_len(k), rep_len(seq_len(min(workers, k)), k))
-
-      if (use_fork) {
-        # Unix/macOS: forked workers (fast, low overhead)
-        res_list <- parallel::mclapply(
-          cols_split,
-          function(cols) {
-            worker_chunk(
-              eps_sub = eps_block[, cols, drop = FALSE],
-              idx_sub = (start - 1L) + cols,
-              c_grid = c_grid, c_values = c_values,
-              gp = gp, inv_gp = inv_gp, n_values = n_values
-            )
-          },
-          mc.cores = min(workers, length(cols_split)),
-          mc.preschedule = TRUE
-        )
-      } else {
-        # Windows: PSOCK cluster
-        tasks <- lapply(cols_split, function(cols) {
+      res_list <- parallel::mclapply(
+        cols_split,
+        function(cols) {
           list(
-            eps_sub = eps_block[, cols, drop = FALSE],
-            idx_sub = (start - 1L) + cols
+            idx = (start - 1L) + cols,
+            val = simulate_cdfs_block_cpp(eps_block[, cols, drop = FALSE])
           )
-        })
-
-        res_list <- parallel::parLapply(
-          cl,
-          tasks,
-          function(task) {
-            worker_chunk(
-              eps_sub = task$eps_sub,
-              idx_sub = task$idx_sub,
-              c_grid = c_grid, c_values = c_values,
-              gp = gp, inv_gp = inv_gp, n_values = n_values
-            )
-          }
-        )
-      }
-
+        },
+        mc.cores = min(workers, length(cols_split)),
+        mc.preschedule = TRUE
+      )
       for (r in res_list) bb_sup[r$idx] <- r$val
     }
 
@@ -289,7 +146,7 @@ binomial_test <- function(P, p_min, p_max, type) {
 }
 
 #' LCM-based test for shape restrictions
-lcm_test <- function(P, p_min, p_max, norm, cdfs) {
+lcm_test <- function(P, p_min, p_max, cdfs) {
   filtered <- P[P <= p_max & P >= p_min]
   nn <- length(filtered)
   f <- stats::ecdf(filtered)
@@ -319,14 +176,19 @@ fisher_test <- function(P, p_min, p_max) {
 }
 
 #' Discontinuity test based on rddensity
-run_discontinuity_test <- function(P, c, h) {
-  h_band <- h - 0.001
-  repeat {
-    h_band <- h_band + 0.001
-    res <- rddensity::rddensity(P, c = c, h = h_band)
-    if (!is.na(res$test$p_jk)) {
-      break
-    }
+#' @param P [numeric] P-values to test.
+#' @param c [numeric] Cutoff to test for a discontinuity.
+#' @param h [numeric, optional] Manual bandwidth override. Leave `NULL`
+#'   (the canonical default) to let rddensity select its bandwidth
+#'   automatically.
+run_discontinuity_test <- function(P, c, h = NULL) {
+  res <- if (is.null(h)) {
+    rddensity::rddensity(P, c = c)
+  } else {
+    rddensity::rddensity(P, c = c, h = h)
+  }
+  if (is.na(res$test$p_jk)) {
+    return(skipped_result("rddensity returned no p-value (insufficient mass near the cutoff)"))
   }
   res$test$p_jk
 }
@@ -337,35 +199,49 @@ lambda2 <- function(x1, x2, h) {
     stats::pnorm(stats::qnorm(1 - x1 / 2) + h) - stats::pnorm(stats::qnorm(1 - x2 / 2) + h)
 }
 
-#' Compute bounds for the p-curve and its derivatives
-compute_bounds <- function(pmax, J, order) {
+#' Adjacent-pair lambda vectors shared by all Cox-Shi bound orders
+#'
+#' Element `j` is `lambda2(grid[j], grid[j + 1], h)` on the common `h` grid.
+#' Every bound order is an elementwise combination of these J vectors, so
+#' they are computed once and reused instead of re-evaluated per order.
+pair_lambdas <- function(p_min, p_max, J) {
   h <- seq(0, 100, by = 0.001)
-  grid <- linspace(0, pmax, J + 1)
+  grid <- linspace(p_min, p_max, J + 1)
+  lapply(seq_len(J), function(j) lambda2(grid[j], grid[j + 1], h))
+}
+
+#' Derive one order of Cox-Shi bounds from precomputed pair lambdas
+bounds_from_lambdas <- function(lam, order, p_min) {
   order <- as.integer(order)
   if (!order %in% 0:2) {
     cli::cli_abort("Unsupported order")
   }
-  width <- c(J, J - 1, J - 2)[order + 1]
+  n_pairs <- length(lam)
+  width <- c(n_pairs, n_pairs - 1, n_pairs - 2)[order + 1]
   bounds <- numeric(width)
   for (j in seq_len(width)) {
-    lambda_left <- lambda2(grid[j], grid[j + 1], h)
     if (order == 0L) {
-      bounds[j] <- max(lambda_left)
+      bounds[j] <- max(lam[[j]])
     } else if (order == 1L) {
-      lambda_right <- lambda2(grid[j + 1], grid[j + 2], h)
-      bounds[j] <- max(abs(lambda_right - lambda_left))
+      bounds[j] <- max(abs(lam[[j + 1]] - lam[[j]]))
     } else {
-      lambda_mid <- lambda2(grid[j + 2], grid[j + 3], h)
-      bounds[j] <- max(abs(lambda_mid - 2 * lambda2(grid[j + 1], grid[j + 2], h) + lambda_left))
+      bounds[j] <- max(abs(lam[[j + 2]] - 2 * lam[[j + 1]] + lam[[j]]))
     }
   }
-  bounds[1] <- 1
+  if (p_min == 0) {
+    bounds[1] <- 1
+  }
   matrix(bounds, ncol = 1)
 }
 
-bound0 <- function(pmax, J) compute_bounds(pmax, J, 0)
-bound1 <- function(pmax, J) compute_bounds(pmax, J, 1)
-bound2 <- function(pmax, J) compute_bounds(pmax, J, 2)
+#' Compute bounds for the p-curve and its derivatives
+compute_bounds <- function(p_min, p_max, J, order) {
+  bounds_from_lambdas(pair_lambdas(p_min, p_max, J), order, p_min)
+}
+
+bound0 <- function(p_min, p_max, J) compute_bounds(p_min, p_max, J, 0)
+bound1 <- function(p_min, p_max, J) compute_bounds(p_min, p_max, J, 1)
+bound2 <- function(p_min, p_max, J) compute_bounds(p_min, p_max, J, 2)
 
 #' Filter p-values and optional study identifiers
 filter_pvalues <- function(Q, ind, p_min, p_max) {
@@ -386,26 +262,38 @@ compute_phat <- function(P, J, p_min, p_max) {
 
 #' Covariance matrix of the empirical distribution under clustering
 compute_omega <- function(P, ind, phat, bins) {
+  N <- length(P)
+  J <- length(phat) + 1
   if (length(ind) > 1) {
     omega <- matrix(0, length(phat), length(phat))
     for (cluster in unique(ind)) {
-      X <- P[ind == cluster]
-      mq <- build_indicator_matrix(X, bins, phat)
-      omega <- omega + mq %*% t(mq)
+      mq <- build_indicator_matrix(P[ind == cluster], bins, phat)
+      # Outer product of the per-cluster sum of (indicator - phat). The canonical
+      # implementation writes this as mq %*% ones(n_c, n_c) %*% t(mq) on the
+      # transposed (bins x observations) layout.
+      cluster_sum <- matrix(colSums(mq), ncol = 1)
+      omega <- omega + cluster_sum %*% t(cluster_sum)
     }
-    omega / length(P)
+    omega / N
+  } else if (min(phat) == 0) {
+    qhat <- matrix(phat * N / (N + 1) + 1 / (J * (N + 1)), ncol = 1)
+    diag(c(qhat)) - qhat %*% t(qhat)
   } else {
-    qhat <- phat * length(P) / (length(P) + 1) + 1 / (length(phat) + 1) / (length(P) + 1)
-    diag(qhat) - qhat %*% t(qhat)
+    p <- matrix(phat, ncol = 1)
+    diag(c(p)) - p %*% t(p)
   }
 }
 
 build_indicator_matrix <- function(X, bins, phat) {
   J <- length(phat) + 1
   mq <- matrix(0, nrow = length(X), ncol = J - 1)
+  lower <- bins[1:(J - 1)]
+  upper <- bins[2:J]
   for (q in seq_along(X)) {
-    mq[q, ] <- as.numeric((X[q] > head(bins, -1)) & (X[q] <= tail(bins, -1)))
-    mq[q, X[q] == 0 & seq_len(J - 1) == 1] <- 1
+    mq[q, ] <- as.numeric((X[q] > lower) & (X[q] <= upper))
+    if (X[q] == 0) {
+      mq[q, 1] <- 1
+    }
   }
   sweep(mq, 2, phat, `-`)
 }
@@ -432,19 +320,28 @@ extend_difference_matrix <- function(D, J, K) {
   dk
 }
 
-build_constraint_vector <- function(B0, B1, B2, Galpha, use_bounds, J, K) { # nolint: object_name_linter.
-  if (identical(use_bounds, 0)) {
-    return(c(-B0))
+#' Constraint vector for the Cox-Shi programme
+#'
+#' Mirrors the canonical construction: the bound block (or a vector of -1 when
+#' bounds are switched off) followed by the zero block for the shape
+#' restrictions. The zero block has `(K + 1) * (J - K / 2)` entries; without it
+#' R recycles the bound block and slackens the shape constraints.
+build_constraint_vector <- function(B0, B1, B2, bnd_adj, use_bounds, J, K, p_min = 0) { # nolint: object_name_linter.
+  zeros <- rep(0, (K + 1) * (J - K / 2))
+  if (use_bounds == 0) {
+    return(c(rep(-1, J), zeros))
   }
-  b0 <- -B0 / Galpha
-  b1 <- -B1 / Galpha
-  b2 <- -B2 / Galpha
-  b0[1] <- -1
-  b1[1] <- -1
-  b2[1] <- -1
-  c(b0, b1, b2)
+  bounds <- list(-B0 / bnd_adj, -B1 / bnd_adj, -B2 / bnd_adj)[seq_len(K + 1)]
+  if (p_min == 0) {
+    bounds <- lapply(bounds, function(b) {
+      b[1] <- -1
+      b
+    })
+  }
+  c(unlist(lapply(bounds, as.vector)), zeros)
 }
 
+#' Adapted from pracma::fmincon (GPL-3, compatible with this package's license)
 fmincon <- function(x0, fn, gr = NULL, ..., method = "SQP",
                     A = NULL, b = NULL, Aeq = NULL, beq = NULL, # nolint: object_name_linter.
                     lb = NULL, ub = NULL, hin = NULL, heq = NULL,
@@ -457,10 +354,10 @@ fmincon <- function(x0, fn, gr = NULL, ..., method = "SQP",
   }
 
   if (!requireNamespace("NlcOptim", quietly = TRUE)) {
-    cli::cli_abort("Package 'NlcOptim' missing -- install from CRAN.")
+    cli::cli_abort("Package {.pkg NlcOptim} is required for the SQP optimization step. Install with: install.packages('NlcOptim')")
   }
   if (!requireNamespace("quadprog", quietly = TRUE)) {
-    cli::cli_abort("Package 'quadprog' missing -- install from CRAN.")
+    cli::cli_abort("Package {.pkg quadprog} is required for the SQP optimization step. Install with: install.packages('quadprog')")
   }
 
   fun <- match.fun(fn)
@@ -522,73 +419,92 @@ fmincon <- function(x0, fn, gr = NULL, ..., method = "SQP",
   )
 }
 
-solve_coxshi_problem <- function(t0, fn, A, b) {
+#' Solve the Cox-Shi quadratic programme, retrying from random starts
+#'
+#' Returns `NULL` once the retry budget is exhausted so that callers can report
+#' nonconvergence instead of looping forever on a deterministic failure.
+solve_coxshi_problem <- function(t0, fn, A, b, max_restarts = 10L) { # nolint: object_name_linter.
   res <- tryCatch(fmincon(t0, fn, A = A, b = b), error = function(e) NULL)
-  while (is.null(res) || !is.list(res)) {
-    ru <- runif(length(t0))
+  restarts <- 0L
+  while ((is.null(res) || !is.list(res)) && restarts < max_restarts) {
+    ru <- stats::runif(length(t0))
     t0 <- matrix(ru / sum(ru), ncol = 1)
     res <- tryCatch(fmincon(t0, fn, A = A, b = b), error = function(e) NULL)
+    restarts <- restarts + 1L
   }
-  res
+  if (is.null(res) || !is.list(res)) NULL else res
+}
+
+#' NA carrying a human-readable reason for skipping a test
+skipped_result <- function(reason) {
+  out <- NA_real_
+  attr(out, "reason") <- reason
+  out
 }
 
 cox_shi_test <- function(Q, ind, p_min, p_max, J, K, use_bounds) {
+  use_bounds <- as.integer(use_bounds)
+  K <- as.integer(K) # nolint: object_name_linter.
+  J <- as.integer(J) # nolint: object_name_linter.
   filtered <- filter_pvalues(Q, ind, p_min, p_max)
   P <- filtered$P
   ind_filtered <- filtered$ind
   N <- length(P)
-  Galpha <- N / length(Q) # nolint: object_name_linter.
+  bnd_adj <- N / length(Q)
   phat_data <- compute_phat(P, J, p_min, p_max)
   phat <- phat_data$phat
   bins <- phat_data$bins
-  B0 <- bound0(p_max, J)
-  B1 <- bound1(p_max, J)
-  B2 <- bound2(p_max, J)
-  if (identical(use_bounds, 0)) {
-    B0 <- rep(1, J)
-  }
+  lam <- pair_lambdas(p_min, p_max, J)
+  B0 <- bounds_from_lambdas(lam, 0L, p_min)
+  B1 <- bounds_from_lambdas(lam, 1L, p_min)
+  B2 <- bounds_from_lambdas(lam, 2L, p_min)
   omega <- compute_omega(P, ind_filtered, phat, bins)
+  omega_inv <- if (is.finite(det(omega)) && abs(det(omega)) > 0) {
+    tryCatch(solve(omega), error = function(e) NULL)
+  } else {
+    NULL
+  }
+  if (is.null(omega_inv)) {
+    return(skipped_result(paste0(
+      "the bin covariance matrix is singular with J = ", J,
+      " bins on [", p_min, ", ", p_max, "] (", N,
+      " p-values in the window); try fewer bins"
+    )))
+  }
   D <- build_difference_matrix(J)
   dk <- extend_difference_matrix(D, J, K)
-  if (identical(use_bounds, 0)) {
-    dk <- rbind(-diag(J), diag(J), dk)
+  dk <- if (use_bounds == 0) {
+    rbind(-diag(J), diag(J), dk)
   } else {
-    dk <- rbind(-diag(J), -dk, diag(J), dk)
+    rbind(-diag(J), -dk, diag(J), dk)
   }
   ej <- rep(0, J)
   ej[J] <- 1
-  F1 <- rbind(-diag(J - 1), rep(1, J - 1))
-  constraint_vector <- if (identical(use_bounds, 0)) {
-    rep(0, nrow(dk))
-  } else {
-    build_constraint_vector(B0, B1, B2, Galpha, use_bounds, J, K)
-  }
-  A <- dk %*% F1
+  F1 <- rbind(-diag(J - 1), rep(1, J - 1)) # nolint: object_name_linter.
+  constraint_vector <- build_constraint_vector(B0, B1, B2, bnd_adj, use_bounds, J, K, p_min)
+  A <- dk %*% F1 # nolint: object_name_linter.
   b_vec <- dk %*% ej - constraint_vector
   fn <- function(t) {
     diff_vec <- phat - t
-    N * t(diff_vec) %*% solve(omega) %*% diff_vec
+    N * t(diff_vec) %*% omega_inv %*% diff_vec
   }
-  start <- matrix(1 / (J - 1), ncol = 1, nrow = J - 1)
+  start <- matrix(1 / J, ncol = 1, nrow = J - 1)
   result <- solve_coxshi_problem(start, fn, A, b_vec)
-  if (is.null(result) || is.null(result$par)) {
-    return(NA_real_)
+  if (is.null(result) || is.null(result$par) || result$convergence != 0) {
+    return(skipped_result("the constrained optimisation did not converge"))
   }
-  t_opt <- result$par
-  stat <- fn(t_opt)
+  stat <- fn(result$par)
   ba <- A[result$info$lambda$ineqlin > 0, , drop = FALSE]
-  JX <- qr(ba)$rank
-  if (result$convergence == 0 && JX > 0) {
-    1 - stats::pchisq(stat, df = JX)
-  } else {
-    NA_real_
-  }
+  JX <- qr(ba)$rank # nolint: object_name_linter.
+  # JX == 0 is the interior (unconstrained) solution: no shape restriction
+  # binds, so the p-curve is compatible with the null and p = 1.
+  as.numeric(1 - stats::pchisq(stat, df = JX) * (JX > 0))
 }
 
 box::export(
   format_decimal,
   linspace,
-  simulate_cdfs,
+  simulate_cdfs_block_cpp,
   simulate_cdfs_parallel,
   binomial_test,
   lcm_test,
@@ -607,5 +523,6 @@ box::export(
   extend_difference_matrix,
   build_constraint_vector,
   solve_coxshi_problem,
+  skipped_result,
   cox_shi_test
 )

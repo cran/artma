@@ -59,7 +59,9 @@ select_combined_regression <- function(pet_estimate, pet_std_error, peese_estima
 compute_variance_component <- function(combined_residual_sum, data, peese_model) {
   m <- nrow(data)
   wis_sum <- base::sum(data$wis)
-  df_model <- stats::df.residual(peese_model)
+  # Bom & Rachinger divide Q1 by M - e(df_m) - 1, where e(df_m) is the model
+  # degrees of freedom (number of regressors), not the residual df.
+  df_model <- length(stats::coef(peese_model))
   sigma_sq <- base::pmax(0, m * ((combined_residual_sum / (m - df_model - 1)) - 1) / wis_sum)
   list(
     variance_component = sigma_sq,
@@ -91,7 +93,7 @@ final_endokink_fit <- function(prepared_data, cutoff, verbose) {
   sebs_min <- min(prepared_data$sebs)
   sebs_max <- max(prepared_data$sebs)
   if (cutoff > sebs_min && cutoff < sebs_max) {
-    prepared_data$sebs_a1 <- if (prepared_data$sebs > cutoff) prepared_data$sebs - cutoff else 0
+    prepared_data$sebs_a1 <- base::pmax(prepared_data$sebs - cutoff, 0)
     prepared_data$pubbias <- prepared_data$sebs_a1 / prepared_data$sebs
     model <- stats::lm(bs ~ 0 + constant + pubbias, data = prepared_data)
     result <- summary(model)$coefficients
@@ -119,7 +121,10 @@ final_endokink_fit <- function(prepared_data, cutoff, verbose) {
 #'
 #' @param data [data.frame] Two column data.frame with effect estimates and standard errors.
 #' @param verbose [logical] Should intermediate summaries be printed? Default `TRUE`.
-#' @return A numeric vector with the point estimates and standard errors in the same order as the legacy implementation.
+#' @return A numeric vector with the point estimates and standard errors in the same order as the
+#'   legacy implementation (`constant`, its SE, `pub_bias`, its SE), plus a 5th element
+#'   `heterogeneity_sd`: the model's residual heterogeneity standard deviation (the same quantity
+#'   used internally to locate the kink cut-off), with no associated standard error of its own.
 run_endogenous_kink <- function(data, verbose = TRUE) {
   stopifnot(
     is.data.frame(data),
@@ -139,7 +144,8 @@ run_endogenous_kink <- function(data, verbose = TRUE) {
     constant <- ones_sebs
     pub_bias <- ones
   })
-  final_endokink_fit(renamed, cutoff, verbose)
+  fit <- final_endokink_fit(renamed, cutoff, verbose)
+  c(fit, heterogeneity_sd = variance$standard_deviation)
 }
 
 box::export(

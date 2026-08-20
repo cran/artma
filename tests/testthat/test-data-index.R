@@ -1,6 +1,6 @@
 box::use(
   testthat[test_that, expect_equal],
-  artma / testing / mocks / index[MOCKS]
+  testing / mocks / index[MOCKS]
 )
 
 test_that("prepare_data reads source data only once on a cache-miss execution", {
@@ -24,11 +24,7 @@ test_that("prepare_data reads source data only once on a cache-miss execution", 
   withr::local_options(list(
     "artma.cache.use_cache" = FALSE,
     "artma.data.source_path" = tmp_file,
-    "artma.data.colnames.study_id" = "study_id",
-    "artma.data.colnames.effect" = "effect",
-    "artma.data.colnames.se" = "se",
-    "artma.data.colnames.n_obs" = "n_obs",
-    "artma.data.config" = precomputed_overrides,
+    "artma.data.columns" = precomputed_overrides,
     "artma.data.config_setup" = "auto",
     "artma.data.na_handling" = "remove",
     "artma.calc.se_zero_handling" = "ignore",
@@ -36,16 +32,11 @@ test_that("prepare_data reads source data only once on a cache-miss execution", 
   ))
 
   box::use(
-    artma / data / index[prepare_data],
-    artma / data_config / resolve[invalidate_df_cache]
+    artma / data / index[prepare_data]
   )
-
-  invalidate_df_cache()
 
   msgs <- testthat::capture_messages(prepare_data())
   read_msgs <- grep("Reading data from", msgs, value = TRUE)
 
   expect_equal(length(read_msgs), 1L)
-
-  invalidate_df_cache()
 })

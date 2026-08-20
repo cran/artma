@@ -27,7 +27,7 @@ make_config_entry <- function(name, verbose, data_type, equal = NA_real_, gltl =
 
 test_that("effect summary stats computes segmented summaries", {
   local_options(
-    "artma.data.config" = list(
+    "artma.data.columns" = list(
       group = make_config_entry("group", "Group", "int", equal = 1),
       score = make_config_entry("score", "Score", "float", gltl = "median")
     ),
@@ -44,7 +44,7 @@ test_that("effect summary stats computes segmented summaries", {
     score = c(1, 2, 3, 4, 5)
   )
 
-  result <- effect_summary_stats(df)
+  result <- effect_summary_stats(df)$tables$summary
 
   expect_named(result, c(
     "Var Name", "Var Class", "Mean", "CI lower", "CI upper",
@@ -57,12 +57,15 @@ test_that("effect summary stats computes segmented summaries", {
     "Score >= 2.5",
     "Score < 2.5"
   ))
+  # Weighted mean weights each estimate by 1/study_size (equal weight per
+  # study); its CI uses the weighted-mean SE sqrt(sum(w_i^2 (x_i - xbar_w)^2)),
+  # and the unweighted CI uses the unrounded SD.
   expect_equal(result$Mean, c(0.25, 0.15, 0.35, 0.15))
-  expect_equal(result$`CI lower`, c(0.124, 0.052, 0.252, 0.052))
-  expect_equal(result$`CI upper`, c(0.376, 0.248, 0.448, 0.248))
-  expect_equal(result$`Weighted Mean`, c(0.19, 0.15, 0.35, 0.15))
-  expect_equal(result$`WM CI lower`, c(0.098, 0.081, 0.281, 0.081))
-  expect_equal(result$`WM CI upper`, c(0.282, 0.219, 0.419, 0.219))
+  expect_equal(result$`CI lower`, c(0.123, 0.052, 0.252, 0.052))
+  expect_equal(result$`CI upper`, c(0.377, 0.248, 0.448, 0.248))
+  expect_equal(result$`Weighted Mean`, c(0.217, 0.15, 0.35, 0.15))
+  expect_equal(result$`WM CI lower`, c(0.115, 0.081, 0.281, 0.081))
+  expect_equal(result$`WM CI upper`, c(0.318, 0.219, 0.419, 0.219))
   expect_equal(result$Median, c(0.25, 0.15, 0.35, 0.15))
   expect_equal(result$Min, c(0.1, 0.1, 0.3, 0.1))
   expect_equal(result$Max, c(0.4, 0.2, 0.4, 0.2))
@@ -72,7 +75,7 @@ test_that("effect summary stats computes segmented summaries", {
 
 test_that("formal output hides presentation columns", {
   local_options(
-    "artma.data.config" = list(
+    "artma.data.columns" = list(
       group = make_config_entry("group", "Group", "int", equal = 1)
     ),
     "artma.methods.effect_summary_stats.conf_level" = 0.9,
@@ -87,7 +90,7 @@ test_that("formal output hides presentation columns", {
     group = c(1, 1, 0)
   )
 
-  result <- effect_summary_stats(df)
+  result <- effect_summary_stats(df)$tables$summary
 
   expect_named(result, c(
     "Var Name", "Mean", "CI lower", "CI upper",

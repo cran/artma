@@ -10,13 +10,11 @@ t_stat_histogram <- function(df) {
   box::use(
     artma / libs / core / utils[get_verbosity],
     artma / libs / core / validation[assert, validate, validate_columns],
+    artma / modules / runtime_methods[new_method_result],
     artma / options / index[get_option_group],
+    artma / options / resolver[opt_spec, resolve_options],
     artma / visualization / options[get_visualization_options],
-    artma / visualization / export[
-      save_plot,
-      build_export_filename,
-      ensure_export_dir
-    ]
+    artma / visualization / export[export_named_plots, preview_plot]
   )
 
   validate(is.data.frame(df))
@@ -29,47 +27,52 @@ t_stat_histogram <- function(df) {
   opt <- get_option_group("artma.methods.t_stat_histogram")
   vis <- get_visualization_options()
 
-  lower_cutoff <- opt$lower_cutoff %||% -120
-  upper_cutoff <- opt$upper_cutoff %||% 120
-  critical_values <- opt$critical_values %||% 1.96
-  n_bins <- opt$n_bins %||% 80L
-  show_mean_line <- opt$show_mean_line %||% TRUE
-  show_density_curve <- opt$show_density_curve %||% TRUE
-  min_tick_distance <- opt$min_tick_distance %||% 0.5
-  close_up_enabled <- opt$close_up_enabled %||% TRUE
-  close_up_lower <- opt$close_up_lower %||% -10
-  close_up_upper <- opt$close_up_upper %||% 10
-  close_up_min_tick_distance <- opt$close_up_min_tick_distance %||% 0.3
+  resolved <- resolve_options(opt, list(
+    lower_cutoff = opt_spec(default = -120, type = "numeric"),
+    upper_cutoff = opt_spec(default = 120, type = "numeric"),
+    critical_values = opt_spec(
+      default = 1.96, type = "numeric",
+      constraint = function(x) all(x > 0),
+      constraint_msg = "critical_values must be positive (symmetric +/- applied automatically)"
+    ),
+    n_bins = opt_spec(
+      default = 80L, type = "numeric", cast = as.integer,
+      constraint = function(x) x > 0,
+      constraint_msg = "n_bins must be positive"
+    ),
+    show_mean_line = opt_spec(default = TRUE, type = "logical"),
+    show_density_curve = opt_spec(default = TRUE, type = "logical"),
+    min_tick_distance = opt_spec(
+      default = 0.5, type = "numeric",
+      constraint = function(x) x > 0,
+      constraint_msg = "min_tick_distance must be positive"
+    ),
+    close_up_enabled = opt_spec(default = TRUE, type = "logical"),
+    close_up_lower = opt_spec(default = -10, type = "numeric"),
+    close_up_upper = opt_spec(default = 10, type = "numeric"),
+    close_up_min_tick_distance = opt_spec(default = 0.3, type = "numeric")
+  ))
+
+  lower_cutoff <- resolved$lower_cutoff
+  upper_cutoff <- resolved$upper_cutoff
+  critical_values <- resolved$critical_values
+  n_bins <- resolved$n_bins
+  show_mean_line <- resolved$show_mean_line
+  show_density_curve <- resolved$show_density_curve
+  min_tick_distance <- resolved$min_tick_distance
+  close_up_enabled <- resolved$close_up_enabled
+  close_up_lower <- resolved$close_up_lower
+  close_up_upper <- resolved$close_up_upper
+  close_up_min_tick_distance <- resolved$close_up_min_tick_distance
   theme_name <- vis$theme
   export_graphics <- vis$export_graphics
   export_path <- vis$export_path
   graph_scale <- vis$graph_scale
 
-  validate(
-    is.numeric(lower_cutoff),
-    is.numeric(upper_cutoff),
-    is.numeric(critical_values),
-    is.numeric(n_bins),
-    is.logical(show_mean_line),
-    is.logical(show_density_curve),
-    is.numeric(min_tick_distance),
-    is.logical(close_up_enabled),
-    is.numeric(close_up_lower),
-    is.numeric(close_up_upper),
-    is.numeric(close_up_min_tick_distance)
-  )
-
-  n_bins <- as.integer(n_bins)
   assert(
     lower_cutoff < upper_cutoff,
     "lower_cutoff must be less than upper_cutoff"
   )
-  assert(n_bins > 0, "n_bins must be positive")
-  assert(
-    all(critical_values > 0),
-    "critical_values must be positive (symmetric +/- applied automatically)"
-  )
-  assert(min_tick_distance > 0, "min_tick_distance must be positive")
 
   if (close_up_enabled) {
     assert(
@@ -106,7 +109,7 @@ t_stat_histogram <- function(df) {
         lower_cutoff, ", ", upper_cutoff, "] excluded"
       ))
     }
-    suppressWarnings(print(main_result$plot)) # nolint: undesirable_function_linter.
+    preview_plot(main_result$plot)
   }
 
   # Build the close-up plot (if enabled)
@@ -130,19 +133,22 @@ t_stat_histogram <- function(df) {
         "T-Statistic Distribution (Close-up: [",
         close_up_lower, ", ", close_up_upper, "])"
       ))
-      suppressWarnings(print(close_up_result$plot)) # nolint: undesirable_function_linter.
+      preview_plot(close_up_result$plot)
     }
   }
 
   # Export if enabled
   if (export_graphics) {
-    export_t_stat_histograms(
-      main_plot = main_result$plot,
-      close_up_plot = if (!is.null(close_up_result)) {
-        close_up_result$plot
-      },
+    export_named_plots(
+      plots = list(
+        full_range = main_result$plot,
+        close_up = if (!is.null(close_up_result)) close_up_result$plot
+      ),
+      base_name = "t_stat_histogram",
       export_path = export_path,
-      graph_scale = graph_scale
+      graph_scale = graph_scale,
+      width = 800,
+      height = 600
     )
   }
 
@@ -155,17 +161,20 @@ t_stat_histogram <- function(df) {
     0L
   }
 
-  result <- list(
-    plot_main = main_result$plot,
-    plot_close_up = close_up_plot,
-    n_observations = nrow(df),
-    n_outliers_main = main_result$n_outliers,
-    n_outliers_close_up = close_up_outliers,
-    mean_t_stat = mean(df$t_stat, na.rm = TRUE),
-    close_up_enabled = close_up_enabled
-  )
-  class(result) <- c("artma_t_stat_histogram", class(result))
-  invisible(result)
+  invisible(new_method_result(
+    plots = list(
+      plot_main = main_result$plot,
+      plot_close_up = close_up_plot
+    ),
+    meta = list(
+      n_observations = nrow(df),
+      n_outliers_main = main_result$n_outliers,
+      n_outliers_close_up = close_up_outliers,
+      mean_t_stat = mean(df$t_stat, na.rm = TRUE),
+      close_up_enabled = close_up_enabled
+    ),
+    class = "artma_t_stat_histogram"
+  ))
 }
 
 
@@ -212,31 +221,6 @@ compute_data_bounds <- function(filtered_values,
 }
 
 
-#' Determine tick interval for histogram based on data range
-#'
-#' @param range_size *\[numeric\]* Range of data
-#' @return *\[numeric\]* Tick interval
-#' @keywords internal
-determine_histogram_tick_interval <- function(range_size) {
-  if (range_size <= 5) {
-    return(1)
-  }
-  if (range_size <= 20) {
-    return(2)
-  }
-  if (range_size <= 50) {
-    return(5)
-  }
-  if (range_size <= 100) {
-    return(10)
-  }
-  if (range_size <= 200) {
-    return(20)
-  }
-  50
-}
-
-
 #' Generate intelligent x-axis ticks for t-statistic histogram
 #'
 #' @description
@@ -259,7 +243,8 @@ generate_histogram_ticks <- function(bounds,
                                      min_tick_distance,
                                      theme_name) {
   box::use(
-    artma / visualization / colors[get_colors, get_vline_color]
+    artma / visualization / colors[get_colors, get_vline_color],
+    artma / visualization / ticks[resolve_tick_interval, generate_regular_ticks]
   )
 
   lower <- bounds[1]
@@ -274,24 +259,23 @@ generate_histogram_ticks <- function(bounds,
   special_ticks <- unique(c(crit_ticks, mean_value))
 
   # Determine interval for regular ticks
-  interval <- determine_histogram_tick_interval(range_size)
+  interval <- resolve_tick_interval(
+    range_size,
+    breakpoints = c(5, 20, 50, 100, 200),
+    intervals = c(1, 2, 5, 10, 20),
+    fallback = 50
+  )
 
   # Generate regular ticks
-  start_tick <- ceiling(lower / interval) * interval
-  regular_ticks <- numeric(0)
-  current <- start_tick
-  while (current <= upper) {
-    far_from_special <- all(
-      abs(current - special_ticks) >= min_tick_distance
-    )
-    far_from_lower <- abs(current - lower) >= min_tick_distance / 2
-    far_from_upper <- abs(current - upper) >= min_tick_distance / 2
-
-    if (far_from_special && far_from_lower && far_from_upper) {
-      regular_ticks <- c(regular_ticks, current)
-    }
-    current <- current + interval
-  }
+  regular_ticks <- generate_regular_ticks(
+    lower = lower,
+    upper = upper,
+    interval = interval,
+    edge_distance = min_tick_distance / 2,
+    special_values = special_ticks,
+    special_distance = min_tick_distance,
+    upper_inclusive = TRUE
+  )
 
   # Combine all ticks
   all_ticks <- sort(unique(c(
@@ -329,48 +313,6 @@ generate_histogram_ticks <- function(bounds,
 }
 
 
-#' Format tick values as integers or decimals
-#'
-#' @param x *\[numeric\]* Tick values
-#' @return *\[character\]* Formatted labels
-#' @keywords internal
-format_tick_labels <- function(x) {
-  vapply(x, function(val) {
-    if (is.na(val)) {
-      return(NA_character_)
-    }
-    if (val == floor(val)) {
-      as.character(as.integer(val))
-    } else {
-      format(round(val, 2), nsmall = 0, trim = TRUE)
-    }
-  }, FUN.VALUE = character(1))
-}
-
-
-#' Format tick labels with HTML color spans
-#'
-#' @description
-#' Wraps tick labels in HTML span elements with color styling for use
-#' with ggtext::element_markdown().
-#'
-#' @param ticks *\[numeric\]* Tick values
-#' @param colors *\[character\]* Color for each tick
-#'
-#' @return *\[character\]* HTML-formatted labels
-#' @keywords internal
-format_colored_tick_labels <- function(ticks, colors) {
-  labels <- format_tick_labels(ticks)
-
-  vapply(seq_along(labels), function(i) {
-    if (is.na(labels[i])) {
-      return(NA_character_)
-    }
-    sprintf("<span style='color:%s'>%s</span>", colors[i], labels[i])
-  }, FUN.VALUE = character(1))
-}
-
-
 #' Build a single t-statistic histogram
 #'
 #' @param t_values *\[numeric\]* All t-statistic values (pre-filtering)
@@ -398,7 +340,8 @@ build_histogram <- function(t_values,
   box::use(
     artma / libs / core / utils[get_verbosity],
     artma / visualization / colors[get_colors],
-    artma / visualization / theme[get_theme]
+    artma / visualization / theme[get_theme],
+    artma / visualization / ticks[format_colored_tick_labels]
   )
 
   filter_result <- filter_by_cutoff(t_values, lower_cutoff, upper_cutoff)
@@ -500,68 +443,15 @@ build_histogram <- function(t_values,
 }
 
 
-#' Export t-statistic histograms to files
-#'
-#' @param main_plot *\[ggplot\]* Main histogram
-#' @param close_up_plot *\[ggplot, NULL\]* Close-up histogram
-#' @param export_path *\[character\]* Directory
-#' @param graph_scale *\[numeric\]* Scale factor
-#'
-#' @return NULL (invisibly)
-#' @keywords internal
-export_t_stat_histograms <- function(main_plot,
-                                     close_up_plot,
-                                     export_path,
-                                     graph_scale) {
-  box::use(
-    artma / visualization / export[
-      save_plot,
-      build_export_filename,
-      ensure_export_dir
-    ]
-  )
-
-  ensure_export_dir(export_path)
-
-  if (!is.null(main_plot)) {
-    filename <- build_export_filename(
-      "t_stat_histogram", "full_range"
-    )
-    save_plot(
-      plot = main_plot,
-      path = file.path(export_path, filename),
-      width = 800,
-      height = 600,
-      scale = graph_scale
-    )
-  }
-
-  if (!is.null(close_up_plot)) {
-    filename <- build_export_filename(
-      "t_stat_histogram", "close_up"
-    )
-    save_plot(
-      plot = close_up_plot,
-      path = file.path(export_path, filename),
-      width = 800,
-      height = 600,
-      scale = graph_scale
-    )
-  }
-
-  invisible(NULL)
-}
-
-
 box::use(
-  artma / libs / infrastructure / cache[cache_cli_runner],
-  artma / data / cache_signatures[build_data_cache_signature]
+  artma / modules / runtime_methods[register_runtime_method]
 )
 
-run <- cache_cli_runner(
+run <- register_runtime_method(
   t_stat_histogram,
   stage = "t_stat_histogram",
-  key_builder = function(...) build_data_cache_signature()
+  description = "Histograms of the t-statistic distribution with significance lines",
+  required_columns = "t_stat"
 )
 
 box::export(t_stat_histogram, run)

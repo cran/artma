@@ -1,11 +1,10 @@
 box::use(
-  artma / options / column_preprocessing[preprocess_column_mapping]
+  testthat[expect_equal, expect_false, expect_true, test_that]
 )
 
-test_that <- getFromNamespace("test_that", "testthat")
-expect_equal <- getFromNamespace("expect_equal", "testthat")
-expect_true <- getFromNamespace("expect_true", "testthat")
-expect_false <- getFromNamespace("expect_false", "testthat")
+box::use(
+  artma / options / column_preprocessing[preprocess_column_mapping]
+)
 
 
 # Helper to create a mock options_def structure
@@ -22,28 +21,8 @@ create_mock_options_def <- function() {
       allow_na = FALSE
     ),
     list(
-      name = "data.colnames.study_id",
-      type = "character",
-      allow_na = FALSE
-    ),
-    list(
-      name = "data.colnames.effect",
-      type = "character",
-      allow_na = FALSE
-    ),
-    list(
-      name = "data.colnames.se",
-      type = "character",
-      allow_na = FALSE
-    ),
-    list(
-      name = "data.colnames.n_obs",
-      type = "character",
-      allow_na = FALSE
-    ),
-    list(
-      name = "data.colnames.t_stat",
-      type = "character",
+      name = "data.columns",
+      type = "list",
       allow_na = TRUE
     )
   )
@@ -64,55 +43,27 @@ create_temp_csv_file <- function() {
 }
 
 
-test_that("preprocess_column_mapping returns unchanged when no data.source_path", {
-  user_input <- list(
-    "verbose" = 3
-  )
+# When there is nothing to auto-detect (no source path, NA/empty path, or a
+# path that does not resolve to a file), the mapping is returned unchanged.
+test_that("preprocess_column_mapping returns input unchanged when there is nothing to auto-detect", {
   options_def <- create_mock_options_def()
-
   withr::local_options(list("artma.verbose" = 1))
-  result <- preprocess_column_mapping(user_input, options_def)
 
-  expect_equal(result, user_input)
-})
-
-
-test_that("preprocess_column_mapping returns unchanged when data.source_path is NA", {
-  user_input <- list(
-    "data.source_path" = NA
+  cases <- list(
+    "no data.source_path" = list("verbose" = 3),
+    "data.source_path is NA" = list("data.source_path" = NA),
+    "data.source_path is empty string" = list("data.source_path" = ""),
+    "file does not exist" = list("data.source_path" = "/nonexistent/path/to/file.csv")
   )
-  options_def <- create_mock_options_def()
 
-  withr::local_options(list("artma.verbose" = 1))
-  result <- preprocess_column_mapping(user_input, options_def)
-
-  expect_equal(result, user_input)
-})
-
-
-test_that("preprocess_column_mapping returns unchanged when data.source_path is empty string", {
-  user_input <- list(
-    "data.source_path" = ""
-  )
-  options_def <- create_mock_options_def()
-
-  withr::local_options(list("artma.verbose" = 1))
-  result <- preprocess_column_mapping(user_input, options_def)
-
-  expect_equal(result, user_input)
-})
-
-
-test_that("preprocess_column_mapping returns unchanged when file does not exist", {
-  user_input <- list(
-    "data.source_path" = "/nonexistent/path/to/file.csv"
-  )
-  options_def <- create_mock_options_def()
-
-  withr::local_options(list("artma.verbose" = 1))
-  result <- preprocess_column_mapping(user_input, options_def)
-
-  expect_equal(result, user_input)
+  for (label in names(cases)) {
+    user_input <- cases[[label]]
+    expect_equal(
+      preprocess_column_mapping(user_input, options_def),
+      user_input,
+      info = label
+    )
+  }
 })
 
 
@@ -129,31 +80,32 @@ test_that("preprocess_column_mapping returns unchanged when config_setup is manu
   withr::local_options(list("artma.verbose" = 1))
   result <- preprocess_column_mapping(user_input, options_def)
 
-  # Should not add column mappings when manual mode
-  expect_false("data.colnames.study_id" %in% names(result))
-  expect_false("data.colnames.effect" %in% names(result))
+  # Should not add column records when manual mode
+  expect_false("data.columns" %in% names(result))
 })
 
 
-test_that("preprocess_column_mapping returns unchanged when all columns already specified", {
+test_that("preprocess_column_mapping returns unchanged when the column store is already specified", {
   tmp_file <- create_temp_csv_file()
   on.exit(unlink(tmp_file))
 
+  provided_columns <- list(
+    study_id = list(source_name = "study_name"),
+    effect = list(source_name = "effect"),
+    se = list(source_name = "se"),
+    n_obs = list(source_name = "n_obs")
+  )
   user_input <- list(
     "data.source_path" = tmp_file,
-    "data.colnames.study_id" = "study_name",
-    "data.colnames.effect" = "effect",
-    "data.colnames.se" = "se",
-    "data.colnames.n_obs" = "n_obs"
+    "data.columns" = provided_columns
   )
   options_def <- create_mock_options_def()
 
   withr::local_options(list("artma.verbose" = 1))
   result <- preprocess_column_mapping(user_input, options_def)
 
-  # Should keep existing mappings unchanged
-  expect_equal(result$data.colnames.study_id, "study_name")
-  expect_equal(result$data.colnames.effect, "effect")
+  # Should keep the provided store unchanged
+  expect_equal(result$data.columns, provided_columns)
 })
 
 
@@ -170,67 +122,38 @@ test_that("preprocess_column_mapping adds auto-detected columns when missing", {
   withr::local_options(list("artma.verbose" = 3))
   result <- preprocess_column_mapping(user_input, options_def)
 
-  # Should have added auto-detected columns
-  expect_true("data.colnames.study_id" %in% names(result))
-  expect_true("data.colnames.effect" %in% names(result))
-  expect_true("data.colnames.se" %in% names(result))
-  expect_true("data.colnames.n_obs" %in% names(result))
-
-  # Check values are reasonable
-  expect_equal(result$data.colnames.study_id, "study_name")
-  expect_equal(result$data.colnames.effect, "effect")
-  expect_equal(result$data.colnames.se, "se")
-  expect_equal(result$data.colnames.n_obs, "n_obs")
+  # Should have added auto-detected role records to the unified store.
+  # Only genuine renames are stored; columns already carrying the standard
+  # name (effect, se, n_obs) need no record.
+  records <- result$data.columns
+  expect_true(is.list(records))
+  expect_equal(records$study_id$source_name, "study_name")
+  expect_false("effect" %in% names(records))
+  expect_false("se" %in% names(records))
+  expect_false("n_obs" %in% names(records))
 })
 
 
-test_that("preprocess_column_mapping does not override existing column mappings", {
+test_that("preprocess_column_mapping does not override a user-supplied column store", {
   tmp_file <- create_temp_csv_file()
   on.exit(unlink(tmp_file))
 
   user_input <- list(
     "data.source_path" = tmp_file,
-    "data.colnames.study_id" = "my_custom_study_col"
+    "data.columns" = list(
+      study_id = list(source_name = "my_custom_study_col")
+    )
   )
   options_def <- create_mock_options_def()
 
   withr::local_options(list("artma.verbose" = 1))
   result <- preprocess_column_mapping(user_input, options_def)
 
-  # Should preserve user's custom mapping
-  expect_equal(result$data.colnames.study_id, "my_custom_study_col")
-
-  # Should add other detected columns
-  expect_true("data.colnames.effect" %in% names(result))
-  expect_true("data.colnames.se" %in% names(result))
-})
-
-
-test_that("preprocess_column_mapping handles tilde in path", {
-  # Create a CSV in temp dir and use tilde notation
-  tmp_dir <- tempdir()
-  tmp_file <- file.path(tmp_dir, "test_data.csv")
-
-  csv_content <- c(
-    "study_name,effect,se,n_obs",
-    "Study A,10.5,2.3,100"
+  # Should preserve the user's store as-is
+  expect_equal(
+    result$data.columns,
+    list(study_id = list(source_name = "my_custom_study_col"))
   )
-  writeLines(csv_content, tmp_file)
-  on.exit(unlink(tmp_file))
-
-  # Use relative path that will be expanded
-  user_input <- list(
-    "data.source_path" = tmp_file
-  )
-  options_def <- create_mock_options_def()
-
-  withr::local_options(list("artma.verbose" = 1))
-
-  # Should not error
-  result <- preprocess_column_mapping(user_input, options_def)
-
-  # Should have detected columns
-  expect_true("data.colnames.study_id" %in% names(result))
 })
 
 
@@ -250,8 +173,8 @@ test_that("preprocess_column_mapping handles errors gracefully", {
   # Should not error, just return original input
   result <- preprocess_column_mapping(user_input, options_def)
 
-  # Should not have added column mappings due to error
-  expect_false("data.colnames.study_id" %in% names(result))
+  # Should not have added column records due to error
+  expect_false("data.columns" %in% names(result))
 })
 
 
@@ -275,8 +198,8 @@ test_that("preprocess_column_mapping works with comma-delimited files", {
   result <- preprocess_column_mapping(user_input, options_def)
 
   # Should detect columns regardless of delimiter
-  expect_true("data.colnames.study_id" %in% names(result))
-  expect_equal(result$data.colnames.study_id, "study_name")
+  expect_true("study_id" %in% names(result$data.columns))
+  expect_equal(result$data.columns$study_id$source_name, "study_name")
 })
 
 
@@ -299,5 +222,5 @@ test_that("preprocess_column_mapping respects verbosity settings", {
 
   # Both should produce the same result
   expect_equal(result1, result2)
-  expect_true("data.colnames.study_id" %in% names(result1))
+  expect_true("study_id" %in% names(result1$data.columns))
 })

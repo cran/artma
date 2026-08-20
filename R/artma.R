@@ -9,7 +9,7 @@
 #'   data will be used directly, bypassing the data reading step.
 #' @param methods *\[character, optional\]* A character vector of method names to run.
 #'   Use `"all"` to run all available methods. If `NULL`, an interactive menu will
-#'   prompt you to select methods. See `artma::methods.list()` for available methods.
+#'   prompt you to select methods. See `artma::methods_list()` for available methods.
 #' @param options *\[character, optional\]* Name of the options file (with or without
 #'   `.yaml` extension) to use. If `NULL` and running interactively, you will be
 #'   prompted to create or select an options file.
@@ -21,6 +21,10 @@
 #'
 #' @return *\[list\]* A named list containing results from each method, indexed by
 #'   method name. The structure of each result depends on the specific method.
+#'   Methods that fail are omitted from the list; their names and error messages
+#'   are attached as the `failed_methods` attribute. The `run_info` attribute
+#'   carries the run's identity: the methods requested, the effective seed, and
+#'   the files each method wrote.
 #'
 #' @details
 #' The `artma()` function is the primary way to interact with the artma package.
@@ -51,6 +55,51 @@
 #' options configuration. This is useful when you already have data loaded in R or
 #' want to analyze data programmatically.
 #'
+#' ## Parallel Execution
+#'
+#' Methods that do not depend on one another form a dependency layer and run
+#' concurrently in forked workers, so a run costs roughly the slowest method per
+#' layer rather than the sum of all of them. Each method's CLI output is
+#' captured and replayed in discovery order once the layer finishes, so the
+#' console reads like a sequential run.
+#'
+#' Set `general.parallel` to `FALSE` in the options file to disable this.
+#' Execution also falls back to sequential automatically on Windows, on
+#' single-core machines, and in interactive sessions whose autonomy level still
+#' allows methods to prompt.
+#'
+#' Every method receives its own L'Ecuyer-CMRG stream derived from the
+#' `general.seed` option and the method's name, so stochastic methods
+#' (bootstrap, MCMC) draw the same numbers whether the run was parallel or
+#' sequential, and regardless of which other methods ran alongside. Setting
+#' `general.seed` to `NA` derives the run seed from the session RNG instead,
+#' so calling `set.seed()` before `artma()` governs reproducibility the way
+#' it does for any stochastic R function.
+#'
+#' ## Run Manifest
+#'
+#' Every run that saves results writes a `run.json` into its output directory:
+#' when it ran, the options file and data source behind it, the methods
+#' requested, run, skipped and failed, the effective seed, and the files it
+#' wrote. The file list is recorded as the files are written, so it describes
+#' this run rather than the accumulated contents of the directory, and it is
+#' what the HTML report uses to find each method's plots.
+#'
+#' The manifest is overwritten on every run into the same output directory: it
+#' always describes the latest run, never a history. Runs driven by different
+#' options files already get their own output directory, so keep a run by
+#' copying its directory or by pointing `output.dir` somewhere per-run.
+#'
+#' ## Method Failures
+#'
+#' A method that throws an error does not abort the run. The failing method is
+#' skipped with a warning, the remaining methods still execute, and results from
+#' the methods that succeeded are exported as usual. A summary of successes and
+#' failures is printed at the end of the run. The run itself never signals an
+#' error because of a method failure; when every requested method fails, a final
+#' warning is emitted instead. Failed method names and their error messages are
+#' available in the `failed_methods` attribute of the returned list.
+#'
 #' @examples
 #' \dontrun{
 #' # Interactive mode - will prompt for options and methods
@@ -78,8 +127,8 @@
 #' }
 #'
 #' @seealso
-#' - `artma::methods.list()` - List available methods
-#' - `artma::options.create()` - Create a new options file
+#' - `artma::methods_list()` - List available methods
+#' - `artma::options_create()` - Create a new options file
 #' - `artma::prepare_data()` - Prepare data manually
 #'
 #' @export
@@ -109,14 +158,14 @@ artma <- function(
     box::use(
       artma / data / index[prepare_data],
       artma / libs / core / utils[get_verbosity],
+      artma / libs / infrastructure / output_files[
+        begin_output_file_capture, end_output_file_capture
+      ],
       artma / output / export[
         resolve_output_dir, ensure_output_dirs, export_results
       ],
-      artma / interactive / welcome[
-        show_welcome_message,
-        is_first_time_user,
-        mark_welcome_as_shown
-      ]
+      artma / output / run_manifest[manifest_plot_index, write_run_manifest],
+      artma / output / run_summary[render_run_summary]
     )
 
     # Ensure output directories exist before methods run (graphics export
@@ -128,37 +177,92 @@ artma <- function(
       ensure_output_dirs(output_dir)
     }
 
+    # Record every file this run writes, so the manifest describes the run
+    # rather than whatever has accumulated in the output directory.
+    run_capture <- begin_output_file_capture()
+    on.exit(end_output_file_capture(run_capture), add = TRUE)
+
     # Prepare data: use provided data or load from options
     if (is.null(data)) {
-      df <- prepare_data()
+      df <- prepare_data(methods = methods)
     } else {
-      # User provided data directly - still need to preprocess and compute
-      # nolint start: object_usage_linter.
+      # User provided data directly - still need to preprocess and compute.
+      # Mirror prepare_data's phases: decide the NA strategy (configure), run
+      # the pure preprocess + compute, then persist the computed columns.
       box::use(
-        artma / data / preprocess[preprocess_data],
-        artma / data / compute[compute_optional_columns]
+        artma / data / preprocess[clean_data, preprocess_data],
+        artma / data / configure[resolve_na_handling],
+        artma / data / compute[compute_optional_columns, update_config_with_computed_columns],
+        artma / data_config / resolve[prime_df_for_config_cache]
       )
-      # nolint end
 
       if (get_verbosity() >= 3) {
         cli::cli_inform("Using provided data frame (skipping file read step).")
       }
 
+      # Prime the data-config module cache with the frame we already have, so
+      # the repeated `get_data_config()` / `read_df_for_config()` calls inside
+      # `update_config_with_computed_columns()` below reuse it instead of
+      # re-reading and re-standardizing `artma.data.source_path` from disk
+      # (mirroring the priming step `prepare_data()` performs for the
+      # file-backed path).
+      prime_df_for_config_cache(data)
+
+      resolve_na_handling(clean_data(data))
       df <- preprocess_data(data)
       df <- compute_optional_columns(df)
+      update_config_with_computed_columns(df)
     }
 
     # Invoke methods
     results <- invoke_runtime_methods(methods = methods, df = df, ...)
 
     # Export tabular results
+    run_files <- character()
     if (isTRUE(save_results)) {
       export_results(results, output_dir)
+
+      # Optionally render a single self-contained HTML report of the whole run.
+      # A render failure must never abort a run that already produced results.
+      if (isTRUE(getOption("artma.output.report", FALSE))) {
+        tryCatch(
+          {
+            box::use(
+              artma / report / render[gather_report_meta, render_report]
+            )
+            render_report(
+              results = results,
+              output_file = file.path(output_dir, "report.html"),
+              plot_index = manifest_plot_index(attr(results, "run_info")$output_files),
+              report_meta = gather_report_meta(),
+              open = FALSE
+            )
+          },
+          error = function(e) {
+            if (get_verbosity() >= 2) {
+              cli::cli_alert_warning("Failed to render the HTML report: {e$message}")
+            }
+          }
+        )
+      }
+
+      # Close the capture last, so the manifest lists the exported tables and
+      # the report alongside the graphics the methods wrote.
+      run_files <- end_output_file_capture(run_capture)
+      write_run_manifest(
+        results,
+        output_dir = output_dir,
+        run_files = run_files
+      )
     }
+
+    # What ran, what did not, and what it produced. Prints on every run; the
+    # console counterpart of the manifest written just above.
+    render_run_summary(results, output_dir = output_dir, run_files = run_files)
 
     if (isTRUE(save_results) && isTRUE(open_results) && interactive()) {
       tryCatch(
-        results.open(),
+        results_open(), # nolint: box_usage_linter. # Package function from R/results.R
         error = function(e) {
           if (get_verbosity() >= 2) {
             cli::cli_alert_warning(
@@ -171,13 +275,10 @@ artma <- function(
 
     if (get_verbosity() >= 3) {
       cli::cli_alert_success("Analysis complete.")
-      if (isTRUE(save_results)) {
-        cli::cli_alert_info("Results saved to {.path {output_dir}}")
-        if (!isTRUE(open_results)) {
-          cli::cli_alert_info(
-            "Run {.code artma::results.open()} to open the results directory."
-          )
-        }
+      if (isTRUE(save_results) && !isTRUE(open_results)) {
+        cli::cli_alert_info(
+          "Run {.code artma::results_open()} to open the results directory."
+        )
       }
     }
 
@@ -193,45 +294,71 @@ artma <- function(
 
 #' @title Invoke methods
 #' @description Pass a vector of runtime methods to invoke, together with a data frame to invoke these methods on, and invoke them.
+#'
+#' Methods run in an order derived from their declared `depends_on` metadata
+#' (topologically sorted, discovery order preserved among independent methods);
+#' each upstream result is passed to its dependents as a `<dependency>_result`
+#' argument. Before a method runs, its declared `required_columns` are checked
+#' against the data frame and its `suggests` packages against the installed
+#' set; a method that fails either check is skipped with an explanation rather
+#' than aborting the run.
+#'
+#' Method failures are isolated: a method that throws an error is skipped with
+#' a warning and the remaining methods still run. The run only aborts for
+#' invalid input (for example, unknown method names), never because a method
+#' failed or was skipped. Skipped and failed methods are attached as attributes
+#' for the closing run summary to report, and a final warning is emitted if
+#' every method failed.
 #' @param methods *\[character\]* A character vector of the methods to invoke.
 #' @param df *\[data.frame\]* The data frame to invoke the methods on.
+#' @param modules_dir *\[character, optional\]* Directory to discover runtime method modules in. Defaults to `NULL`, in which case the standard package methods directory is used. Used mainly for dependency injection in tests.
 #' @param ... *\[any\]* Additional arguments to pass to the methods.
 #' @return *\[list\]* Results of the invocations, indexed by method names.
+#'   Failed methods are omitted; their names and error messages are attached
+#'   as the `failed_methods` attribute. Methods skipped for missing columns or
+#'   packages are attached as the `skipped_methods` attribute (both named
+#'   character vectors).
 #'
 #' Internal example:
 #' df <- data.frame(...)
 #' invoke_runtime_methods(c("funnel_plot", "bma", "fma"), df)
 #'
 #' @keywords internal
-invoke_runtime_methods <- function(methods, df, ...) {
+invoke_runtime_methods <- function(methods, df, modules_dir = NULL, ...) {
   box::use(
     artma / const[CONST],
     artma / libs / core / string[pluralize],
     artma / libs / core / utils[get_verbosity],
-    artma / modules / runtime_methods[get_runtime_method_modules]
+    artma / libs / infrastructure / output_files[record_output_files],
+    artma / modules / method_execution[
+      build_rng_streams,
+      execute_method_layer,
+      group_methods_into_layers,
+      replay_captured_output,
+      resolve_worker_count
+    ],
+    artma / modules / runtime_methods[
+      get_method_metadata,
+      get_runtime_method_modules,
+      missing_required_columns,
+      missing_suggested_packages,
+      topo_sort_methods
+    ]
   )
 
-  arrange_methods <- function(method_names) {
-    execution_order <- CONST$RUNTIME_METHODS$EXECUTION_ORDER
-
-    if (is.null(execution_order)) {
-      execution_order <- character()
-    }
-
-    execution_order <- unique(as.character(execution_order[!is.na(execution_order)]))
-
-    if (!length(execution_order)) {
-      return(method_names)
-    }
-
-    ordered <- execution_order[execution_order %in% method_names]
-    remaining <- method_names[!method_names %in% ordered]
-
-    c(ordered, remaining)
+  RUNTIME_METHOD_MODULES <- if (is.null(modules_dir)) { # nolint: box_usage_linter.
+    get_runtime_method_modules()
+  } else {
+    get_runtime_method_modules(modules_dir = modules_dir)
   }
+  supported_methods <- names(RUNTIME_METHOD_MODULES)
 
-  RUNTIME_METHOD_MODULES <- get_runtime_method_modules() # nolint: box_usage_linter.
-  supported_methods <- arrange_methods(names(RUNTIME_METHOD_MODULES))
+  method_meta <- stats::setNames(
+    lapply(supported_methods, function(name) {
+      get_method_metadata(RUNTIME_METHOD_MODULES[[name]]$run, name = name)
+    }),
+    supported_methods
+  )
 
   if (is.null(methods)) {
     methods <- climenu::checkbox(
@@ -246,7 +373,14 @@ invoke_runtime_methods <- function(methods, df, ...) {
 
   resolve_methods <- function(methods_input) {
     if (rlang::is_string(methods_input) && methods_input == "all") {
-      return(supported_methods)
+      # Opt-in methods (typically too expensive to run by default) are excluded
+      # from "all" and must be requested by name.
+      is_opt_in <- vapply(
+        method_meta[supported_methods],
+        function(meta) isTRUE(meta$opt_in),
+        logical(1)
+      )
+      return(supported_methods[!is_opt_in])
     }
 
     if (is.factor(methods_input)) {
@@ -256,7 +390,7 @@ invoke_runtime_methods <- function(methods, df, ...) {
     if (!is.character(methods_input)) {
       cli::cli_abort(c(
         "x" = "Runtime methods must be supplied as a character vector.",
-        "i" = "To see a list of available methods, run {.code artma::methods.list()}"
+        "i" = "To see a list of available methods, run {.code artma::methods_list()}"
       ))
     }
 
@@ -274,12 +408,10 @@ invoke_runtime_methods <- function(methods, df, ...) {
     invalid_methods <- setdiff(deduped_methods, supported_methods)
 
     if (length(invalid_methods) > 0L) {
-      # nolint start: object_usage_linter.
       selected_methods <- paste(as.character(invalid_methods), collapse = ", ")
-      # nolint end
       cli::cli_abort(c(
         "x" = "Invalid runtime methods selected: {.val {selected_methods}}",
-        "i" = "To see a list of available methods, run {.code artma::methods.list()}"
+        "i" = "To see a list of available methods, run {.code artma::methods_list()}"
       ))
     }
 
@@ -288,21 +420,304 @@ invoke_runtime_methods <- function(methods, df, ...) {
 
   methods <- resolve_methods(methods)
 
-  methods <- supported_methods[supported_methods %in% methods]
+  # Order by declared dependencies (topological sort), keeping the discovery
+  # order for methods that are independent of one another. A dependent whose
+  # dependency is not requested runs standalone; the method itself falls back to
+  # recomputing what it needs.
+  requested_in_order <- supported_methods[supported_methods %in% methods]
+  deps_map <- lapply(method_meta[requested_in_order], function(meta) meta$depends_on)
+  methods <- topo_sort_methods(requested_in_order, deps_map)
 
   if (get_verbosity() >= 3) {
-    cli::cli_h3("Running {.emph {CONST$PACKAGE_NAME}} methods")
+    cli::cli_h1("Running {.emph {CONST$PACKAGE_NAME}} methods")
     cli::cli_inform(c(
       "i" = "Invoking {length(methods)} {pluralize('method', length(methods))} in total."
     ))
   }
 
   results <- list()
-  for (method_name in methods) {
-    if (get_verbosity() >= 3) {
-      cli::cli_inform("{cli::symbol$bullet} Running the {.code {method_name}} method...")
-    }
-    results[[method_name]] <- RUNTIME_METHOD_MODULES[[method_name]]$run(df = df, ...)
+  succeeded_methods <- character()
+  failed_methods <- character()
+  skipped_methods <- character()
+  method_output_files <- list()
+
+  extra_args <- list(...)
+
+  # Methods that do not depend on one another form a layer and can run
+  # concurrently. Every method gets its own RNG stream up front, derived from
+  # the run seed and the method's own name, so a run is reproducible given the
+  # seed whether it executed in forks or sequentially, and a method's draws do
+  # not change with the set of methods requested alongside it.
+  layers <- group_methods_into_layers(methods, deps_map)
+
+  # A seed set to NA in the options file inherits the session RNG instead:
+  # one draw is consumed to derive the run seed, following the convention of
+  # stochastic R functions, so `set.seed(42); artma(...)` reproduces a run
+  # while unseeded runs vary. Loaded options always carry a concrete value or
+  # an explicit NA (options_load() merges the template defaults), so an absent
+  # option only occurs in programmatic runs without options, where inheriting
+  # the session RNG is the conventional behavior too. The derived seed is
+  # pinned into the option for the run's duration so disk-cache signatures,
+  # which hash the artma option group, key on the effective seed rather than
+  # on NA.
+  run_seed <- getOption("artma.general.seed", default = NA)
+  if (length(run_seed) != 1L || is.na(run_seed)) {
+    run_seed <- sample.int(.Machine$integer.max, 1L)
+    old_seed_option <- options(artma.general.seed = run_seed)
+    on.exit(options(old_seed_option), add = TRUE)
   }
+  rng_streams <- build_rng_streams(methods, seed = run_seed)
+
+  # Sequential layers run methods in this process and would otherwise leave
+  # the last method's stream state behind in `.Random.seed`; parallel layers
+  # leave the parent untouched. Restore the session state once the run ends so
+  # the caller observes the same RNG state regardless of how (or whether, on a
+  # cache hit) the methods executed.
+  session_rng_state <- if (exists(".Random.seed", envir = globalenv(), inherits = FALSE)) {
+    get(".Random.seed", envir = globalenv(), inherits = FALSE)
+  } else {
+    NULL
+  }
+  on.exit(
+    {
+      if (!is.null(session_rng_state)) {
+        assign(".Random.seed", session_rng_state, envir = globalenv()) # nolint: object_name_linter.
+      } else if (exists(".Random.seed", envir = globalenv(), inherits = FALSE)) {
+        rm(".Random.seed", envir = globalenv())
+      }
+    },
+    add = TRUE
+  )
+
+  for (layer in layers) {
+    runnable <- character()
+    layer_args <- list()
+
+    for (method_name in layer) {
+      meta <- method_meta[[method_name]]
+
+      # Gate on declared required columns: skip (do not abort) when any are absent.
+      missing_cols <- missing_required_columns(df, meta$required_columns)
+      if (length(missing_cols) > 0L) {
+        reason <- sprintf(
+          "missing required %s: %s",
+          pluralize("column", length(missing_cols)),
+          paste(missing_cols, collapse = ", ")
+        )
+        skipped_methods[[method_name]] <- reason
+        if (get_verbosity() >= 2) {
+          cli::cli_alert_warning("Skipping {.code {method_name}}: {reason}")
+        }
+        next
+      }
+
+      # Gate on declared optional-package dependencies. Soft-skip everywhere, with
+      # an interactive install offer. The one hard-abort case: a non-interactive
+      # run that requested exactly this single method, so a script gets a clear
+      # signal rather than silently producing nothing. Both gates stay in the
+      # parent process: a forked child cannot prompt.
+      missing_pkgs <- missing_suggested_packages(meta$suggests)
+      if (length(missing_pkgs) > 0L && interactive()) {
+        missing_pkgs <- prompt_install_missing_packages(missing_pkgs, method_name)
+      }
+      if (length(missing_pkgs) > 0L) {
+        reason <- sprintf(
+          "missing suggested %s: %s",
+          pluralize("package", length(missing_pkgs)),
+          paste(missing_pkgs, collapse = ", ")
+        )
+        if (!interactive() && length(methods) == 1L) {
+          cli::cli_abort(c(
+            "x" = "Method {.code {method_name}} cannot run: {reason}.",
+            "i" = "Install with: {.code install.packages({deparse(missing_pkgs)})}"
+          ))
+        }
+        skipped_methods[[method_name]] <- reason
+        if (get_verbosity() >= 2) {
+          cli::cli_alert_warning("Skipping {.code {method_name}}: {reason}")
+        }
+        next
+      }
+
+      method_args <- c(list(df = df), extra_args)
+
+      # Pass each upstream dependency's result to the dependent as
+      # `<dependency>_result`, unless the caller already supplied it. Every
+      # dependency sits in an earlier layer, so its result is already available.
+      for (dep in meta$depends_on) {
+        dep_arg <- paste0(dep, "_result")
+        if (!(dep_arg %in% names(extra_args)) && !is.null(results[[dep]])) {
+          method_args[[dep_arg]] <- results[[dep]]
+        }
+      }
+
+      runnable <- c(runnable, method_name)
+      layer_args[[method_name]] <- method_args
+    }
+
+    if (length(runnable) == 0L) {
+      next
+    }
+
+    workers <- resolve_worker_count(length(runnable))
+
+    if (get_verbosity() >= 3) {
+      for (method_name in runnable) {
+        cli::cli_inform("{cli::symbol$bullet} Running the {.code {method_name}} method...")
+      }
+    }
+
+    outcomes <- execute_method_layer(
+      runnable,
+      run_one = function(method_name) {
+        do.call(RUNTIME_METHOD_MODULES[[method_name]]$run, layer_args[[method_name]])
+      },
+      streams = rng_streams,
+      workers = workers
+    )
+
+    # Replay each method's output in discovery order, so concurrent execution
+    # reads exactly like a sequential run.
+    for (i in seq_along(runnable)) {
+      method_name <- runnable[[i]]
+      outcome <- outcomes[[i]]
+
+      replay_captured_output(outcome$output)
+
+      # Files a method wrote are recorded per method (for the report's plot
+      # index) and replayed into the enclosing run capture, which never saw
+      # them when the method ran in a forked worker.
+      if (length(outcome$files) > 0L) {
+        method_output_files[[method_name]] <- unique(as.character(outcome$files))
+        record_output_files(outcome$files)
+      }
+
+      if (!is.null(outcome$error)) {
+        failed_methods[[method_name]] <- outcome$error
+        if (get_verbosity() >= 2) {
+          cli::cli_warn(
+            "Method {.code {method_name}} failed and was skipped: {outcome$error}"
+          )
+        }
+        next
+      }
+
+      succeeded_methods <- c(succeeded_methods, method_name)
+      results[[method_name]] <- outcome$value
+    }
+  }
+
+  # Build unified MA table when BMA and/or FMA have produced results. Both
+  # methods return the standard contract, so the unrounded numbers live in the
+  # `estimates` slot and skip reasons under `meta$skip_reason`.
+  extract_ma_estimates <- function(result) {
+    if (is.null(result) || !is.list(result) || !is.null(result$meta$skip_reason)) {
+      return(NULL)
+    }
+    estimates <- result$estimates
+    if (is.null(estimates) || !is.data.frame(estimates) || nrow(estimates) == 0) {
+      return(NULL)
+    }
+    estimates
+  }
+
+  bma_estimates <- extract_ma_estimates(results[["bma"]])
+  fma_estimates <- extract_ma_estimates(results[["fma"]])
+
+  if (!is.null(bma_estimates) || !is.null(fma_estimates)) {
+    box::use(artma / output / ma_table[build_ma_table, display_ma_table])
+
+    round_to <- as.integer(getOption("artma.output.number_of_decimals", 3))
+    ma_table <- build_ma_table(
+      bma_estimates = bma_estimates,
+      fma_estimates = fma_estimates,
+      round_to = round_to
+    )
+
+    if (!is.null(ma_table)) {
+      display_ma_table(ma_table, verbosity = get_verbosity())
+      results[["ma_table"]] <- list(
+        tables = list(summary = ma_table),
+        plots = list(),
+        meta = list()
+      )
+    }
+  }
+
+  if (length(failed_methods) > 0L) {
+    attr(results, "failed_methods") <- failed_methods
+  }
+  if (length(skipped_methods) > 0L) {
+    attr(results, "skipped_methods") <- skipped_methods
+  }
+
+  # Run identity, for the per-run manifest: what was asked for, which seed the
+  # run settled on, and which files each method wrote. One attribute rather
+  # than three, so printing a result list stays readable.
+  attr(results, "run_info") <- list(
+    methods_requested = methods,
+    seed = run_seed,
+    output_files = method_output_files
+  )
+
+  # The per-method outcome summary is rendered once, at the end of the run, by
+  # `render_run_summary()` (artma/output/run_summary), which also reports what
+  # the run wrote and where. The attributes set above are its input.
+
+  if (length(failed_methods) > 0L && length(succeeded_methods) == 0L && get_verbosity() >= 2) {
+    cli::cli_warn(
+      "All {length(methods)} requested {pluralize('method', length(methods))} failed. No method results were produced."
+    )
+  }
+
   results
+}
+
+#' @title Offer to install missing suggested packages
+#' @description
+#' In interactive sessions, offer to install the optional packages a method
+#' needs before it runs. Returns the packages still missing afterwards (the
+#' whole set unchanged when the user declines or the session is
+#' non-interactive), so the caller can decide to skip the method.
+#' @param pkgs *\[character\]* Packages the method suggests but that are absent.
+#' @param method_name *\[character\]* Method the packages are needed for.
+#' @param is_installed *\[function, optional\]* Predicate testing package
+#'   availability. Injectable for testing; defaults to `requireNamespace`.
+#' @param install_packages *\[function, optional\]* Installer. Injectable for
+#'   testing; defaults to `utils::install.packages`.
+#' @return *\[character\]* The packages that remain missing.
+#' @keywords internal
+prompt_install_missing_packages <- function(pkgs, method_name,
+                                            is_installed = NULL,
+                                            install_packages = NULL) {
+  box::use(
+    artma / libs / core / autonomy[should_prompt_user]
+  )
+
+  if (length(pkgs) == 0L) {
+    return(character())
+  }
+  if (is.null(is_installed)) {
+    is_installed <- function(pkg) requireNamespace(pkg, quietly = TRUE)
+  }
+  if (!interactive() || !should_prompt_user(required_level = "balanced")) {
+    return(pkgs)
+  }
+
+  choice <- climenu::select(
+    choices = c("Yes", "No"),
+    prompt = cli::format_inline(
+      "Method {.code {method_name}} needs {pkgs}, which {?is/are} not installed. Install now?"
+    )
+  )
+  if (!identical(choice, "Yes")) {
+    return(pkgs)
+  }
+
+  if (is.null(install_packages)) {
+    install_packages <- function(p) utils::install.packages(p)
+  }
+  tryCatch(install_packages(pkgs), error = function(e) NULL)
+
+  pkgs[!vapply(pkgs, function(pkg) isTRUE(is_installed(pkg)), logical(1))]
 }

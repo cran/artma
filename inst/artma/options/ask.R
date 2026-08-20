@@ -44,15 +44,16 @@ ask_for_options_file_name <- function(should_clean = TRUE, prompt = NULL) {
 #' @param multiple *\[logical, optional\]* Whether to allow the selction of multiple values. Defaults to FALSE.
 #' `character` Name of the selected file.
 ask_for_existing_options_file_name <- function(
-    options_dir = NULL,
-    prompt = NULL,
-    multiple = FALSE) {
+  options_dir = NULL,
+  prompt = NULL,
+  multiple = FALSE
+) {
   if (!interactive()) {
     cli::cli_abort("You must provide the options file name explicitly in non-interactive R sessions.")
   }
 
   box::use(
-    artma[options.list],
+    artma[options_list],
     artma / libs / core / string[pluralize]
   )
 
@@ -60,7 +61,7 @@ ask_for_existing_options_file_name <- function(
 
   prompt <- prompt %||% sprintf("Please select the user options file %s you would like to use.", file_str)
 
-  user_options_file_names <- options.list(options_dir = options_dir) # nolint: box_usage_linter.
+  user_options_file_names <- options_list(options_dir = options_dir) # nolint: box_usage_linter.
   if (length(user_options_file_names) == 0) {
     cli::cli_abort("No existing user options files were found. Aborting...")
   }
@@ -93,10 +94,11 @@ ask_for_existing_options_file_name <- function(
 #' @param max_retries *\[integer, optional\]* The maximum number of retries to ask for the option value. Defaults to 3.
 #' `any` The value of the option.
 ask_for_option_value <- function(
-    option_name,
-    option_type = NULL,
-    allow_na = FALSE,
-    max_retries = 3) {
+  option_name,
+  option_type = NULL,
+  allow_na = FALSE,
+  max_retries = 3
+) {
   box::use(
     artma / const[CONST],
     artma / options / utils[validate_option_value],

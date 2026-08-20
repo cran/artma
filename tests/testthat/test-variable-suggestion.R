@@ -1,11 +1,9 @@
 box::use(
   testthat[
-    describe,
     expect_equal,
+    expect_error,
     expect_false,
     expect_true,
-    expect_type,
-    it,
     test_that
   ],
   withr[local_options]
@@ -22,7 +20,8 @@ box::use(
   artma / variable / suggestion[
     suggest_variables_for_effect_summary,
     decide_variable_suggestion
-  ]
+  ],
+  artma / data / utils[get_reserved_colnames]
 )
 
 # Test data generators --------------------------------------------------------
@@ -60,16 +59,6 @@ make_test_data <- function() {
     stringsAsFactors = FALSE
   )
 }
-
-make_minimal_data <- function() {
-  data.frame(
-    effect = c(0.1, 0.2, 0.3, 0.4, 0.5),
-    se = c(0.05, 0.06, 0.07, 0.08, 0.09),
-    var1 = c(1, 2, 3, 4, 5),
-    stringsAsFactors = FALSE
-  )
-}
-
 
 # Tests for detect_dummy_groups -----------------------------------------------
 
@@ -249,8 +238,27 @@ test_that("detect_variable_groups excludes reserved columns", {
 
   result <- detect_variable_groups(df)
 
-  reserved <- c("effect", "se", "study_id", "study_label", "study_size", "sample_size", "dof")
+  # "sample_size" here is a regular user moderator column (see make_test_data),
+  # not the pre-standardization alias for n_obs, so it must NOT be excluded.
+  expect_true("sample_size" %in% result$var_name)
+
+  reserved <- c("effect", "se", "study_id", "study_label", "study_size")
   expect_false(any(result$var_name %in% reserved))
+})
+
+test_that("detect_variable_groups excludes computed pipeline columns", {
+  df <- make_test_data()
+  df$n_obs <- df$study_size
+  df$obs_id <- seq_len(nrow(df))
+  df$t_stat <- df$effect / df$se
+  df$reg_dof <- df$n_obs - 2
+  df$precision <- 1 / df$se
+
+  result <- detect_variable_groups(df)
+
+  computed_cols <- c("n_obs", "obs_id", "t_stat", "reg_dof", "precision")
+  expect_false(any(result$var_name %in% computed_cols))
+  expect_true(all(computed_cols %in% get_reserved_colnames()))
 })
 
 test_that("detect_variable_groups assigns singleton group_type to ungrouped vars", {
@@ -292,6 +300,28 @@ test_that("detect_variable_groups uses existing config groups when available", {
   expect_true("var2" %in% result$var_name)
   expect_equal(result$group_id[result$var_name == "var1"], "my_custom_group")
   expect_equal(result$group_id[result$var_name == "var2"], "my_custom_group")
+})
+
+test_that("detect_variable_groups still detects dummy type when group_category is set from config", {
+  df <- data.frame(
+    effect = rnorm(10),
+    region_asia = sample(c(0, 1), 10, replace = TRUE),
+    region_americas = sample(c(0, 1), 10, replace = TRUE),
+    region_africa = sample(c(0, 1), 10, replace = TRUE),
+    stringsAsFactors = FALSE
+  )
+
+  config <- list(
+    region_asia = list(var_name = "region_asia", group_category = "region"),
+    region_americas = list(var_name = "region_americas", group_category = "region"),
+    region_africa = list(var_name = "region_africa", group_category = "region")
+  )
+
+  result <- detect_variable_groups(df, config = config)
+  region_rows <- result[result$var_name %in% names(config), ]
+
+  expect_true(all(region_rows$group_id == "region"))
+  expect_true(all(region_rows$group_type == "dummy"))
 })
 
 
@@ -610,6 +640,20 @@ test_that("suggest_variables_for_effect_summary requires effect column", {
   )
 })
 
+test_that("suggest_variables_for_effect_summary never suggests computed columns as moderators", {
+  df <- make_test_data()
+  df$n_obs <- df$study_size
+  df$obs_id <- seq_len(nrow(df))
+  df$t_stat <- df$effect / df$se
+  df$reg_dof <- df$n_obs - 2
+  df$precision <- 1 / df$se
+
+  result <- suggest_variables_for_effect_summary(df)
+
+  computed_cols <- c("n_obs", "obs_id", "t_stat", "reg_dof", "precision")
+  expect_false(any(computed_cols %in% result$var_name))
+})
+
 test_that("suggest_variables_for_effect_summary uses config when provided", {
   df <- data.frame(
     effect = rnorm(100),
@@ -641,6 +685,33 @@ test_that("suggest_variables_for_effect_summary uses config when provided", {
 
 
 # Integration tests -----------------------------------------------------------
+
+test_that("suggest_variables_for_effect_summary honors an explicit data_type override over auto-detection", {
+  # citation_count falls entirely within [0, 100], so auto-detection alone
+  # would classify it as "perc"; an explicit "int" override must win.
+  df <- data.frame(
+    effect = rnorm(100),
+    citation_count = sample(17:60, 100, replace = TRUE),
+    stringsAsFactors = FALSE
+  )
+
+  config <- list(
+    citation_count = list(
+      var_name = "citation_count",
+      data_type = "int"
+    )
+  )
+
+  result <- suggest_variables_for_effect_summary(df, config = config)
+
+  row <- result[result$var_name == "citation_count", ]
+  expect_true(nrow(row) > 0)
+  if (row$suggested) {
+    expect_equal(row$split_method, "gltl")
+    expect_true(row$split_value %in% c("mean", "median"))
+  }
+})
+
 
 test_that("full workflow: detect groups and suggest variables", {
   df <- make_test_data()

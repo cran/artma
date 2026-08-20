@@ -8,9 +8,11 @@ fma <- function(df, bma_result = NULL) {
     artma / econometric / bma[handle_bma_params, run_bma],
     artma / econometric / fma[run_fma],
     artma / libs / core / utils[get_verbosity],
-    artma / libs / core / validation[assert, validate, validate_columns],
-    artma / methods / bma[prepare_bma_inputs],
-    artma / options / index[get_option_group]
+    artma / libs / core / validation[validate, validate_columns],
+    artma / methods / bma[prepare_bma_inputs, unwrap_bma_result],
+    artma / modules / runtime_methods[new_method_result],
+    artma / options / index[get_option_group],
+    artma / options / resolver[opt_spec, resolve_options]
   )
 
   validate(is.data.frame(df))
@@ -24,38 +26,44 @@ fma <- function(df, bma_result = NULL) {
   fma_opt <- get_option_group("artma.methods.fma")
   bma_opt <- get_option_group("artma.methods.bma")
 
-  print_results <- fma_opt$print_results %||% "fast"
-  round_to <- fma_opt$round_to %||% NA_integer_
+  fma_resolved <- resolve_options(fma_opt, list(
+    verbose_output = opt_spec(default = FALSE, type = "logical"),
+    print_results = opt_spec(
+      default = "fast", type = "character",
+      constraint = function(x) x %in% c("none", "fast", "verbose", "all"),
+      constraint_msg = "print_results must be one of: none, fast, verbose, all"
+    ),
+    round_to = opt_spec(default = NA_integer_, type = "numeric", allow_na = TRUE),
+    cluster = opt_spec(default = TRUE, type = "logical")
+  ))
 
-  validate(
-    is.character(print_results),
-    is.numeric(round_to) || is.na(round_to)
-  )
+  verbose_output <- fma_resolved$verbose_output
+  print_results <- fma_resolved$print_results
+  round_to <- fma_resolved$round_to
+  cluster <- fma_resolved$cluster
 
-  assert(
-    print_results %in% c("none", "fast", "verbose", "all"),
-    "print_results must be one of: none, fast, verbose, all"
-  )
+  # Suppress individual FMA text output unless verbose_output is enabled
+  effective_print <- if (verbose_output) print_results else "none"
 
-  burn <- bma_opt$burn %||% 10000L
-  iter <- bma_opt$iter %||% 50000L
-  g <- bma_opt$g %||% "UIP"
-  mprior <- bma_opt$mprior %||% "uniform"
-  nmodel <- bma_opt$nmodel %||% 1000L
-  mcmc <- bma_opt$mcmc %||% "bd"
-  use_vif_optimization <- bma_opt$use_vif_optimization %||% FALSE
-  max_groups_to_remove <- bma_opt$max_groups_to_remove %||% 30L
+  bma_resolved <- resolve_options(bma_opt, list(
+    burn = opt_spec(default = 10000L, type = "numeric"),
+    iter = opt_spec(default = 50000L, type = "numeric"),
+    g = opt_spec(default = "UIP", type = "character"),
+    mprior = opt_spec(default = "uniform", type = "character"),
+    nmodel = opt_spec(default = 1000L, type = "numeric"),
+    mcmc = opt_spec(default = "bd", type = "character"),
+    use_vif_optimization = opt_spec(default = FALSE, type = "logical"),
+    max_groups_to_remove = opt_spec(default = 30L, type = "numeric")
+  ))
 
-  validate(
-    is.numeric(burn),
-    is.numeric(iter),
-    is.character(g),
-    is.character(mprior),
-    is.numeric(nmodel),
-    is.character(mcmc),
-    is.logical(use_vif_optimization),
-    is.numeric(max_groups_to_remove)
-  )
+  burn <- bma_resolved$burn
+  iter <- bma_resolved$iter
+  g <- bma_resolved$g
+  mprior <- bma_resolved$mprior
+  nmodel <- bma_resolved$nmodel
+  mcmc <- bma_resolved$mcmc
+  use_vif_optimization <- bma_resolved$use_vif_optimization
+  max_groups_to_remove <- bma_resolved$max_groups_to_remove
 
   bma_params_list <- list(
     burn = as.integer(burn),
@@ -72,32 +80,7 @@ fma <- function(df, bma_result = NULL) {
   }
   bma_params <- bma_params[[1]]
 
-  resolve_bma_result <- function(result) {
-    if (!is.list(result)) {
-      return(list())
-    }
-    if (!is.null(result$model) || !is.null(result$data) || !is.null(result$var_list)) {
-      return(list(
-        model = result$model,
-        data = result$data,
-        var_list = result$var_list
-      ))
-    }
-    if (length(result) > 0 && is.list(result[[1]]) &&
-      (!is.null(result[[1]]$model) || !is.null(result[[1]]$data) || !is.null(result[[1]]$var_list))) {
-      if (get_verbosity() >= 2) {
-        cli::cli_alert_warning("Multiple BMA results supplied. Using the first one for FMA.")
-      }
-      return(list(
-        model = result[[1]]$model,
-        data = result[[1]]$data,
-        var_list = result[[1]]$var_list
-      ))
-    }
-    list()
-  }
-
-  resolved <- resolve_bma_result(bma_result)
+  resolved <- unwrap_bma_result(bma_result)
   bma_model <- resolved$model
   bma_data <- resolved$data
   bma_var_list <- resolved$var_list
@@ -108,25 +91,26 @@ fma <- function(df, bma_result = NULL) {
       config = config,
       use_vif_optimization = use_vif_optimization,
       max_groups_to_remove = max_groups_to_remove,
-      scale_data = FALSE,
+      # Match the orchestrated path, which reuses the scaled frame from bma():
+      # both paths must report coefficients on the same scale.
+      scale_data = TRUE,
       verbosity = get_verbosity()
     )
 
     if (!is.null(prepared$skipped)) {
       if (get_verbosity() >= 2) {
-        cli::cli_alert_warning("No valid BMA variables available. Skipping FMA analysis.")
+        cli::cli_alert_warning("{prepared$skipped}. Skipping FMA analysis.")
       }
-      return(list(
-        coefficients = data.frame(
-          variable = character(0),
-          coefficient = numeric(0),
-          se = numeric(0),
-          p_value = numeric(0),
-          stringsAsFactors = FALSE
-        ),
-        weights = numeric(0),
-        model = NULL,
-        skipped = prepared$skipped
+      empty_coefs <- data.frame(
+        variable = character(0),
+        coefficient = numeric(0),
+        se = numeric(0),
+        p_value = numeric(0),
+        stringsAsFactors = FALSE
+      )
+      return(new_method_result(
+        tables = list(coefficients = empty_coefs),
+        meta = list(weights = numeric(0), model = NULL, skip_reason = prepared$skipped)
       ))
     }
 
@@ -138,36 +122,125 @@ fma <- function(df, bma_result = NULL) {
     if (get_verbosity() >= 3) {
       cli::cli_alert_info("Running BMA to obtain predictor ordering for FMA...")
     }
-    bma_model <- run_bma(bma_data, bma_params)
+    bma_model <- run_bma(bma_data, bma_params, quiet = !verbose_output)
   }
+
+  cluster_ids <- if (cluster) resolve_fma_cluster_ids(df, bma_data) else NULL
 
   fma_results <- run_fma(
     bma_data = bma_data,
     bma_model = bma_model,
     input_var_list = bma_var_list,
+    cluster_ids = cluster_ids,
     round_to = round_to,
-    print_results = print_results
+    print_results = effective_print
   )
 
-  list(
-    coefficients = fma_results$coefficients,
-    weights = fma_results$weights,
-    model = bma_model,
-    data = bma_data,
-    params = bma_params,
-    var_list = bma_var_list
+  new_method_result(
+    tables = list(coefficients = fma_results$coefficients),
+    estimates = fma_estimates(
+      fma_results$coefficients,
+      n_obs = nrow(bma_data),
+      n_clusters = if (is.null(cluster_ids)) NA_integer_ else length(unique(cluster_ids))
+    ),
+    meta = list(
+      weights = fma_results$weights,
+      model = bma_model,
+      data = bma_data,
+      params = bma_params,
+      var_list = bma_var_list,
+      clustered = !is.null(cluster_ids)
+    )
   )
 }
 
+#' @title Tidy estimates for FMA
+#' @description
+#' Map the model-averaged coefficient frame onto the shared `estimates` schema,
+#' one row per moderator. The averaged coefficient, its standard error, and the
+#' Wald p-value carry over unrounded; `n_clusters` is filled only when the
+#' standard errors are clustered, so an `NA` there means iid inference.
+#' @param coefficients *\[data.frame\]* The FMA coefficient frame
+#'   (`variable`, `coefficient`, `se`, `p_value`).
+#' @param n_obs *\[integer, optional\]* Observations the FMA was fitted on.
+#' @param n_clusters *\[integer, optional\]* Number of clusters behind the
+#'   standard errors, or `NA` when they are not clustered.
+#' @return *\[data.frame\]* A frame in the shared estimates schema.
+fma_estimates <- function(coefficients, n_obs = NA_integer_, n_clusters = NA_integer_) {
+  box::use(
+    artma / modules / runtime_methods[new_estimates]
+  )
+
+  if (!is.data.frame(coefficients) || nrow(coefficients) == 0L) {
+    return(new_estimates())
+  }
+
+  new_estimates(data.frame(
+    method = "fma",
+    term = coefficients$variable,
+    estimate = coefficients$coefficient,
+    std_error = coefficients$se,
+    p_value = coefficients$p_value,
+    n_obs = n_obs,
+    n_clusters = n_clusters,
+    stringsAsFactors = FALSE
+  ))
+}
+
+#' Align `study_id` cluster IDs with the prepared BMA frame
+#'
+#' `prepare_bma_inputs()` drops rows via `stats::na.omit()`, so the prepared
+#' frame is matched back to `df` through its surviving row names. Returns
+#' `NULL` (iid standard errors) with a warning whenever a usable cluster
+#' vector cannot be built.
+#'
+#' @param df *\[data.frame\]* The preprocessed data frame passed to the method.
+#' @param bma_data *\[data.frame\]* The prepared BMA/FMA estimation frame.
+#' @return *\[vector, optional\]* Cluster IDs aligned with `bma_data` rows, or `NULL`.
+resolve_fma_cluster_ids <- function(df, bma_data) {
+  box::use(
+    artma / libs / core / utils[get_verbosity]
+  )
+
+  # Downgrading to iid inference changes reported SEs materially; never do it
+  # silently (mirrors robust_vcov's warn_downgrade contract).
+  warn_downgrade <- function(reason) {
+    if (get_verbosity() >= 2) {
+      cli::cli_alert_warning(
+        "Clustered FMA unavailable ({reason}); standard errors are NOT clustered."
+      )
+    }
+  }
+
+  if (!"study_id" %in% colnames(df)) {
+    warn_downgrade("the data have no study_id column")
+    return(NULL)
+  }
+
+  ids <- df[rownames(bma_data), "study_id"]
+  if (any(is.na(ids))) {
+    warn_downgrade("cluster IDs could not be aligned with the estimation frame")
+    return(NULL)
+  }
+  if (length(unique(ids)) < 2L) {
+    warn_downgrade("fewer than two distinct clusters")
+    return(NULL)
+  }
+
+  ids
+}
+
 box::use(
-  artma / libs / infrastructure / cache[cache_cli_runner],
-  artma / data / cache_signatures[build_data_cache_signature]
+  artma / modules / runtime_methods[register_runtime_method]
 )
 
-run <- cache_cli_runner(
+run <- register_runtime_method(
   fma,
   stage = "fma",
-  key_builder = function(...) build_data_cache_signature()
+  description = "Frequentist Model Averaging over the same moderators as BMA",
+  depends_on = "bma",
+  required_columns = c("effect", "se"),
+  suggests = c("BMS", "quadprog")
 )
 
-box::export(fma, run)
+box::export(fma, fma_estimates, resolve_fma_cluster_ids, run)

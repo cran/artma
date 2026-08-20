@@ -35,7 +35,7 @@ prompt_save_preference <- function(option_path, value, description = NULL, respe
     return(FALSE)
   }
 
-  if (respect_autonomy && !should_prompt_user(required_level = 3)) {
+  if (respect_autonomy && !should_prompt_user(required_level = "balanced")) {
     if (get_verbosity() >= 4) {
       cli::cli_inform("Autonomy level is high - preference not saved to file")
     }
@@ -105,8 +105,8 @@ save_to_options_file <- function(option_path, value) {
     {
       box::use(artma / options / files[read_options_file, write_options_file, options_file_path])
 
-      options_file_name <- getOption("artma.temp.file_name")
-      options_dir <- getOption("artma.temp.dir_name")
+      options_file_name <- getOption("artma.temp.file_name", NULL)
+      options_dir <- getOption("artma.temp.dir_name", NULL)
 
       if (is.null(options_file_name) || is.null(options_dir)) {
         if (get_verbosity() >= 2) {
@@ -124,23 +124,18 @@ save_to_options_file <- function(option_path, value) {
       # Parse option path and update nested structure
       path_parts <- strsplit(option_path, "\\.")[[1]]
 
-      # Navigate to the correct level and update
-      if (length(path_parts) == 1) {
-        current_opts[[path_parts[1]]] <- value
-      } else if (length(path_parts) == 2) {
-        if (is.null(current_opts[[path_parts[1]]])) {
-          current_opts[[path_parts[1]]] <- list()
+      # Navigate to the correct level and update. Any depth is handled: each
+      # missing intermediate level is created before the recursive assignment,
+      # so a deeper option path cannot fall through and write nothing.
+      if (length(path_parts) > 1) {
+        for (depth in seq_len(length(path_parts) - 1)) {
+          prefix <- path_parts[seq_len(depth)]
+          if (!is.list(current_opts[[prefix]])) {
+            current_opts[[prefix]] <- list()
+          }
         }
-        current_opts[[path_parts[1]]][[path_parts[2]]] <- value
-      } else if (length(path_parts) == 3) {
-        if (is.null(current_opts[[path_parts[1]]])) {
-          current_opts[[path_parts[1]]] <- list()
-        }
-        if (is.null(current_opts[[path_parts[1]]][[path_parts[2]]])) {
-          current_opts[[path_parts[1]]][[path_parts[2]]] <- list()
-        }
-        current_opts[[path_parts[1]]][[path_parts[2]]][[path_parts[3]]] <- value
       }
+      current_opts[[path_parts]] <- value
 
       # Write back to file
       write_options_file(options_file, current_opts)
@@ -194,7 +189,7 @@ prompt_save_variable_selection <- function(var_names, var_configs = NULL, descri
     return(FALSE)
   }
 
-  if (respect_autonomy && !should_prompt_user(required_level = 3)) {
+  if (respect_autonomy && !should_prompt_user(required_level = "balanced")) {
     if (get_verbosity() >= 4) {
       cli::cli_inform("Autonomy level is high - variable selection not saved to file")
     }

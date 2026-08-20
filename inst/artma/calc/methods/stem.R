@@ -1,3 +1,8 @@
+#' Minimum number of studies STEM will ever select. The MSE-minimising search
+#' never returns a window narrower than this, so a fit that lands exactly on
+#' it is a corner solution rather than a genuine MSE minimum.
+STEM_MIN_STUDIES <- 3L
+
 #' Compute the weighted mean for the first `i` studies
 #'
 #' @param beta [numeric] Effect sizes ordered by precision.
@@ -18,28 +23,14 @@ weighted_mean <- function(beta, se, sigma) {
 #' @param sigma [numeric] Heterogeneity parameter.
 #' @return Numeric vector of weighted second moments.
 weighted_mean_squared <- function(beta, se, sigma) {
-  n <- length(beta)
   weights <- 1 / (se^2 + sigma^2)
-  weight_matrix <- outer(weights, weights)
   weighted_beta <- beta * weights
-  beta_matrix <- outer(weighted_beta, weighted_beta)
-  cumulative_matrix <- compute_submatrix_sums(weight_matrix)
-  cumulative_beta <- compute_submatrix_sums(beta_matrix)
-  numerator <- cumulative_beta - cumsum(weighted_beta^2)
-  denominator <- cumulative_matrix - cumsum(weights^2)
+  # The leading-submatrix sums of outer(x, x) are cumsum(x)^2.
+  numerator <- cumsum(weighted_beta)^2 - cumsum(weighted_beta^2)
+  denominator <- cumsum(weights)^2 - cumsum(weights^2)
   out <- numerator / denominator
   out[1] <- 0
   out
-}
-
-#' Compute cumulative sums for each leading principal submatrix
-#'
-#' @param matrix_input [matrix] Square matrix.
-#' @return Numeric vector with cumulative sums.
-compute_submatrix_sums <- function(matrix_input) {
-  cumulative_cols <- apply(matrix_input, 2, cumsum)
-  cumulative_rows <- t(apply(cumulative_cols, 1, cumsum))
-  diag(cumulative_rows)
 }
 
 #' Variance component for a given number of studies
@@ -81,7 +72,7 @@ stem_compute <- function(beta, se, sigma0) {
   eb_squared <- weighted_mean_squared(beta[-1], se[-1], sigma0)
   mse_original <- eb_squared - 2 * beta[1] * eb_leave_top_out
   var_all <- variance_b(se, sigma0)
-  n_stem_min <- 3
+  n_stem_min <- STEM_MIN_STUDIES
   mse <- mse_original[(n_stem_min - 1):(n - 1)]
   bias <- mse - var_all[n_stem_min:n]
   index <- which.min(mse)
@@ -92,7 +83,10 @@ stem_compute <- function(beta, se, sigma0) {
   sigma_stem <- sqrt(var_stem)
   estimates <- cbind(beta_stem, se_stem, sigma_stem, n_stem)
   colnames(estimates) <- c("beta_stem", "se_stem", "sigma_stem", "n_stem")
-  mse_table <- rbind(mse, var_all[n_stem_min:n], bias[(n_stem_min - 1):(n - 1)])
+  # mse and bias are both already aligned to n_stem = n_stem_min..n; subsetting
+  # bias again would shift it one row up (a bug inherited from the reference
+  # implementation).
+  mse_table <- rbind(mse, var_all[n_stem_min:n], bias)
   rownames(mse_table) <- c("MSE", "", "")
   list(estimates = estimates, MSE = mse_table)
 }
@@ -205,12 +199,14 @@ stem_MSE <- function(MSE_matrix) { # nolint: object_name_linter.
   bias_sq <- MSE_matrix[, 3]
   variance <- MSE_matrix[, 2]
   n_study <- nrow(MSE_matrix)
-  n_min <- 2
-  num_study <- (n_min + 1):(n_study + 1)
+  # Row k of the MSE matrix belongs to n_stem = k + 2 (stems start at 3
+  # studies); plotting rows against their own stem size keeps the minimum at
+  # the reported n_stem.
+  num_study <- seq_len(n_study) + 2
   graphics::layout(matrix(c(1, 2, 3, 3), 2, 2, byrow = TRUE))
-  graphics::plot(num_study, bias_sq[n_min:n_study], type = "l", col = "blue", lwd = 2.5, xlab = "Num of included studies i", ylab = "", main = expression(Bias^2 - b[0]^2))
-  graphics::plot(num_study, variance[n_min:n_study], type = "l", col = "blue", lwd = 2.5, xlab = "Num of included studies i", ylab = "", main = expression(Variance))
-  graphics::plot(num_study, mse[n_min:n_study], type = "l", col = "blue", lwd = 2.5, xlab = "Num of included studies i", ylab = "", main = expression(MSE - b[0]^2))
+  graphics::plot(num_study, bias_sq, type = "l", col = "blue", lwd = 2.5, xlab = "Num of included studies i", ylab = "", main = expression(Bias^2 - b[0]^2))
+  graphics::plot(num_study, variance, type = "l", col = "blue", lwd = 2.5, xlab = "Num of included studies i", ylab = "", main = expression(Variance))
+  graphics::plot(num_study, mse, type = "l", col = "blue", lwd = 2.5, xlab = "Num of included studies i", ylab = "", main = expression(MSE - b[0]^2))
 }
 
 #' Compute median data within clusters
@@ -237,9 +233,9 @@ data_median <- function(data, id_var, main_var, additional_var) {
 
 
 box::export(
+  STEM_MIN_STUDIES,
   weighted_mean,
   weighted_mean_squared,
-  compute_submatrix_sums,
   variance_0,
   variance_b,
   stem_compute,

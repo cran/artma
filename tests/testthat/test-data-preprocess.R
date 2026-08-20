@@ -4,6 +4,8 @@ box::use(
     expect_error,
     expect_true,
     expect_false,
+    expect_warning,
+    expect_no_warning,
     test_that
   ],
   withr[local_options]
@@ -14,366 +16,259 @@ expect_equal <- getFromNamespace("expect_equal", "testthat")
 expect_error <- getFromNamespace("expect_error", "testthat")
 expect_true <- getFromNamespace("expect_true", "testthat")
 expect_false <- getFromNamespace("expect_false", "testthat")
+expect_warning <- getFromNamespace("expect_warning", "testthat")
+expect_no_warning <- getFromNamespace("expect_no_warning", "testthat")
 
-# Helper to create a mock data config
-create_mock_data_config <- function(colnames) {
-  config <- list()
-  for (col in colnames) {
-    col_clean <- make.names(col)
-    config[[col_clean]] <- list(
-      var_name = col,
-      var_name_verbose = col,
-      var_name_description = col,
-      data_type = "float",
-      group_category = NA,
-      na_handling = NA,
-      variable_summary = TRUE,
-      effect_sum_stats = NA,
-      equal = NA,
-      gltl = NA,
-      bma = NA,
-      bma_reference_var = NA,
-      bma_to_log = NA,
-      bpe = NA,
-      bpe_sum_stats = NA,
-      bpe_equal = NA,
-      bpe_gltl = NA
-    )
-  }
-  config
-}
+# Tests for remove_redundant_columns, verify_variable_names, and
+# handle_extra_columns_with_data have been removed. Those functions were
+# deleted and their responsibilities moved to inst/artma/data/schema_reconcile.R.
+# See tests/testthat/test-data-schema-reconcile.R for the replacement tests.
 
-# Helper to create a simple test dataframe
-create_test_df <- function() {
-  data.frame(
-    study_id = c(1L, 2L, 3L),
-    effect = c(1.0, 2.0, 3.0),
-    se = c(0.1, 0.2, 0.3),
-    n_obs = c(100, 200, 300),
-    stringsAsFactors = FALSE
-  )
-}
+# -- enforce_data_types --------------------------------------------------------
 
-test_that("remove_redundant_columns removes empty columns", {
-  box::use(artma / data / preprocess[remove_redundant_columns])
+test_that("enforce_data_types coerces columns according to the config", {
+  box::use(artma / data / preprocess[enforce_data_types])
 
-  df <- create_test_df()
-  df$empty_col <- NA
-  df$another_empty <- rep(NA, nrow(df))
-
-  # Create config with only the original columns
-  config <- create_mock_data_config(c("study_id", "effect", "se", "n_obs"))
-
+  # With no dataframe source, get_data_config returns the overrides as-is
   withr::local_options(list(
-    "artma.data.config" = config,
-    "artma.verbose" = 1,
-    "artma.data.extra_columns_strategy" = "keep"
-  ))
-
-  result <- remove_redundant_columns(df)
-
-  expect_false("empty_col" %in% colnames(result))
-  expect_false("another_empty" %in% colnames(result))
-  expect_true("study_id" %in% colnames(result))
-  expect_true("effect" %in% colnames(result))
-})
-
-test_that("remove_redundant_columns removes columns with data when strategy is 'remove'", {
-  box::use(artma / data / preprocess[remove_redundant_columns])
-
-  df <- create_test_df()
-  df$extra_col <- c(10, 20, 30)
-
-  # Create config without extra_col
-  config <- create_mock_data_config(c("study_id", "effect", "se", "n_obs"))
-
-  withr::local_options(list(
-    "artma.data.config" = config,
-    "artma.verbose" = 2,
-    "artma.data.extra_columns_strategy" = "remove"
-  ))
-
-  result <- remove_redundant_columns(df)
-
-  expect_false("extra_col" %in% colnames(result))
-  expect_true("study_id" %in% colnames(result))
-})
-
-test_that("remove_redundant_columns aborts when strategy is 'abort'", {
-  box::use(artma / data / preprocess[remove_redundant_columns])
-
-  df <- create_test_df()
-  df$extra_col <- c(10, 20, 30)
-
-  # Create config without extra_col
-  config <- create_mock_data_config(c("study_id", "effect", "se", "n_obs"))
-
-  withr::local_options(list(
-    "artma.data.config" = config,
-    "artma.verbose" = 1,
-    "artma.data.extra_columns_strategy" = "abort"
-  ))
-
-  expect_error(
-    remove_redundant_columns(df),
-    "Found.*extra column.*with data"
-  )
-})
-
-test_that("remove_redundant_columns handles no redundant columns", {
-  box::use(artma / data / preprocess[remove_redundant_columns])
-
-  df <- create_test_df()
-
-  # Create config with all columns
-  config <- create_mock_data_config(c("study_id", "effect", "se", "n_obs"))
-
-  withr::local_options(list(
-    "artma.data.config" = config,
+    "artma.data.source_path" = NA,
+    "artma.data.columns" = list(
+      x = list(var_name = "x", data_type = "int"),
+      y = list(var_name = "y", data_type = "category"),
+      z = list(var_name = "z", data_type = "float")
+    ),
     "artma.verbose" = 1
   ))
 
-  result <- remove_redundant_columns(df)
+  df <- data.frame(x = c(1, 2), y = c(TRUE, FALSE), z = c("1.5", "2.5"))
+  result <- enforce_data_types(df)
 
-  expect_equal(ncol(result), ncol(df))
-  expect_equal(colnames(result), colnames(df))
+  expect_true(is.integer(result$x))
+  expect_true(is.character(result$y))
+  expect_true(is.numeric(result$z))
 })
 
-test_that("remove_redundant_columns uses name-based comparison, not position", {
-  box::use(artma / data / preprocess[remove_redundant_columns])
+test_that("enforce_data_types errors on a column with no config entry", {
+  box::use(artma / data / preprocess[enforce_data_types])
 
-  # Create df with columns in different order than config
+  withr::local_options(list(
+    "artma.data.source_path" = NA,
+    "artma.data.columns" = list(
+      x = list(var_name = "x", data_type = "float")
+    ),
+    "artma.verbose" = 1
+  ))
+
+  df <- data.frame(x = c(1.5, 2.5), y = c("a", "b"))
+
+  expect_error(enforce_data_types(df), "No data config entry")
+})
+
+test_that("enforce_data_types skips entries without type information", {
+  box::use(artma / data / preprocess[enforce_data_types])
+
+  withr::local_options(list(
+    "artma.data.source_path" = NA,
+    "artma.data.columns" = list(
+      x = list(var_name = "x", data_type = "float"),
+      y = list(var_name = "y")
+    ),
+    "artma.verbose" = 1
+  ))
+
+  df <- data.frame(x = c(1.5, 2.5), y = c("a", "b"))
+  result <- enforce_data_types(df)
+
+  expect_true(is.numeric(result$x))
+  expect_equal(result$y, df$y)
+})
+
+# -- apply_subset_conditions ---------------------------------------------------
+
+test_that("apply_subset_conditions returns the data frame unchanged when unset", {
+  box::use(artma / data / preprocess[apply_subset_conditions])
+
+  withr::local_options(list(
+    "artma.data.subset_conditions" = NA_character_,
+    "artma.verbose" = 1
+  ))
+
+  df <- data.frame(country = c("USA", "UK"), year = c(1999, 2001))
+  expect_equal(apply_subset_conditions(df), df)
+})
+
+test_that("apply_subset_conditions filters rows matching a single condition", {
+  box::use(artma / data / preprocess[apply_subset_conditions])
+
+  withr::local_options(list(
+    "artma.data.subset_conditions" = "year >= 2000",
+    "artma.verbose" = 1
+  ))
+
+  df <- data.frame(country = c("USA", "UK", "USA"), year = c(1999, 2001, 2005))
+  result <- apply_subset_conditions(df)
+
+  expect_equal(result$year, c(2001, 2005))
+})
+
+test_that("apply_subset_conditions combines multiple conditions with AND", {
+  box::use(artma / data / preprocess[apply_subset_conditions])
+
+  withr::local_options(list(
+    "artma.data.subset_conditions" = c("year >= 2000", "country == 'USA'"),
+    "artma.verbose" = 1
+  ))
+
   df <- data.frame(
-    extra_col = c(1, 2, 3),
-    study_id = c(1L, 2L, 3L),
-    effect = c(1.0, 2.0, 3.0),
-    se = c(0.1, 0.2, 0.3),
-    n_obs = c(100, 200, 300),
-    stringsAsFactors = FALSE
+    country = c("USA", "UK", "USA"),
+    year = c(1999, 2001, 2005)
   )
+  result <- apply_subset_conditions(df)
 
-  # Config expects study_id, effect, se, n_obs (no extra_col)
-  config <- create_mock_data_config(c("study_id", "effect", "se", "n_obs"))
-
-  withr::local_options(list(
-    "artma.data.config" = config,
-    "artma.verbose" = 1,
-    "artma.data.extra_columns_strategy" = "remove"
-  ))
-
-  result <- remove_redundant_columns(df)
-
-  # Should remove extra_col even though it's first, not last
-  expect_false("extra_col" %in% colnames(result))
-  expect_true("study_id" %in% colnames(result))
-  expect_true("effect" %in% colnames(result))
+  expect_equal(nrow(result), 1)
+  expect_equal(result$year, 2005)
 })
 
-test_that("remove_redundant_columns handles make.names standardization", {
-  box::use(artma / data / preprocess[remove_redundant_columns])
-
-  df <- create_test_df()
-  df$`Column With Spaces` <- c(1, 2, 3)
-
-  # Config uses make.names version in var_name, but comparison is done after make.names
-  # So "Column With Spaces" should match "Column.With.Spaces" from config
-  config <- create_mock_data_config(c("study_id", "effect", "se", "n_obs", "Column.With.Spaces"))
+test_that("apply_subset_conditions drops rows where the condition evaluates to NA", {
+  box::use(artma / data / preprocess[apply_subset_conditions])
 
   withr::local_options(list(
-    "artma.data.config" = config,
+    "artma.data.subset_conditions" = "year >= 2000",
     "artma.verbose" = 1
   ))
 
-  # Should not remove the column since it matches after make.names standardization
-  # The column name in the dataframe remains "Column With Spaces" (original name)
-  result <- remove_redundant_columns(df)
+  df <- data.frame(country = c("USA", "UK"), year = c(NA, 2001))
+  result <- apply_subset_conditions(df)
 
-  expect_true("Column With Spaces" %in% colnames(result))
+  expect_equal(nrow(result), 1)
+  expect_equal(result$country, "UK")
 })
 
-test_that("verify_variable_names accepts columns in any order", {
-  box::use(artma / data / preprocess[verify_variable_names])
-
-  # Create df with columns in different order than config
-  df <- data.frame(
-    n_obs = c(100, 200, 300),
-    se = c(0.1, 0.2, 0.3),
-    effect = c(1.0, 2.0, 3.0),
-    study_id = c(1L, 2L, 3L),
-    stringsAsFactors = FALSE
-  )
-
-  # Config expects study_id, effect, se, n_obs (different order)
-  config <- create_mock_data_config(c("study_id", "effect", "se", "n_obs"))
+test_that("apply_subset_conditions errors on an unparseable condition", {
+  box::use(artma / data / preprocess[apply_subset_conditions])
 
   withr::local_options(list(
-    "artma.data.config" = config,
+    "artma.data.subset_conditions" = "year >=",
     "artma.verbose" = 1
   ))
 
-  # Should pass validation regardless of order
-  result <- verify_variable_names(df)
-
-  expect_equal(ncol(result), ncol(df))
-  expect_setequal(colnames(result), c("study_id", "effect", "se", "n_obs"))
+  df <- data.frame(year = c(1999, 2001))
+  expect_error(apply_subset_conditions(df), "Invalid subset condition")
 })
 
-test_that("verify_variable_names catches missing columns", {
-  box::use(artma / data / preprocess[verify_variable_names])
-
-  df <- create_test_df()
-  # Remove one column
-  df$se <- NULL
-
-  config <- create_mock_data_config(c("study_id", "effect", "se", "n_obs"))
+test_that("apply_subset_conditions errors when a condition targets a missing column", {
+  box::use(artma / data / preprocess[apply_subset_conditions])
 
   withr::local_options(list(
-    "artma.data.config" = config,
+    "artma.data.subset_conditions" = "region == 'EU'",
     "artma.verbose" = 1
   ))
 
-  expect_error(
-    verify_variable_names(df),
-    "Missing columns"
-  )
+  df <- data.frame(country = c("USA", "UK"), year = c(1999, 2001))
+  expect_error(apply_subset_conditions(df), "Failed to evaluate subset condition")
 })
 
-test_that("verify_variable_names catches extra columns", {
-  box::use(artma / data / preprocess[verify_variable_names])
+# -- enforce_correct_values ------------------------------------------------------
 
-  df <- create_test_df()
-  df$extra_col <- c(1, 2, 3)
-
-  config <- create_mock_data_config(c("study_id", "effect", "se", "n_obs"))
+test_that("enforce_correct_values defaults to removing rows with zero SE when unset", {
+  box::use(artma / data / preprocess[enforce_correct_values])
 
   withr::local_options(list(
-    "artma.data.config" = config,
+    "artma.calc.se_zero_handling" = NULL,
+    "artma.verbose" = 3
+  ))
+
+  df <- data.frame(se = c(0.1, 0, 0.2, 0))
+  expect_warning(result <- enforce_correct_values(df), "Removed 2 rows")
+
+  expect_equal(nrow(result), 2)
+  expect_true(all(result$se != 0))
+})
+
+test_that("enforce_correct_values treats an NA option as remove", {
+  box::use(artma / data / preprocess[enforce_correct_values])
+
+  # Options with a `.na` template default are loaded into options() as a
+  # literal NA; the read must fall back to "remove" instead of crashing on
+  # `if (NA == "stop")` (issue #321, bug 1).
+  withr::local_options(list(
+    "artma.calc.se_zero_handling" = NA,
+    "artma.verbose" = 3
+  ))
+
+  df <- data.frame(se = c(0.1, 0, 0.2))
+  expect_warning(result <- enforce_correct_values(df), "Removed 1 row")
+
+  expect_equal(result$se, c(0.1, 0.2))
+})
+
+test_that("enforce_correct_values 'remove' strategy drops zero-SE rows with a warning", {
+  box::use(artma / data / preprocess[enforce_correct_values])
+
+  withr::local_options(list(
+    "artma.calc.se_zero_handling" = "remove",
+    "artma.verbose" = 3
+  ))
+
+  df <- data.frame(se = c(0.1, 0, 0.2))
+  expect_warning(result <- enforce_correct_values(df), "stricter validation")
+
+  expect_equal(result$se, c(0.1, 0.2))
+})
+
+test_that("enforce_correct_values 'remove' strategy is a no-op without zero SE", {
+  box::use(artma / data / preprocess[enforce_correct_values])
+
+  withr::local_options(list(
+    "artma.calc.se_zero_handling" = "remove",
     "artma.verbose" = 1
   ))
 
-  expect_error(
-    verify_variable_names(df),
-    "Unexpected columns"
-  )
+  df <- data.frame(se = c(0.1, 0.2))
+  result <- expect_no_warning(enforce_correct_values(df))
+
+  expect_equal(result, df)
 })
 
-test_that("verify_variable_names filters out NA values from config", {
-  box::use(artma / data / preprocess[verify_variable_names])
-
-  df <- create_test_df()
-
-  # Create config with NA value
-  config <- create_mock_data_config(c("study_id", "effect", "se", "n_obs"))
-  # Add an entry with NA var_name
-  config[["invalid"]] <- list(
-    var_name = NA,
-    var_name_verbose = "Invalid",
-    var_name_description = "Invalid",
-    data_type = "float",
-    group_category = NA,
-    na_handling = NA,
-    variable_summary = TRUE,
-    effect_sum_stats = NA,
-    equal = NA,
-    gltl = NA,
-    bma = NA,
-    bma_reference_var = NA,
-    bma_to_log = NA,
-    bpe = NA,
-    bpe_sum_stats = NA,
-    bpe_equal = NA,
-    bpe_gltl = NA
-  )
+test_that("enforce_correct_values 'stop' strategy aborts on zero SE", {
+  box::use(artma / data / preprocess[enforce_correct_values])
 
   withr::local_options(list(
-    "artma.data.config" = config,
+    "artma.calc.se_zero_handling" = "stop",
     "artma.verbose" = 1
   ))
 
-  # Should pass validation (NA is filtered out)
-  result <- verify_variable_names(df)
-
-  expect_equal(ncol(result), ncol(df))
-  expect_setequal(colnames(result), c("study_id", "effect", "se", "n_obs"))
+  df <- data.frame(se = c(0.1, 0))
+  expect_error(enforce_correct_values(df), "contains zero values")
 })
 
-test_that("verify_variable_names provides clear error messages", {
-  box::use(artma / data / preprocess[verify_variable_names])
-
-  df <- create_test_df()
-  df$extra_col <- c(1, 2, 3)
-  df$se <- NULL # Remove required column
-
-  config <- create_mock_data_config(c("study_id", "effect", "se", "n_obs"))
+test_that("enforce_correct_values 'warn' strategy keeps rows but warns", {
+  box::use(artma / data / preprocess[enforce_correct_values])
 
   withr::local_options(list(
-    "artma.data.config" = config,
-    "artma.verbose" = 1
+    "artma.calc.se_zero_handling" = "warn",
+    "artma.verbose" = 3
   ))
 
-  expect_error(
-    verify_variable_names(df),
-    "All expected non-computed columns must exist"
-  )
+  df <- data.frame(se = c(0.1, 0))
+  expect_warning(result <- enforce_correct_values(df), "contains zero values")
 
-  expect_error(
-    verify_variable_names(df),
-    "Missing columns"
-  )
-
-  expect_error(
-    verify_variable_names(df),
-    "Unexpected columns"
-  )
+  expect_equal(result, df)
 })
 
-test_that("verify_variable_names allows computed columns to be missing", {
-  box::use(artma / data / preprocess[verify_variable_names])
-
-  df <- create_test_df()
-  # df does NOT have t_stat, study_size, reg_dof, precision (computed columns)
-
-  # Create config with both required and computed columns
-  config <- create_mock_data_config(c("study_id", "effect", "se", "n_obs", "t_stat", "study_size", "reg_dof", "precision"))
-
-  # Mark computed columns as computed
-  config[["t_stat"]]$is_computed <- TRUE
-  config[["study_size"]]$is_computed <- TRUE
-  config[["reg_dof"]]$is_computed <- TRUE
-  config[["precision"]]$is_computed <- TRUE
+test_that("enforce_correct_values 'ignore' strategy silently keeps rows", {
+  box::use(artma / data / preprocess[enforce_correct_values])
 
   withr::local_options(list(
-    "artma.data.config" = config,
-    "artma.verbose" = 1
+    "artma.calc.se_zero_handling" = "ignore",
+    "artma.verbose" = 3
   ))
 
-  # Should pass validation - computed columns are allowed to be missing
-  result <- verify_variable_names(df)
+  df <- data.frame(se = c(0.1, 0))
+  result <- expect_no_warning(enforce_correct_values(df))
 
-  expect_equal(ncol(result), ncol(df))
-  expect_setequal(colnames(result), c("study_id", "effect", "se", "n_obs"))
+  expect_equal(result, df)
 })
 
-test_that("verify_variable_names still requires non-computed columns", {
-  box::use(artma / data / preprocess[verify_variable_names])
-
-  df <- create_test_df()
-  df$se <- NULL # Remove required column
-
-  # Create config with both required and computed columns
-  config <- create_mock_data_config(c("study_id", "effect", "se", "n_obs", "t_stat"))
-
-  # Mark t_stat as computed
-  config[["t_stat"]]$is_computed <- TRUE
-
-  withr::local_options(list(
-    "artma.data.config" = config,
-    "artma.verbose" = 1
-  ))
-
-  # Should fail - se is required but missing
-  expect_error(
-    verify_variable_names(df),
-    "Missing columns"
-  )
-})
+# resolve_se_zero_handling now lives in inst/artma/data/configure.R; see
+# tests/testthat/test-data-configure.R for its tests.

@@ -13,7 +13,8 @@ box::use(
         base::read.dcf(desc, fields = "Package"),
         error = function(...) NULL
       )
-      if (!is.null(pkg_record) && identical(pkg_record[1, 1], package_name)) {
+      # [[ drops the "Package" dimname that [1, 1] keeps; a named value never passes identical()
+      if (!is.null(pkg_record) && nrow(pkg_record) >= 1 && identical(pkg_record[[1, 1]], package_name)) {
         return(current)
       }
     }
@@ -40,14 +41,15 @@ get_pkg_path <- function() {
   package_name <- CONST$PACKAGE_NAME
 
   box_paths <- .normalize_box_paths(getOption("box.path"))
-  dev_candidates <- box_paths[dir.exists(box_paths) & grepl(file.path(package_name, "inst$"), box_paths)]
-  if (!rlang::is_empty(dev_candidates)) {
-    return(dev_candidates[[1]])
-  }
-
-  prod_candidates <- box_paths[dir.exists(box_paths) & grepl(paste0(package_name, "$"), box_paths)]
-  if (!rlang::is_empty(prod_candidates)) {
-    return(prod_candidates[[1]])
+  # Any box.path entry that actually contains the package's module directory
+  # can serve modules and package files. Taking the first match respects the
+  # search order (e.g. a worktree's inst/ prepended by tests/setup.R wins over
+  # an .Rprofile entry pointing at another checkout).
+  candidates <- box_paths[
+    dir.exists(box_paths) & dir.exists(file.path(box_paths, package_name))
+  ]
+  if (!rlang::is_empty(candidates)) {
+    return(candidates[[1]])
   }
 
   pkg_root <- .find_package_root(package_name)
@@ -83,7 +85,8 @@ DIR_CONFIG <- file.path(PROJECT_ROOT, "config")
 DIR_METHODS <- file.path(PROJECT_ROOT, "methods")
 DIR_OPTIONS <- file.path(PROJECT_ROOT, "options")
 DIR_OPTIONS_TEMPLATES <- file.path(DIR_OPTIONS, "templates")
-DIR_TESTING <- file.path(PROJECT_ROOT, "testing")
+DIR_REPORT <- file.path(PROJECT_ROOT, "report")
+DIR_REPORT_PARTIALS <- file.path(DIR_REPORT, "partials")
 
 # Alternative to 'rappdirs' (https://github.com/r-lib/rappdirs)
 DIR_USR_DATA <- tools::R_user_dir(CONST$PACKAGE_NAME, which = "data")
@@ -101,9 +104,8 @@ PATHS <- list(
   DIR_METHODS = DIR_METHODS,
   DIR_OPTIONS = DIR_OPTIONS,
   DIR_OPTIONS_TEMPLATES = DIR_OPTIONS_TEMPLATES,
-  DIR_TESTING = DIR_TESTING,
-  DIR_MOCKS = file.path(DIR_TESTING, "mocks"),
-  DIR_FIXTURES = file.path(DIR_TESTING, "fixtures"),
+  DIR_REPORT = DIR_REPORT,
+  DIR_REPORT_PARTIALS = DIR_REPORT_PARTIALS,
 
   # Persistent user data directories (alternative to 'rappdirs')
   DIR_USR_DATA = DIR_USR_DATA,

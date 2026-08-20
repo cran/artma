@@ -1,64 +1,57 @@
 box::use(testthat[
-  test_that, expect_equal, expect_true, expect_false, expect_null, expect_error
+  test_that, expect_equal, expect_true, expect_false, expect_null, expect_error, expect_warning
 ])
 
-test_that("get_autonomy_levels returns all 5 levels", {
-  box::use(artma / libs / core / autonomy[get_autonomy_levels])
-
-  levels <- get_autonomy_levels()
-
-  expect_equal(length(levels), 5)
-  expect_true(all(c("1", "2", "3", "4", "5") %in% names(levels)))
-
-  # Check structure of each level
-  for (level_name in names(levels)) {
-    level <- levels[[level_name]]
-    expect_true("name" %in% names(level))
-    expect_true("description" %in% names(level))
-    expect_true("prompt_frequency" %in% names(level))
-  }
-})
-
-test_that("get_autonomy_level returns NULL when not set (interactive mode)", {
+test_that("get_autonomy_level returns NULL when not set", {
   box::use(artma / libs / core / autonomy[get_autonomy_level])
 
-  # Clear any existing autonomy level
-  options(artma.autonomy.level = NULL)
+  withr::local_options(list(artma.autonomy.level = NULL))
 
-  # In interactive mode, should return NULL when not set
-  # In non-interactive mode, returns 5
-  if (interactive()) {
-    level <- get_autonomy_level()
-    expect_null(level)
-  } else {
-    level <- get_autonomy_level()
-    expect_equal(level, 5L)
-  }
+  expect_null(get_autonomy_level())
 })
 
-test_that("set_autonomy_level sets and get_autonomy_level retrieves", {
+test_that("set_autonomy_level sets and get_autonomy_level retrieves each valid level", {
   box::use(artma / libs / core / autonomy[set_autonomy_level, get_autonomy_level])
 
-  # Test each valid level
-  for (level in 1:5) {
-    set_autonomy_level(level)
-    retrieved <- get_autonomy_level()
-    expect_equal(retrieved, as.integer(level))
-  }
+  withr::local_options(list(artma.autonomy.level = NULL))
 
-  # Clean up
-  options(artma.autonomy.level = NULL)
+  for (level in c("ask_more", "balanced", "autonomous")) {
+    set_autonomy_level(level)
+    expect_equal(get_autonomy_level(), level)
+  }
 })
 
-test_that("set_autonomy_level validates input", {
+test_that("set_autonomy_level translates legacy numeric levels with a warning", {
+  box::use(artma / libs / core / autonomy[set_autonomy_level, get_autonomy_level])
+
+  withr::local_options(list(artma.autonomy.level = NULL))
+
+  expect_warning(set_autonomy_level(1), class = "rlang_warning")
+  expect_equal(get_autonomy_level(), "ask_more")
+
+  expect_warning(set_autonomy_level(2))
+  expect_equal(get_autonomy_level(), "ask_more")
+
+  expect_warning(set_autonomy_level(3))
+  expect_equal(get_autonomy_level(), "balanced")
+
+  expect_warning(set_autonomy_level(4))
+  expect_equal(get_autonomy_level(), "autonomous")
+
+  expect_warning(set_autonomy_level(5))
+  expect_equal(get_autonomy_level(), "autonomous")
+})
+
+test_that("set_autonomy_level rejects invalid levels with a clear message", {
   box::use(artma / libs / core / autonomy[set_autonomy_level])
 
-  # Invalid levels should error with validation_error class
+  expect_error(set_autonomy_level("invalid"), class = "validation_error")
   expect_error(set_autonomy_level(0), class = "validation_error")
   expect_error(set_autonomy_level(6), class = "validation_error")
   expect_error(set_autonomy_level(-1), class = "validation_error")
   expect_error(set_autonomy_level(1.5), class = "validation_error")
-  expect_error(set_autonomy_level(c(1, 2)), class = "validation_error")
+  expect_error(set_autonomy_level(c("ask_more", "balanced")), class = "validation_error")
+  expect_error(set_autonomy_level(NULL), class = "validation_error")
 })
 
 test_that("is_autonomy_level_set works correctly", {
@@ -67,44 +60,31 @@ test_that("is_autonomy_level_set works correctly", {
     set_autonomy_level
   ])
 
-  # Clear level
-  options(artma.autonomy.level = NULL)
-  # In non-interactive mode, get_autonomy_level returns 5 when not set
-  # So is_autonomy_level_set will return TRUE in non-interactive mode
-  if (interactive()) {
-    expect_false(is_autonomy_level_set())
-  } else {
-    expect_true(is_autonomy_level_set()) # Returns 5 in non-interactive mode
-  }
+  withr::local_options(list(artma.autonomy.level = NULL))
+  expect_false(is_autonomy_level_set())
 
-  # Set level
-  set_autonomy_level(4)
+  set_autonomy_level("balanced")
   expect_true(is_autonomy_level_set())
-
-  # Clean up
-  options(artma.autonomy.level = NULL)
 })
 
-test_that("should_prompt_user respects autonomy levels", {
+test_that("should_prompt_user respects autonomy level ordering (interactive branch)", {
   box::use(artma / libs / core / autonomy[
     should_prompt_user,
     set_autonomy_level
   ])
 
-  # This test only works in interactive mode
-  # In non-interactive mode, should_prompt_user always returns FALSE
-  if (!interactive()) {
-    skip("Test requires interactive mode")
-  }
+  withr::local_options(list(artma.autonomy.level = NULL))
 
-  # Test each level
-  for (current_level in 1:5) {
+  # The interactive branch is exercised headlessly by injecting is_interactive.
+  levels <- c("ask_more", "balanced", "autonomous")
+  ordinal <- stats::setNames(seq_along(levels), levels)
+
+  for (current_level in levels) {
     set_autonomy_level(current_level)
 
-    # Should prompt if required_level > current_level
-    for (required_level in 1:5) {
-      should_prompt <- should_prompt_user(required_level)
-      expected <- current_level < required_level
+    for (required_level in levels) {
+      should_prompt <- should_prompt_user(required_level, is_interactive = TRUE)
+      expected <- ordinal[[current_level]] < ordinal[[required_level]]
       expect_equal(should_prompt, expected,
         info = paste0(
           "Level ", current_level, " with required ", required_level,
@@ -113,178 +93,87 @@ test_that("should_prompt_user respects autonomy levels", {
       )
     }
   }
-
-  # Clean up
-  options(artma.autonomy.level = NULL)
 })
 
-test_that("should_prompt_user returns TRUE when level not set (interactive mode)", {
+test_that("should_prompt_user returns TRUE when level not set (interactive branch)", {
   box::use(artma / libs / core / autonomy[should_prompt_user])
 
-  # Clear level
-  options(artma.autonomy.level = NULL)
+  withr::local_options(list(artma.autonomy.level = NULL))
 
-  # In interactive mode, should prompt if level not set
-  if (interactive()) {
-    expect_true(should_prompt_user(required_level = 1))
-    expect_true(should_prompt_user(required_level = 5))
-  }
+  expect_true(should_prompt_user(required_level = "ask_more", is_interactive = TRUE))
+  expect_true(should_prompt_user(required_level = "autonomous", is_interactive = TRUE))
 })
 
-test_that("should_prompt_user returns FALSE in non-interactive mode", {
+test_that("should_prompt_user hard-gates on the non-interactive branch", {
   box::use(artma / libs / core / autonomy[should_prompt_user, set_autonomy_level])
 
-  # Set a low level
-  set_autonomy_level(1)
+  withr::local_options(list(artma.autonomy.level = NULL))
 
-  # Mock non-interactive mode
-  withr::with_options(
-    list(rlang_interactive = FALSE),
-    {
-      # Should never prompt in non-interactive mode
-      expect_false(should_prompt_user(required_level = 1))
-      expect_false(should_prompt_user(required_level = 5))
-    }
-  )
+  # Even at the most prompt-eager level, an injected non-interactive session
+  # never prompts.
+  set_autonomy_level("ask_more")
+  expect_false(should_prompt_user(required_level = "autonomous", is_interactive = FALSE))
+  expect_false(should_prompt_user(required_level = "ask_more", is_interactive = FALSE))
 
-  # Clean up
+  # Unset level would prompt interactively, but not when non-interactive.
   options(artma.autonomy.level = NULL)
+  expect_false(should_prompt_user(required_level = "autonomous", is_interactive = FALSE))
 })
 
-test_that("get_autonomy_description works for all levels", {
-  box::use(artma / libs / core / autonomy[
-    get_autonomy_description,
-    get_autonomy_levels,
-    set_autonomy_level
-  ])
+test_that("should_prompt_user returns FALSE in non-interactive mode regardless of level", {
+  box::use(artma / libs / core / autonomy[should_prompt_user, set_autonomy_level])
 
-  levels <- get_autonomy_levels()
+  withr::local_options(list(artma.autonomy.level = NULL))
+  set_autonomy_level("ask_more")
 
-  # Test with explicit level
-  for (level_num in 1:5) {
-    desc <- get_autonomy_description(level_num)
-    expect_true(is.character(desc))
-    expect_true(nchar(desc) > 0)
-    expect_true(grepl(paste0("Level ", level_num), desc))
-  }
-
-  # Test with current level
-  set_autonomy_level(3)
-  desc <- get_autonomy_description()
-  expect_true(is.character(desc))
-  expect_true(grepl("Level 3", desc))
-
-  # Clean up
-  options(artma.autonomy.level = NULL)
+  # The test runner itself is non-interactive, so should_prompt_user should
+  # already return FALSE here without needing to mock interactive().
+  expect_false(should_prompt_user(required_level = "ask_more"))
+  expect_false(should_prompt_user(required_level = "autonomous"))
 })
 
-test_that("get_autonomy_description returns 'Not set' when level is NULL (interactive mode)", {
-  box::use(artma / libs / core / autonomy[get_autonomy_description])
+test_that("should_prompt_user validates required_level", {
+  box::use(artma / libs / core / autonomy[should_prompt_user])
 
-  # Clear level
-  options(artma.autonomy.level = NULL)
-
-  desc <- get_autonomy_description()
-  # In interactive mode, returns "Not set"
-  # In non-interactive mode, get_autonomy_level returns 5, so description is for level 5
-  if (interactive()) {
-    expect_equal(desc, "Not set")
-  } else {
-    expect_true(grepl("Level 5", desc))
-  }
+  expect_error(should_prompt_user(required_level = "invalid"), class = "validation_error")
+  expect_error(should_prompt_user(required_level = 4), class = "validation_error")
 })
 
-test_that("is_fully_autonomous works correctly", {
-  box::use(artma / libs / core / autonomy[
-    is_fully_autonomous,
-    set_autonomy_level
-  ])
-
-  # Clear level
-  options(artma.autonomy.level = NULL)
-  # In non-interactive mode, get_autonomy_level returns 5 when not set
-  if (interactive()) {
-    expect_false(is_fully_autonomous())
-  } else {
-    expect_true(is_fully_autonomous()) # Returns 5 in non-interactive mode
-  }
-
-  # Set to level 5
-  set_autonomy_level(5)
-  expect_true(is_fully_autonomous())
-
-  # Set to level 4
-  set_autonomy_level(4)
-  expect_false(is_fully_autonomous())
-
-  # Clean up
-  options(artma.autonomy.level = NULL)
-})
-
-test_that("get_default_autonomy_level returns 4", {
+test_that("get_default_autonomy_level returns 'autonomous'", {
   box::use(artma / libs / core / autonomy[get_default_autonomy_level])
 
-  default <- get_default_autonomy_level()
-  expect_equal(default, 4L)
-})
-
-test_that("get_autonomy_level returns 5 in non-interactive mode when not set", {
-  box::use(artma / libs / core / autonomy[get_autonomy_level])
-
-  # Clear level
-  options(artma.autonomy.level = NULL)
-
-  # Mock non-interactive mode
-  withr::with_options(
-    list(rlang_interactive = FALSE),
-    {
-      level <- get_autonomy_level()
-      expect_equal(level, 5L)
-    }
-  )
+  expect_equal(get_default_autonomy_level(), "autonomous")
 })
 
 test_that("public API functions work correctly", {
-  box::use(artma[autonomy.get, autonomy.set, autonomy.is_set, autonomy.is_full, autonomy.describe, autonomy.levels])
+  box::use(artma[autonomy_get, autonomy_set, autonomy_is_set, autonomy_is_full])
 
-  # Test autonomy.get
+  withr::local_options(list(artma.autonomy.level = NULL))
+
+  # Test autonomy_get
+  expect_null(autonomy_get())
+
+  # Test autonomy_set
+  autonomy_set("balanced")
+  expect_equal(autonomy_get(), "balanced")
+
+  # Test autonomy_is_set
+  expect_true(autonomy_is_set())
   options(artma.autonomy.level = NULL)
-  # In non-interactive mode, returns 5 when not set
-  if (interactive()) {
-    expect_null(autonomy.get())
-  } else {
-    expect_equal(autonomy.get(), 5L)
-  }
+  expect_false(autonomy_is_set())
 
-  # Test autonomy.set
-  autonomy.set(3)
-  expect_equal(autonomy.get(), 3L)
+  # Test autonomy_is_full: non-interactive sessions are always fully autonomous
+  autonomy_set("autonomous")
+  expect_true(autonomy_is_full())
+  autonomy_set("balanced")
+  expect_equal(autonomy_is_full(), !interactive())
+})
 
-  # Test autonomy.is_set
-  expect_true(autonomy.is_set())
-  options(artma.autonomy.level = NULL)
-  # In non-interactive mode, returns TRUE because get_autonomy_level returns 5
-  if (interactive()) {
-    expect_false(autonomy.is_set())
-  } else {
-    expect_true(autonomy.is_set())
-  }
+test_that("public API accepts legacy numeric levels with a warning", {
+  box::use(artma[autonomy_get, autonomy_set])
 
-  # Test autonomy.is_full
-  autonomy.set(5)
-  expect_true(autonomy.is_full())
-  autonomy.set(4)
-  expect_false(autonomy.is_full())
+  withr::local_options(list(artma.autonomy.level = NULL))
 
-  # Test autonomy.describe
-  desc <- autonomy.describe(2)
-  expect_true(is.character(desc))
-  expect_true(grepl("Level 2", desc))
-
-  # Test autonomy.levels
-  levels <- autonomy.levels()
-  expect_equal(length(levels), 5)
-
-  # Clean up
-  options(artma.autonomy.level = NULL)
+  expect_warning(autonomy_set(4))
+  expect_equal(autonomy_get(), "autonomous")
 })

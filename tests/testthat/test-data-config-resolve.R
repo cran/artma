@@ -1,6 +1,7 @@
 box::use(
   testthat[
     expect_equal,
+    expect_false,
     expect_null,
     expect_true,
     expect_length,
@@ -8,12 +9,6 @@ box::use(
   ],
   withr[local_options]
 )
-
-test_that <- getFromNamespace("test_that", "testthat")
-expect_equal <- getFromNamespace("expect_equal", "testthat")
-expect_null <- getFromNamespace("expect_null", "testthat")
-expect_true <- getFromNamespace("expect_true", "testthat")
-expect_length <- getFromNamespace("expect_length", "testthat")
 
 # ── merge_config ──────────────────────────────────────────────────────────────
 
@@ -125,40 +120,27 @@ test_that("merge_config: skips non-list override entries", {
   expect_true(is.na(result$x$bma))
 })
 
-# ── invalidate_df_cache ───────────────────────────────────────────────────────
-
-test_that("invalidate_df_cache: clears internal cache state", {
-  box::use(artma / data_config / resolve[invalidate_df_cache])
-
-  # Just verify it runs without error
-  invalidate_df_cache()
-})
+# ── read_df_for_config caching ────────────────────────────────────────────────
 
 test_that("read_df_for_config uses a primed dataframe cache without re-reading data", {
   box::use(
     artma / data / read[read_data],
     artma / data_config / resolve[
       prime_df_for_config_cache,
-      read_df_for_config,
-      invalidate_df_cache
+      read_df_for_config
     ],
-    artma / testing / mocks / index[MOCKS]
+    testing / mocks / index[MOCKS]
   )
 
   df <- MOCKS$create_mock_df(seed = 42)
   tmp_file <- tempfile(fileext = ".csv")
   utils::write.csv(df, tmp_file, row.names = FALSE)
+  withr::defer(unlink(tmp_file))
 
   withr::local_options(list(
     "artma.data.source_path" = tmp_file,
-    "artma.data.colnames.study_id" = "study_id",
-    "artma.data.colnames.effect" = "effect",
-    "artma.data.colnames.se" = "se",
-    "artma.data.colnames.n_obs" = "n_obs",
     "artma.verbose" = 3
   ))
-
-  invalidate_df_cache()
 
   loaded_df <- read_data(tmp_file)
   prime_df_for_config_cache(loaded_df, tmp_file)
@@ -168,9 +150,110 @@ test_that("read_df_for_config uses a primed dataframe cache without re-reading d
 
   expect_equal(length(read_msgs), 0L)
   expect_equal(nrow(read_df_for_config()), nrow(loaded_df))
+})
 
-  unlink(tmp_file)
-  invalidate_df_cache()
+test_that("read_df_for_config re-reads when the source file changes at the same path", {
+  box::use(
+    artma / data_config / resolve[read_df_for_config],
+    testing / mocks / index[MOCKS]
+  )
+
+  df <- MOCKS$create_mock_df(seed = 42)
+  tmp_file <- tempfile(fileext = ".csv")
+  utils::write.csv(df, tmp_file, row.names = FALSE)
+  withr::defer(unlink(tmp_file))
+
+  withr::local_options(list(
+    "artma.data.source_path" = tmp_file,
+    "artma.verbose" = 1
+  ))
+
+  first <- read_df_for_config()
+  expect_false("new_moderator" %in% colnames(first))
+
+  # Rewrite the file at the same path with an extra column and bump the
+  # modification time so the change is unambiguous even on coarse filesystems
+  df$new_moderator <- seq_len(nrow(df))
+  utils::write.csv(df, tmp_file, row.names = FALSE)
+  Sys.setFileTime(tmp_file, Sys.time() + 5)
+
+  second <- read_df_for_config()
+  expect_true("new_moderator" %in% colnames(second))
+})
+
+test_that("get_data_config picks up file changes at the same source path", {
+  box::use(
+    artma / data_config / read[get_data_config],
+    testing / mocks / index[MOCKS]
+  )
+
+  df <- MOCKS$create_mock_df(seed = 42)
+  tmp_file <- tempfile(fileext = ".csv")
+  utils::write.csv(df, tmp_file, row.names = FALSE)
+  withr::defer(unlink(tmp_file))
+
+  withr::local_options(list(
+    "artma.data.source_path" = tmp_file,
+    "artma.data.columns" = list(),
+    "artma.verbose" = 1
+  ))
+
+  config_before <- get_data_config()
+  expect_false("new_moderator" %in% names(config_before))
+
+  df$new_moderator <- seq_len(nrow(df))
+  utils::write.csv(df, tmp_file, row.names = FALSE)
+  Sys.setFileTime(tmp_file, Sys.time() + 5)
+
+  config_after <- get_data_config()
+  expect_true("new_moderator" %in% names(config_after))
+})
+
+# ── canonical config keys ─────────────────────────────────────────────────────
+
+test_that("config keys are standardized regardless of which entry point resolves first", {
+  box::use(
+    artma / data / read[read_data],
+    artma / data / utils[standardize_column_names],
+    artma / data_config / read[get_data_config],
+    artma / data_config / resolve[prime_df_for_config_cache],
+    testing / mocks / index[MOCKS]
+  )
+
+  raw_map <- list(
+    study_id = "study",
+    effect = "coef",
+    se = "stderr",
+    n_obs = "nobs"
+  )
+  df <- MOCKS$create_mock_df(seed = 42, colnames_map = raw_map)
+  tmp_file <- tempfile(fileext = ".csv")
+  utils::write.csv(df, tmp_file, row.names = FALSE)
+  withr::defer(unlink(tmp_file))
+
+  withr::local_options(list(
+    "artma.data.source_path" = tmp_file,
+    "artma.data.columns" = list(
+      study_id = list(source_name = "study"),
+      effect = list(source_name = "coef"),
+      se = list(source_name = "stderr"),
+      n_obs = list(source_name = "nobs")
+    ),
+    "artma.verbose" = 1
+  ))
+
+  # Cold cache: this is what public entry points (config_get) hit first
+  cold_config <- get_data_config()
+
+  expect_true(all(c("study_id", "effect", "se", "n_obs") %in% names(cold_config)))
+  expect_false(any(c("coef", "stderr", "nobs") %in% names(cold_config)))
+
+  # Pipeline path: prepare_data standardizes the df and primes the cache
+  df_std <- standardize_column_names(read_data(tmp_file))
+  prime_df_for_config_cache(df_std, tmp_file)
+  primed_config <- get_data_config()
+
+  expect_equal(sort(names(cold_config)), sort(names(primed_config)))
 })
 
 # ── get_data_config (integration with resolve) ───────────────────────────────
@@ -187,7 +270,7 @@ test_that("get_data_config: returns overrides when df not available", {
   )
 
   withr::local_options(list(
-    "artma.data.config" = config,
+    "artma.data.columns" = config,
     "artma.data.source_path" = NA,
     "artma.verbose" = 1
   ))
@@ -201,7 +284,7 @@ test_that("get_data_config: returns empty list when no config and no df", {
   box::use(artma / data_config / read[get_data_config])
 
   withr::local_options(list(
-    "artma.data.config" = list(),
+    "artma.data.columns" = list(),
     "artma.data.source_path" = NA,
     "artma.verbose" = 1
   ))
@@ -213,24 +296,23 @@ test_that("get_data_config: returns empty list when no config and no df", {
 test_that("get_data_config: merges overrides onto base when df is available", {
   box::use(
     artma / data_config / read[get_data_config],
-    artma / data_config / resolve[invalidate_df_cache],
-    artma / testing / mocks / index[MOCKS]
+    testing / mocks / index[MOCKS]
   )
 
   # Create a real temp CSV file
   df <- MOCKS$create_mock_df(seed = 42)
   tmp_file <- tempfile(fileext = ".csv")
   utils::write.csv(df, tmp_file, row.names = FALSE)
+  withr::defer(unlink(tmp_file))
 
   withr::local_options(list(
-    "artma.data.config" = list(
+    "artma.data.columns" = list(
       effect = list(bma = TRUE)
     ),
     "artma.data.source_path" = tmp_file,
     "artma.verbose" = 1,
     "artma.data.na_handling" = "remove"
   ))
-  invalidate_df_cache()
 
   result <- get_data_config()
 
@@ -243,7 +325,4 @@ test_that("get_data_config: merges overrides onto base when df is available", {
 
   # Non-overridden fields should have defaults
   expect_true(is.na(result$se$bma))
-
-  unlink(tmp_file)
-  invalidate_df_cache()
 })

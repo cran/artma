@@ -1,155 +1,48 @@
-general:
-  artma_version:
-    type: "character"
-    default: "0.3.3"
-    fixed: true
-    help: "Version of the artma package under which these options were generated"
-
 autonomy:
   level:
-    type: "integer"
-    default: 4
+    type: "enum: 'ask_more'|'balanced'|'autonomous'"
+    default: "autonomous"
     confirm_default: true
     prompt: "function"
     prompt_function: "prompt_autonomy_level"
     suppress_help_in_prompt: true
     help: |
       The autonomy level controls how much user interaction is required during analysis.
-      Higher levels mean less user interaction and more automatic decision-making.
+      interactive() is the hard gate: non-interactive sessions (e.g., R scripts, batch jobs)
+      never prompt, regardless of this setting.
 
       Autonomy levels:
-        {cli::symbol$bullet} {.strong 1 - Minimal}: Maximum user control - prompt for all optional decisions
-        {cli::symbol$bullet} {.strong 2 - Low}: Frequent prompts - ask for most non-critical decisions
-        {cli::symbol$bullet} {.strong 3 - Medium}: Balanced - prompt for important decisions only
-        {cli::symbol$bullet} {.strong 4 - High}: Mostly autonomous - minimal prompts for critical decisions only (default for interactive mode)
-        {cli::symbol$bullet} {.strong 5 - Full}: Fully autonomous - no prompts, use all defaults and auto-detection (default for non-interactive mode)
+        {cli::symbol$bullet} {.strong ask_more}: Prompt for most decisions, including non-critical ones.
+        {cli::symbol$bullet} {.strong balanced}: Prompt for important decisions only.
+        {cli::symbol$bullet} {.strong autonomous} (default): Minimal prompts; use defaults and auto-detection for most decisions.
 
-      In non-interactive mode (e.g., R scripts, batch jobs), level 5 is always used regardless of this setting,
-      as user prompts are not possible in such environments.
+general:
+  parallel:
+    type: "logical"
+    default: true
+    help: |
+      If `TRUE`, run independent runtime methods concurrently (forked workers via
+      the {.pkg parallel} package). Methods that depend on one another still run
+      in dependency order.
 
-data:
-  source_path:
-    type: "character"
-    prompt: "file"
-    prompt_hint: "or type {.emph {'mock'}} to generate mock data"
-    help: "Full path to your dataset source"
+      Parallel execution falls back to sequential automatically on Windows, on
+      single-core machines, and in interactive sessions whose autonomy level
+      still allows methods to prompt.
 
-  na_handling:
-    type: "enum: stop|remove|median|mean|interpolate|mice"
-    default: .na
+  seed:
+    type: "integer"
     allow_na: true
-    prompt: "function"
-    prompt_function: "prompt_na_handling"
-    suppress_help_in_prompt: true
+    default: 20240101
     help: |
-      How to handle missing values:
-        {cli::symbol$bullet} {.strong stop}: Abort if any missing values are found (safest, default)
-        {cli::symbol$bullet} {.strong remove}: Remove entire rows with any missing values (listwise deletion)
-        {cli::symbol$bullet} {.strong median}: Replace missing values with the variable's median (robust to outliers)
-        {cli::symbol$bullet} {.strong mean}: Replace missing values with the variable's mean (assumes normality)
-        {cli::symbol$bullet} {.strong interpolate}: Use linear interpolation based on neighboring values (best for sequential data)
-        {cli::symbol$bullet} {.strong mice}: Multiple Imputation by Chained Equations (advanced, requires mice package)
+      Seed for the random number streams handed to runtime methods. Each method
+      receives its own L'Ecuyer-CMRG stream derived from this seed and the
+      method's name, so stochastic methods (bootstrap, MCMC) draw the same
+      numbers whether the run executed in parallel or sequentially, and
+      regardless of which other methods ran alongside.
 
-      Imputation strategies (median, mean, interpolate, mice) can be applied to numeric required columns
-      (effect, se, n_obs) as well as optional columns. Non-numeric required columns (study) must always be
-      complete and cannot be imputed. The "remove" strategy will remove rows with any missing values,
-      including in required columns.
-
-      If this option is not set (NA), you will be prompted interactively when missing values are detected.
-
-  colnames:
-    obs_id:
-      type: "character"
-      allow_na: true
-      default: .na
-      standardize: true
-      help: "Column containing observation IDs"
-
-    study_id:
-      type: "character"
-      standardize: true
-      help: "Column containing study identifiers (names or IDs)"
-
-    effect:
-      type: "character"
-      standardize: true
-      help: "Column containing effect estimates"
-
-    se:
-      type: "character"
-      standardize: true
-      help: "Column containing standard errors"
-
-    t_stat:
-      type: "character"
-      standardize: true
-      allow_na: true
-      default: .na
-      help: "Column containing t-statistics"
-
-    n_obs:
-      type: "character"
-      standardize: true
-      help: "Column containing the number of observations"
-
-    study_size:
-      type: "character"
-      standardize: true
-      allow_na: true
-      default: .na
-      help: "Column containing the study sizes, i.e. the number of estimates per study"
-
-    reg_dof:
-      type: "character"
-      standardize: true
-      allow_na: true
-      default: .na
-      help: "Column containing the degrees of freedom for the regression"
-
-    precision:
-      type: "character"
-      standardize: true
-      allow_na: true
-      default: .na
-      help: "Column containing the precision of the effect estimates"
-
-  config_setup:
-    type: "enum: auto|manual"
-    default: "auto"
-    confirm_default: false # Changed from true as the manual setup is just less flexible overall
-    prompt: "readline"
-    help: |
-      How should the system identify which columns in your data file contain which variables?
-        {cli::symbol$bullet} {.strong auto}: Automatically detect column names (e.g., recognizes "effect", "se", "study_name") and ask you to confirm the mapping
-        {cli::symbol$bullet} {.strong manual}: Skip automatic detection and manually specify which columns map to which variables (interactive mode only)
-
-  config:
-    type: "list"
-    default: .na
-    allow_na: true
-    prompt: "function"
-    prompt_function: "prompt_data_config"
-    help: |
-      A list of configuration options for the data.
-      Each variable in the dataset requires a list of configuration options.
-      For more details, read the 'data_config' vignette.
-
-  winsorization_level:
-    type: "numeric"
-    default: 0.01
-    confirm_default: true
-    prompt: "function"
-    prompt_function: "prompt_winsorization_level"
-    suppress_help_in_prompt: true
-    help: |
-      Winsorization level for effect and standard error variables.
-      Values will be capped at the specified quantile from both tails.
-      Options:
-        {cli::symbol$bullet} {.strong 0}: No winsorization (keep all original values)
-        {cli::symbol$bullet} {.strong 0.01}: Winsorize at 1% level (default)
-        {cli::symbol$bullet} {.strong 0.05}: Winsorize at 5% level
-        {cli::symbol$bullet} {.strong 0.10}: Winsorize at 10% level
-      Higher values provide stronger outlier protection but may distort the data more.
+      Set to NA to derive the run seed from the session RNG instead: calling
+      set.seed() before artma() then governs reproducibility the way it does
+      for any stochastic R function, and runs without set.seed() vary.
 
 calc:
   precision_type:
@@ -161,16 +54,24 @@ calc:
         {cli::symbol$bullet} {.strong DoF}: Calculate precision as sqrt(DoF)
 
   se_zero_handling:
-    type: "enum: stop|warn|ignore"
-    default: "stop"
+    type: "enum: stop|warn|remove|ignore"
+    default: .na
+    allow_na: true
+    prompt: "function"
+    prompt_function: "prompt_se_zero_handling"
+    suppress_help_in_prompt: true
     help: |
       Having standard errors equal to zero can lead to division by zero errors, introducing infinite t-statistics.
-      By default, the package will stop if any zero standard errors are found.
-      You can change this behavior by setting the option to 'warn' or 'ignore'.
+      By default, rows with zero standard errors are removed with a warning; set this option to 'stop'
+      for stricter validation, or to 'warn'/'ignore' to keep the affected rows.
       How to handle zero standard errors:
-        {cli::symbol$bullet} {.strong stop}: Abort if any zero standard errors are found
-        {cli::symbol$bullet} {.strong warn}: Warn if any zero standard errors are found
-        {cli::symbol$bullet} {.strong ignore}: Ignore zero standard errors
+        {cli::symbol$bullet} {.strong stop}: Abort if any zero standard errors are found (strictest)
+        {cli::symbol$bullet} {.strong warn}: Warn but keep rows with zero standard errors
+        {cli::symbol$bullet} {.strong remove}: Remove rows with zero standard errors, with a warning (default)
+        {cli::symbol$bullet} {.strong ignore}: Silently ignore zero standard errors
+
+      If this option is not set (NA), you will be prompted interactively when zero standard errors are
+      detected, subject to your autonomy level; a non-interactive session defaults to 'remove'.
 
 visualization:
   theme:
@@ -190,11 +91,21 @@ visualization:
     help: |
       If `TRUE`, export all generated plots to PNG files in the output directory.
 
+  export_html:
+    type: "logical"
+    default: false
+    help: |
+      If `TRUE`, additionally export each generated plot as an interactive HTML
+      file (via the optional plotly and htmlwidgets packages), saved alongside
+      the PNG file in export_path. Only used if export_graphics is `TRUE`.
+      Silently skipped with a warning if plotly or htmlwidgets are not installed.
+
   export_path:
     type: "character"
     default: "graphics"
     help: |
       Subdirectory (relative to output.dir) for exporting graphics.
+      An absolute path is also accepted and is used as-is.
       Only used if export_graphics is `TRUE`.
 
   graph_scale:
@@ -236,10 +147,13 @@ methods:
   linear_tests:
     bootstrap_replications:
       type: "integer"
-      default: 100
+      default: 999
       help: |
         Number of bootstrap replications to use when computing cluster-robust
-        confidence intervals. Set to `0` to disable bootstrapping.
+        confidence intervals. Percentile confidence intervals need several
+        hundred draws per tail to be stable; values below 999 can produce
+        visibly unstable interval bounds, especially with heavy-tailed or
+        widely spread standard errors. Set to `0` to disable bootstrapping.
 
     conf_level:
       type: "numeric"
@@ -268,8 +182,12 @@ methods:
       type: "numeric"
       default: [1.96]
       help: |
-        Cut-off values supplied to the selection model. Provide one or more
-        positive values corresponding to the publication probability thresholds.
+        Cut-off values supplied to the selection model, expressed as
+        t-statistic thresholds delimiting the publication probability
+        intervals. Provide one or more strictly increasing values without
+        duplicates; zero and negative values are allowed, e.g.
+        [-1.96, 0, 1.96] for literatures with negative effects or [0] for
+        selection on the sign of the estimate.
 
     selection_symmetric:
       type: "logical"
@@ -292,12 +210,27 @@ methods:
   exogeneity_tests:
     iv_instrument:
       type: "enum: automatic|1/sqrt(n_obs)|1/n_obs|1/n_obs^2|log(n_obs)"
-      default: "automatic"
+      default: "1/sqrt(n_obs)"
       help: |
         Instrument to use for the instrumental variable (IV) regression.
-        Use {.strong automatic} to automatically select the best instrument
-        based on diagnostics (R-squared, weak instruments, Wu-Hausman, Sargan).
-        Alternatively, specify a specific instrument formula involving n_obs.
+        Defaults to {.strong 1/sqrt(n_obs)}, the theoretically motivated
+        instrument: the standard error of an estimator scales with 1/sqrt(N),
+        so sample size predicts reported precision without being a channel for
+        selective reporting. It is also the instrument used throughout the
+        applied literature, which keeps results comparable with published
+        meta-analyses.
+
+        {.strong automatic} instead ranks the candidates by first-stage
+        F-statistic and picks the strongest, breaking ties in favor of
+        {.strong 1/sqrt(n_obs)}. Treat it as an exploratory option rather than
+        a default: choosing an instrument by its first-stage strength on the
+        same data used for inference is a specification search, which biases
+        selection toward instruments that look strong in sample and understates
+        the uncertainty of the resulting estimates.
+
+        A warning is printed if the selected instrument's first-stage F falls
+        below the conventional weak-instrument threshold of 10. Alternatively,
+        specify a specific instrument formula involving n_obs.
 
     puniform_alpha:
       type: "numeric"
@@ -323,13 +256,14 @@ methods:
         If not specified, the system will auto-detect suitable categorical variables
         or prompt for selection in interactive mode.
 
-    max_boxes:
+    max_boxes_per_plot:
       type: "integer"
       default: 60
       help: |
-        Maximum number of boxes to display in a single plot.
-        When the number of unique factor values exceeds this threshold,
-        the data will be split across multiple plots.
+        Maximum number of boxes allowed in a single plot.
+        When the number of unique factor values exceeds this limit,
+        the data is split into multiple balanced plots so that each
+        plot has a similar number of boxes and none exceeds this value.
 
     show_mean_line:
       type: "logical"
@@ -558,7 +492,176 @@ methods:
         Maximum number of variable groups to remove during VIF optimization.
         Only relevant if use_vif_optimization is `TRUE`.
 
+    verbose_output:
+      type: "logical"
+      default: false
+      help: |
+        If `TRUE`, print the individual BMA coefficient table and model summary
+        alongside the unified Model Averaging table. When `FALSE` (default),
+        only the combined MA table is displayed.
+
+  best_practice_estimate:
+    conf_level:
+      type: "numeric"
+      default: 0.95
+      help: |
+        Confidence level for best-practice estimate intervals.
+
+    include_intercept:
+      type: "logical"
+      default: true
+      help: |
+        If `TRUE`, include the BMA intercept in the best-practice estimate.
+
+    include_author_row:
+      type: "logical"
+      default: true
+      help: |
+        If `TRUE`, include the "Author" best-practice estimate row.
+
+    include_study_rows:
+      type: "logical"
+      default: true
+      help: |
+        If `TRUE`, include study-level best-practice estimate rows.
+
+    run_bma_if_missing:
+      type: "logical"
+      default: true
+      help: |
+        If `TRUE`, run BMA when best-practice estimation has no BMA result to
+        reuse. In interactive mode, you will still be prompted for confirmation.
+
+    include_economic_significance:
+      type: "logical"
+      default: true
+      help: |
+        If `TRUE`, include the economic significance table (effect of a 1-SD
+        and a min-to-max change in each BMA variable, as a level and as a
+        percentage of the best-practice estimate).
+
+    economic_significance_pip_threshold:
+      type: "numeric"
+      allow_na: true
+      default: .na
+      help: |
+        If set, restrict the economic significance table to variables whose
+        posterior inclusion probability (PIP) is at least this value.
+        Leave unset (NA) to include every BMA variable.
+
+    include_factor_summary:
+      type: "logical"
+      default: true
+      help: |
+        If `TRUE`, include a best-practice estimate summary table grouped by
+        factor levels: variables flagged with `bpe_sum_stats`, `bpe_equal`,
+        or `bpe_gltl` in the data configuration, plus, when
+        `factor_summary_auto_detect` is `TRUE`, any other BMA predictor that
+        resolves to 2-12 distinct values. If nothing resolves to a grouping,
+        the table is skipped rather than exported empty.
+
+    factor_summary_auto_detect:
+      type: "logical"
+      default: true
+      help: |
+        If `TRUE`, the best-practice estimate factor summary (see
+        `include_factor_summary`) also groups by BMA predictors that are not
+        explicitly flagged in the data configuration, as long as they resolve
+        to 2-12 distinct values (typical of dummy/category moderators). Set
+        to `FALSE` to only group by variables explicitly flagged with
+        `bpe_sum_stats`, `bpe_equal`, or `bpe_gltl`.
+
+  robma:
+    chains:
+      type: "integer"
+      default: 3
+      help: |
+        Number of MCMC chains used to fit each model in the RoBMA ensemble.
+
+    samples:
+      type: "integer"
+      default: 5000
+      help: |
+        Number of posterior samples drawn per chain after burn-in.
+
+    burnin:
+      type: "integer"
+      default: 2000
+      help: |
+        Number of burn-in iterations discarded before sampling.
+
+    adapt:
+      type: "integer"
+      default: 500
+      help: |
+        Number of adaptation iterations run before burn-in.
+
+    parallel:
+      type: "logical"
+      allow_na: true
+      default: .na
+      help: |
+        If `TRUE`, sample the MCMC chains of each RoBMA model in parallel,
+        which is close to a `chains`-fold speed-up on a multi-core machine.
+        RoBMA starts one worker per chain, so leave the option unset (NA) to
+        enable parallel sampling only when the machine has more cores than
+        `chains`, and fall back to sequential sampling otherwise. Setting the
+        option explicitly overrides the auto-detection.
+
+    autofit:
+      type: "logical"
+      default: true
+      help: |
+        If `TRUE`, keep extending the sampling until the convergence checks
+        pass. Set to `FALSE` to cap the run at the requested sample count.
+
+    seed:
+      type: "integer"
+      allow_na: true
+      default: .na
+      help: |
+        Random seed for the RoBMA sampler, for reproducible fits.
+        Leave unset (NA) to let the sampler pick its own seed.
+
+    measure:
+      type: "character"
+      default: "SMD"
+      help: |
+        Effect size measure passed to RoBMA. "SMD" (standardized mean
+        difference) matches the thesis specification. Use "GEN" for generic
+        effect sizes, or one of "ZCOR", "RR", "OR", "HR", "RD", "IRR".
+
+    effect_prior_scale:
+      type: "numeric"
+      default: 0.707
+      help: |
+        Scale of the Cauchy prior on the effect, truncated to (0, Inf).
+        The default (1 / sqrt(2)) is the conventional Cohen's d prior scale.
+
+    heterogeneity_shape:
+      type: "numeric"
+      default: 1
+      help: |
+        Shape parameter of the inverse-gamma prior on the heterogeneity.
+
+    heterogeneity_scale:
+      type: "numeric"
+      default: 0.15
+      help: |
+        Scale parameter of the inverse-gamma prior on the heterogeneity.
+
   fma:
+    cluster:
+      type: "logical"
+      default: true
+      help: |
+        If `TRUE` (default), report cluster-robust (CR1) standard errors for
+        the FMA coefficients, clustered by `study_id`. Falls back to classical
+        iid standard errors, with a warning, when the data lack a usable
+        `study_id` column or contain fewer than two clusters. Model weights
+        and coefficients are unaffected; only standard errors and p-values
+        change.
+
     round_to:
       type: "integer"
       allow_na: true
@@ -567,15 +670,13 @@ methods:
         Override the default number of decimals shown in the FMA output.
         Leave unset to use the global output option.
 
-    print_results:
-      type: "enum: none|fast|verbose|all"
-      default: "fast"
+    verbose_output:
+      type: "logical"
+      default: false
       help: |
-        Level of result output:
-          {cli::symbol$bullet} {.strong none}: No output
-          {cli::symbol$bullet} {.strong fast}: Coefficients and standard errors only
-          {cli::symbol$bullet} {.strong verbose}: Coefficients, standard errors, p-values, and model weights
-          {cli::symbol$bullet} {.strong all}: Same as verbose (kept for consistency with BMA)
+        If `TRUE`, print the individual FMA coefficient table and model weights
+        alongside the unified Model Averaging table. When `FALSE` (default),
+        only the combined MA table is displayed.
 
   p_hacking_tests:
     include_caliper:
@@ -606,22 +707,45 @@ methods:
         If `TRUE`, display ratios (n_above/n_below) for Caliper tests.
         If `FALSE`, display total count (n_above + n_below).
 
+    caliper_tail:
+      type: "character"
+      default: "auto"
+      help: |
+        Which tail of the t-statistic distribution the Caliper test inspects.
+        The canonical Gerber & Malhotra (2008) caliper is one-sided, applied in
+        the direction the literature has an incentive to report.
+        "auto" (default) picks the tail holding the majority of the t-statistics,
+        so a literature of mostly negative effects is tested at t < -threshold.
+        "positive" and "negative" force one tail; "absolute" pools both by
+        taking |t|, which fits literatures reporting findings of either sign.
+
+    caliper_cluster:
+      type: "logical"
+      default: true
+      help: |
+        If `TRUE` (default), test the Caliper share with a study-clustered
+        statistic instead of an exact binomial test. The binomial test treats
+        every estimate in the window as independent, which overstates
+        significance when a few studies contribute most of the window.
+
     include_elliott:
       type: "logical"
       default: true
       help: |
         If `TRUE`, include Elliott et al. (2022) p-hacking detection tests.
 
-    simulate_cdfs:
-      use_cpp:
-        type: "logical"
-        default: true
-        help: |
-          If `TRUE`, use the compiled C++ implementation for Brownian bridge
-          simulations in the LCM test. Falls back to pure R automatically
-          if the C++ code is unavailable. Set to `FALSE` to force the R
-          implementation.
+    elliott_supports:
+      type: "numeric"
+      default: [0.05, 0.1]
+      help: |
+        Upper bounds of the p-value supports [0, p_max] on which the Elliott
+        et al. (2022) battery (Binomial, LCM, Fisher, Cox-Shi) runs. Each
+        bound must lie in (0, 1] and the vector must be strictly increasing.
+        Published applications often extend the default with 0.15 or 0.2;
+        the support choice can flip the substantive conclusion, so report
+        which support a rejection comes from.
 
+    simulate_cdfs:
       chunk_size:
         type: "integer"
         default: 512
@@ -630,11 +754,22 @@ methods:
           during LCM critical-value simulation. Larger chunks reduce overhead
           but make the progress bar less responsive.
 
+      seed:
+        type: "integer"
+        allow_na: true
+        default: 123
+        help: |
+          RNG seed for the Brownian bridge simulations behind the LCM test's
+          critical values. Fixed by default so repeated runs on the same data
+          reproduce identical LCM p-values. Leave unset (`NA`) to use
+          whatever RNG state the caller is in instead.
+
     lcm_iterations:
       type: "integer"
-      default: 3000
+      default: 10000
       help: |
-        Number of simulations for LCM test critical values.
+        Number of simulations for LCM test critical values, matching the
+        Monte-Carlo size used by Elliott et al. (2022).
         Higher values increase precision but take longer to compute.
 
     lcm_grid_points:
@@ -653,10 +788,12 @@ methods:
 
     discontinuity_bandwidth:
       type: "numeric"
-      default: 0.05
+      allow_na: true
+      default: .na
       help: |
-        Initial bandwidth for the discontinuity test.
-        The algorithm will adaptively adjust if needed.
+        Manual bandwidth override for the discontinuity test. Leave unset to
+        let {.pkg rddensity} select its bandwidth automatically, matching the
+        canonical Elliott et al. implementation.
 
     include_cox_shi:
       type: "logical"
@@ -667,10 +804,19 @@ methods:
 
     cox_shi_bins:
       type: "integer"
-      default: 20
+      default: 10
       help: |
         Number of bins for discretization in Cox-Shi tests.
-        More bins provide finer resolution but require more observations.
+        More bins provide finer resolution but require more observations; empty
+        bins make the covariance matrix singular and the test is then skipped.
+        The same bin count is used for every support in `elliott_supports`
+        (matching the canonical Elliott et al. code, which fixes the count
+        regardless of the interval), so wider windows run at coarser bin
+        widths. A spike in the p-curve that is narrower than a bin can
+        therefore be averaged away on a wide window while still showing up on
+        a narrow one, and nested windows may disagree sharply. When they do,
+        rerun with the bin count scaled to the window width before reading
+        anything into the gap.
 
     cox_shi_order:
       type: "integer"
@@ -686,73 +832,239 @@ methods:
         Whether to use theoretical bounds in Cox-Shi tests (1 = yes, 0 = no).
         Bounds account for the two-sided nature of t-tests.
 
-    include_maive:
-      type: "logical"
-      default: true
-      help: |
-        If `TRUE`, include MAIVE estimator (Irsova et al., 2023) for publication
-        bias correction using instrumental variables.
-
-    maive_method:
+  maive:
+    method:
       type: "integer"
       default: 3
       help: |
-        MAIVE method selection:
+        Funnel model plugged with the instrumented variances:
           1 = FAT-PET
           2 = PEESE
           3 = PET-PEESE (default)
           4 = Endogenous Kink (EK)
 
-    maive_weight:
+    weight:
       type: "integer"
       default: 0
       help: |
-        MAIVE weighting scheme:
+        Weighting scheme:
           0 = No weights (default)
           1 = Standard weights
           2 = Adjusted weights
 
-    maive_instrument:
+    instrument:
       type: "integer"
       default: 1
       help: |
-        MAIVE instrumenting:
-          0 = No instrumenting
+        Whether reported variances are instrumented with the inverse sample
+        size (the correction that makes MAIVE MAIVE):
+          0 = No instrumenting; the output reduces to the standard funnel model
           1 = Use instrumental variables (default)
 
-    maive_studylevel:
+    studylevel:
       type: "integer"
       default: 2
       help: |
-        MAIVE study-level correlation structure:
+        Study-level correlation structure:
           0 = None
           1 = Fixed effects
           2 = Cluster-robust (default)
 
-    maive_se:
+    se:
       type: "integer"
       default: 1
       help: |
-        MAIVE standard error estimation method:
-          1 = Asymptotic (default)
-          2 = Pairs cluster bootstrap
-          3 = Wild bootstrap
-          4 = Wild cluster bootstrap
-          5 = Pairs bootstrap
+        Standard error estimation method (MAIVE >= 0.2.4):
+          0 = CR0 cluster-robust
+          1 = CR1 cluster-robust (default)
+          2 = CR2 cluster-robust (Bell-McCaffrey)
+          3 = Wild cluster bootstrap
 
-    maive_ar:
+    ar:
       type: "integer"
       default: 0
       help: |
-        MAIVE Anderson-Rubin confidence interval:
+        Anderson-Rubin confidence interval, which stays valid when the
+        first-stage instrument is weak:
           0 = Do not compute (default)
           1 = Compute
 
-    maive_first_stage:
+    first_stage:
       type: "integer"
       default: 0
       help: |
-        MAIVE first stage option (default: 0).
+        Functional form of the first stage, which instruments the squared
+        standard error with sample size:
+          0 = levels, regress SE^2 on 1/N (default)
+          1 = log, regress log(SE^2) on log(N), with Duan smearing
+          2 = automatic, choose from the spread of sample sizes
+
+        Use the log form when sample sizes span orders of magnitude. With a
+        wide N range, 1/N is numerically near zero for most observations, so
+        the levels first stage is identified off the few smallest studies and
+        collapses into a weak instrument (F below 10), which leaves the MAIVE
+        coefficient unreliable. Check the "First-stage F" row of the MAIVE
+        output: if it is flagged as weak, switch to 1.
+
+        Setting 2 makes that call for you: the log form is used when sample
+        sizes span at least 3 orders of magnitude. The rule reads the sample
+        size column only, never the effects, the standard errors, or any
+        fitted statistic, so it cannot turn into a search for a preferred
+        coefficient. The form actually used is reported in the "First-stage
+        specification" row.
+
+    seed:
+      type: "integer"
+      default: 123
+      help: |
+        RNG seed passed to the wild cluster bootstrap (se = 3), so repeated
+        runs on the same data reproduce identical results.
+
+    show_interpretation:
+      type: "logical"
+      default: true
+      help: |
+        If `TRUE`, print a short plain-language reading of the results below
+        the tables (shown at verbosity 3 and above).
+
+data:
+  source_path:
+    type: "character"
+    prompt: "file"
+    prompt_hint: "or type {.emph {'mock'}} to generate mock data"
+    help: |
+      Full path to your dataset source. The special value {.val mock} generates
+      a mock dataset and points this option at it; it works both at the
+      interactive prompt and when passed programmatically via `user_input`.
+      The mock dataset is written to `mock/mock-data.csv` under
+      `tools::R_user_dir("artma", "data")`, so it survives the R session and the
+      saved path keeps resolving in later runs. An existing mock file is reused
+      rather than regenerated.
+
+  na_handling:
+    type: "enum: stop|remove|median|mean|interpolate|mice"
+    default: .na
+    allow_na: true
+    prompt: "function"
+    prompt_function: "prompt_na_handling"
+    suppress_help_in_prompt: true
+    help: |
+      How to handle missing values:
+        {cli::symbol$bullet} {.strong stop}: Abort if required columns have missing values (safest, default). Optional columns with missing values are left as-is and reported instead of aborting the run.
+        {cli::symbol$bullet} {.strong remove}: Remove entire rows with any missing values (listwise deletion)
+        {cli::symbol$bullet} {.strong median}: Replace missing values with the variable's median (robust to outliers)
+        {cli::symbol$bullet} {.strong mean}: Replace missing values with the variable's mean (assumes normality)
+        {cli::symbol$bullet} {.strong interpolate}: Use linear interpolation based on neighboring values (best for sequential data)
+        {cli::symbol$bullet} {.strong mice}: Multiple Imputation by Chained Equations (advanced, requires mice package)
+
+      Imputation strategies (median, mean, interpolate, mice) can be applied to numeric required columns
+      (effect, se, n_obs) as well as optional columns. Non-numeric required columns (study) must always be
+      complete and cannot be imputed. The "remove" strategy will remove rows with any missing values,
+      including in required columns.
+
+      If this option is not set (NA), you will be prompted interactively when missing values are detected.
+
+  max_imputation_missingness:
+    type: "numeric"
+    default: 0.5
+    help: |
+      Maximum share of missing values an optional numeric column may have and
+      still be imputed by the {.val median}, {.val mean}, {.val interpolate},
+      and {.val mice} strategies. Columns above the threshold keep their
+      missing values and are reported with a warning: imputing a mostly-missing
+      column collapses it to a near-constant, which can then distort moderator
+      sets (e.g. in BMA). Required numeric columns (effect, se, n_obs) are
+      always imputed regardless of this threshold, since leaving them missing
+      would break the analysis. Set to 1 to disable the guard.
+
+  columns:
+    type: "list"
+    default: .na
+    allow_na: true
+    help: |
+      Unified per-column configuration: one record per dataset column, stored sparsely
+      (only non-default fields are persisted). Records for the standard columns
+      (effect, se, study_id, n_obs, ...) are keyed by the standard name and may carry
+      a {.strong source_name} field naming the column in your data file that maps to
+      that standard column. Records for moderator variables are keyed by the column's
+      own (syntactic) name.
+      A role record may also set {.strong drop_conflicting_raw} to true: when its
+      source_name mapping collides with a different raw column that already carries
+      the standard name, the raw column is dropped from the analysis instead of
+      aborting the run.
+      Besides {.strong source_name}, each record can override analysis fields such as
+      var_name_verbose, var_name_description, data_type, group_category,
+      variable_summary, effect_sum_stats, equal, gltl, bma, bma_reference_var,
+      bma_to_log, bma_allow_derived, bpe, bpe_sum_stats, bpe_equal, and bpe_gltl.
+      {.strong bma_allow_derived} keeps a column in the BMA moderator set even when
+      it is detected as a derived encoding of the effect or its standard error
+      (e.g. a winsorized copy, t-statistic, or inverse SE), which is otherwise
+      excluded from automatic selection and warned about when configured explicitly.
+      {.strong group_category} sets the display label used to group variables together
+      (e.g. in BMA plots); it does not change whether a variable is structurally
+      detected as a dummy/categorical/transformation group, which is still inferred
+      from the data and column names. Methods like prima_facie_graphs rely on that
+      structural detection, so setting group_category on dummy columns will not hide
+      them from it.
+      For more details, read the 'data_config' vignette.
+
+  expected_schema_columns:
+    type: "character"
+    allow_na: true
+    default: .na
+    help: "Baseline dataset columns used to detect true schema changes across runs"
+
+  reconcile_mode:
+    type: "enum: ask|auto|strict"
+    default: "ask"
+    confirm_default: false
+    prompt: "readline"
+    help: |
+      How to handle schema drift, meaning changes to your dataset columns (renames, additions,
+      removals) detected since the options file was last configured:
+        {cli::symbol$bullet} {.strong ask}: Show a diff and prompt you to confirm each change (default)
+        {cli::symbol$bullet} {.strong auto}: Accept high-confidence renames automatically, drop missing moderators, log all actions
+        {cli::symbol$bullet} {.strong strict}: Abort with a structured error if any drift is detected
+
+  config_setup:
+    type: "enum: auto|manual"
+    default: "auto"
+    confirm_default: false # Changed from true as the manual setup is just less flexible overall
+    prompt: "readline"
+    help: |
+      How should the system identify which columns in your data file contain which variables?
+        {cli::symbol$bullet} {.strong auto}: Automatically detect column names (e.g., recognizes "effect", "se", "study_name") and ask you to confirm the mapping
+        {cli::symbol$bullet} {.strong manual}: Skip automatic detection and manually specify which columns map to which variables (interactive mode only)
+
+  winsorization_level:
+    type: "numeric"
+    default: 0.01
+    confirm_default: true
+    prompt: "function"
+    prompt_function: "prompt_winsorization_level"
+    suppress_help_in_prompt: true
+    help: |
+      Winsorization level for effect and standard error variables.
+      Values will be capped at the specified quantile from both tails.
+      Options:
+        {cli::symbol$bullet} {.strong 0}: No winsorization (keep all original values)
+        {cli::symbol$bullet} {.strong 0.01}: Winsorize at 1% level (default)
+        {cli::symbol$bullet} {.strong 0.05}: Winsorize at 5% level
+        {cli::symbol$bullet} {.strong 0.10}: Winsorize at 10% level
+      Higher values provide stronger outlier protection but may distort the data more.
+
+  subset_conditions:
+    type: "character"
+    default: .na
+    allow_na: true
+    help: |
+      Optional user-defined filter conditions applied to the data frame before analysis.
+      Each element is an R expression evaluated against the data, e.g.:
+        {cli::symbol$bullet} {.emph country == 'USA'}
+        {cli::symbol$bullet} {.emph year >= 2000}
+      All conditions must hold for a row to be kept (conditions are combined with AND).
+      Leave unset (NA) to skip subsetting.
+
 
 output:
   dir:
@@ -760,11 +1072,12 @@ output:
     default: "auto"
     help: |
       Directory where analysis results (tables, graphics) are saved after each run.
-      Set to {.val auto} to use a session-specific temporary directory, or provide
-      an absolute path to save results to a fixed location on your computer.
-      When set to {.val auto}, the resolved temporary directory is persisted to
-      the options file after the first run so results remain discoverable; reset
-      this option to {.val auto} to rotate to a new temporary directory.
+      Set to {.val auto} (the default) to use a durable per-options-file directory
+      under `tools::R_user_dir("artma", "data")`, so different options files never
+      overwrite each other's results; or provide an absolute path to save results
+      to a fixed location on your computer. The {.val auto} value stays in the
+      options file and is resolved fresh on every run. Use `artma::results.dir()`
+      to print the resolved directory.
 
   save_results:
     type: "logical"
@@ -773,11 +1086,31 @@ output:
       If `TRUE`, automatically export tables (CSV) and graphics (PNG) to the output
       directory after each analysis run.
 
+  table_formats:
+    type: "character"
+    default: ["csv"]
+    help: |
+      File formats used when exporting result tables. Accepts {.val csv} and
+      {.val tex}. Add {.val tex} to also write booktabs LaTeX tables ready to be
+      included in a paper (requires `\usepackage{{booktabs}}` in your preamble).
+      Defaults to {.val csv} only.
+
   number_of_decimals:
     type: "integer"
     default: 3
     help: |
       The number of decimals to round the output to. Defaults to 3.
+
+  report:
+    type: "logical"
+    default: false
+    help: |
+      If `TRUE`, render a single self-contained HTML report of the run into the
+      output directory (as {.file report.html}) after each analysis. The report
+      collects every method's tables and plots into one shareable file with no
+      external dependencies (plots are embedded as PNG images). A render failure
+      warns rather than aborting the run. You can also build the report on demand
+      from a run's results with `artma::report.render()`. Defaults to `FALSE`.
 
 cli:
   editor:
@@ -815,18 +1148,33 @@ verbose:
 cache:
   use_cache:
     type: "logical"
-    default: false
+    default: true
     help: |
-      If `TRUE`, use caching to speed up the package.
-      If `FALSE`, do not use caching.
+      If `TRUE` (the default), reuse results from previous runs so that
+      rerunning an analysis with unchanged inputs is near-instant.
+      If `FALSE`, recompute everything on every run.
 
-  cache_age:
+      A cached result is reused only when all of the following match the run
+      that produced it:
+        {cli::symbol$bullet} the data frame handed to the method, and the results of the methods it depends on
+        {cli::symbol$bullet} the data source path and its modification time
+        {cli::symbol$bullet} every user-authored {.code artma.*} option and data config entry
+        {cli::symbol$bullet} the {.emph artma} version and the package source code
+      Cached graphics are also checked: if a plot file a run produced is no
+      longer on disk, the method is rerun so the file is written again.
+
+      Clear the cache at any time with {.code make clear-cache}.
+
+  max_age:
     type: "integer"
     default: 3600
     help: |
-      The age of the cache in seconds.
+      Maximum age of cached artifacts in seconds.
       Defaults to 3600 seconds (1 hour).
-      If the cache is older than this, it will be invalidated.
+      Cached entries older than this are recomputed on access.
+      This is a backstop for inputs that change without the cache key
+      noticing (for example a data file edited in place with its modification
+      time preserved). Set it to a larger value to keep results longer.
 
 temp:
   # A set of options that are only set at runtime but never stored in the options file.

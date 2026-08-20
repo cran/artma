@@ -1,16 +1,18 @@
 #' @title Get Autonomy Level
 #' @description Get the current autonomy level.
 #'   Autonomy controls how much user interaction is required during analysis.
-#'   Higher levels mean less user interaction and more automatic decision-making.
-#' @return *\[integer or NULL\]* The current autonomy level (1-5), or NULL if not set.
+#'   `interactive()` is the hard gate: non-interactive sessions never prompt,
+#'   regardless of this setting.
+#' @return *\[character or NULL\]* The current autonomy level ("ask_more",
+#'   "balanced", or "autonomous"), or NULL if not set.
 #' @export
 #' @examples
 #' \dontrun{
 #' # Get current autonomy level
-#' level <- autonomy.get()
+#' level <- autonomy_get()
 #' print(level)
 #' }
-autonomy.get <- function() {
+autonomy_get <- function() {
   box::use(artma / libs / core / autonomy[get_autonomy_level])
   get_autonomy_level()
 }
@@ -18,23 +20,24 @@ autonomy.get <- function() {
 #' @title Set Autonomy Level
 #' @description Set the autonomy level for the current session.
 #'   This setting controls how much user interaction is required during analysis.
-#' @param level *\[integer\]* The autonomy level to set (1-5).
-#'   - 1 (Minimal): Maximum user control - prompt for all optional decisions
-#'   - 2 (Low): Frequent prompts - ask for most non-critical decisions
-#'   - 3 (Medium): Balanced - prompt for important decisions only
-#'   - 4 (High): Mostly autonomous - minimal prompts for critical decisions only (default)
-#'   - 5 (Full): Fully autonomous - no prompts, use all defaults and auto-detection
+#' @param level *\[character\]* The autonomy level to set.
+#'   - "ask_more": Prompt for most decisions, including non-critical ones.
+#'   - "balanced": Prompt for important decisions only.
+#'   - "autonomous" (default): Minimal prompts; use defaults and auto-detection for most decisions.
+#'
+#'   Legacy numeric levels (1-5) are still accepted and translated, with a
+#'   warning (1-2 -> "ask_more", 3 -> "balanced", 4-5 -> "autonomous").
 #' @return `NULL` (invisible)
 #' @export
 #' @examples
 #' \dontrun{
 #' # Set to fully autonomous mode
-#' autonomy.set(5)
+#' autonomy_set("autonomous")
 #'
 #' # Set to balanced mode
-#' autonomy.set(3)
+#' autonomy_set("balanced")
 #' }
-autonomy.set <- function(level) {
+autonomy_set <- function(level) {
   box::use(artma / libs / core / autonomy[set_autonomy_level])
   set_autonomy_level(level)
 }
@@ -45,61 +48,59 @@ autonomy.set <- function(level) {
 #' @export
 #' @examples
 #' \dontrun{
-#' if (!autonomy.is_set()) {
+#' if (!autonomy_is_set()) {
 #'   message("Autonomy level not configured")
 #' }
 #' }
-autonomy.is_set <- function() { # nolint: object_name_linter.
+autonomy_is_set <- function() {
   box::use(artma / libs / core / autonomy[is_autonomy_level_set])
   is_autonomy_level_set()
 }
 
-#' @title Get Autonomy Level Description
-#' @description Get a human-readable description of an autonomy level.
-#' @param level *\[integer, optional\]* The autonomy level (1-5).
-#'   If NULL, describes the current level.
-#' @return *\[character\]* A description of the autonomy level.
-#' @export
-#' @examples
-#' \dontrun{
-#' # Get description of current level
-#' desc <- autonomy.describe()
-#' print(desc)
-#'
-#' # Get description of a specific level
-#' desc <- autonomy.describe(5)
-#' print(desc)
-#' }
-autonomy.describe <- function(level = NULL) {
-  box::use(artma / libs / core / autonomy[get_autonomy_description])
-  get_autonomy_description(level)
-}
-
-#' @title List Available Autonomy Levels
-#' @description Get information about all available autonomy levels.
-#' @return *\[list\]* A list of autonomy level definitions.
-#' @export
-#' @examples
-#' \dontrun{
-#' levels <- autonomy.levels()
-#' print(levels)
-#' }
-autonomy.levels <- function() {
-  box::use(artma / libs / core / autonomy[get_autonomy_levels])
-  get_autonomy_levels()
-}
-
 #' @title Check if Fully Autonomous
-#' @description Check if the package is running in fully autonomous mode (level 5).
+#' @description Check if the package is running in fully autonomous mode, i.e.
+#'   the autonomy level is set to "autonomous", or the session is
+#'   non-interactive (where prompts never happen regardless of the configured
+#'   level).
 #' @return *\[logical\]* TRUE if fully autonomous, FALSE otherwise.
 #' @export
 #' @examples
 #' \dontrun{
-#' if (autonomy.is_full()) {
+#' if (autonomy_is_full()) {
 #'   message("Running in fully autonomous mode")
 #' }
 #' }
-autonomy.is_full <- function() { # nolint: object_name_linter.
-  box::use(artma / libs / core / autonomy[is_fully_autonomous])
-  is_fully_autonomous()
+autonomy_is_full <- function() {
+  box::use(artma / libs / core / autonomy[get_autonomy_level])
+  !interactive() || identical(get_autonomy_level(), "autonomous")
+}
+
+# Deprecated dotted aliases (see contributingGuides/API.md). Removed after 1.0.
+
+#' @rdname artma-deprecated
+#' @export
+autonomy.get <- function(...) {
+  lifecycle::deprecate_warn("0.4.0", "autonomy.get()", "autonomy_get()")
+  autonomy_get(...)
+}
+
+#' @rdname artma-deprecated
+#' @export
+autonomy.set <- function(...) {
+  lifecycle::deprecate_warn("0.4.0", "autonomy.set()", "autonomy_set()")
+  autonomy_set(...)
+}
+
+#' @rdname artma-deprecated
+#' @export
+autonomy.is_set <- function(...) { # nolint: object_name_linter.
+  lifecycle::deprecate_warn("0.4.0", "autonomy.is_set()", "autonomy_is_set()")
+  autonomy_is_set(...)
+}
+
+#' @rdname artma-deprecated
+#' @export
+autonomy.is_full <- function(...) { # nolint: object_name_linter.
+  lifecycle::deprecate_warn("0.4.0", "autonomy.is_full()", "autonomy_is_full()")
+  autonomy_is_full(...)
 }

@@ -2,6 +2,8 @@
 #' @description Helper functions used by the linear testing method.
 NULL
 
+# Not referenced directly: model fitters (e.g. plm) evaluate model.frame in the
+# formula environment, which is this module's environment.
 box::use(
   stats[model.frame]
 )
@@ -12,7 +14,11 @@ box::use(
     format_number,
     format_se,
     format_ci
-  ]
+  ],
+  artma / libs / formatting / summary_table[
+    shared_build_summary_table = build_summary_table
+  ],
+  artma / econometric / vcov[robust_vcov, vcov_type]
 )
 
 # nocov start: glue/cli heavy formatting helpers ---------------------------
@@ -90,25 +96,168 @@ prepare_linear_data <- function(df, spec) {
   )
 }
 
-#' @title Cluster bootstrap sample
-#' @description Resample the data by clusters.
-#' @param df *[data.frame]* Data to resample.
-#' @param cluster_column *[character]* Column name holding the cluster ids.
-#' @return A resampled data frame with replacement at the cluster level.
-resample_by_cluster <- function(df, cluster_column) {
-  if (is.null(cluster_column) || !cluster_column %in% colnames(df)) {
-    rows <- sample.int(nrow(df), nrow(df), replace = TRUE)
-    return(df[rows, , drop = FALSE])
+#' @title Draw bootstrap row indices
+#' @description Resample row indices with replacement at the cluster level, or
+#'   plain rows when no cluster split is available.
+#' @param n_rows *[integer]* Number of rows in the data being resampled.
+#' @param cluster_splits *[list, optional]* Row indices split by cluster, as
+#'   returned by `split(seq_len(n_rows), cluster)`. `NULL` resamples rows.
+#' @return An integer vector of resampled row indices.
+resample_cluster_rows <- function(n_rows, cluster_splits = NULL) {
+  if (is.null(cluster_splits)) {
+    return(sample.int(n_rows, n_rows, replace = TRUE))
+  }
+  sampled_clusters <- sample(names(cluster_splits), length(cluster_splits), replace = TRUE)
+  unlist(cluster_splits[sampled_clusters], use.names = FALSE)
+}
+
+# Fast-path bootstrap estimators ---------------------------------------------
+#
+# The bootstrap only needs point estimates per replication, so specs may
+# provide a `boot_estimate(data, rows)` function that computes them directly
+# on the resampled rows, skipping model-object construction and vcov work.
+# Each fast path must reproduce the estimates of the corresponding
+# `spec$fit` + `spec$tidy` refit on `data[rows, ]` to near machine precision;
+# this is asserted in tests. `data` is the prepared frame from
+# `prepare_linear_data()` (finite columns, factor cluster ids).
+
+boot_estimate_ols <- function(data, rows) {
+  fit <- stats::lm.fit(cbind(1, data$se[rows]), data$effect[rows])
+  c(effect = fit$coefficients[[1L]], publication_bias = fit$coefficients[[2L]])
+}
+
+make_boot_estimate_weighted_ols <- function(weight_column) {
+  force(weight_column)
+  function(data, rows) {
+    weights <- data[[weight_column]][rows]^2
+    fit <- stats::lm.wfit(cbind(1, data$se[rows]), data$effect[rows], weights)
+    c(effect = fit$coefficients[[1L]], publication_bias = fit$coefficients[[2L]])
+  }
+}
+
+# Study-weighted OLS gives each study equal total weight: an estimate from a
+# study contributing k estimates enters with lm weight 1/k (`study_size` is
+# the per-study estimate count). This breaks the w^2 convention of
+# make_boot_estimate_weighted_ols(), so it carries its own fast path.
+boot_estimate_study_weighted_ols <- function(data, rows) {
+  weights <- 1 / data$study_size[rows]
+  fit <- stats::lm.wfit(cbind(1, data$se[rows]), data$effect[rows], weights)
+  c(effect = fit$coefficients[[1L]], publication_bias = fit$coefficients[[2L]])
+}
+
+# Within (fixed effects) estimator. Duplicated resampled clusters keep their
+# original id, so they merge into one group during demeaning, exactly as plm
+# treats the resampled frame. The overall intercept is what
+# plm::within_intercept() returns: mean(y) - slope * mean(x).
+boot_estimate_within <- function(data, rows) {
+  y <- data$effect[rows]
+  x <- data$se[rows]
+  group <- data$study_id[rows]
+  y_demeaned <- y - stats::ave(y, group)
+  x_demeaned <- x - stats::ave(x, group)
+  slope <- stats::.lm.fit(cbind(x_demeaned), y_demeaned)$coefficients[[1L]]
+  c(effect = mean(y) - slope * mean(x), publication_bias = slope)
+}
+
+# Between effects estimator. plm's model = "between" is the unweighted OLS
+# on cluster means, one row per distinct cluster (unlike the size-weighted
+# between regression inside the Swamy-Arora components below). Duplicated
+# resampled clusters keep their id, so they merge into one group with
+# unchanged means, exactly as plm treats the resampled frame. plm errors on
+# a single cluster (fewer rows than coefficients), so the guard mirrors it.
+boot_estimate_be <- function(data, rows) {
+  y <- data$effect[rows]
+  x <- data$se[rows]
+  group <- droplevels(data$study_id[rows])
+  if (nlevels(group) < 2L) {
+    cli::cli_abort("Between regression needs at least two distinct clusters")
   }
 
-  cluster_ids <- df[[cluster_column]]
-  cluster_splits <- split(seq_len(nrow(df)), cluster_ids)
-  sampled_clusters <- sample(names(cluster_splits), length(cluster_splits), replace = TRUE)
-  sampled_indices <- unlist(cluster_splits[sampled_clusters], use.names = FALSE)
-  df[sampled_indices, , drop = FALSE]
+  first_in_group <- !duplicated(as.integer(group))
+  group_x <- stats::ave(x, group)[first_in_group]
+  group_y <- stats::ave(y, group)[first_in_group]
+
+  fit <- stats::lm.fit(cbind(1, group_x), group_y)
+  c(effect = fit$coefficients[[1L]], publication_bias = fit$coefficients[[2L]])
+}
+
+# Random effects estimator: feasible GLS via the theta (quasi-demeaning)
+# transformation with Swamy-Arora variance components, replicating
+# plm::plm(model = "random") exactly. With one regressor plus intercept,
+# plm's ercomp (method "swar", effect "individual") reduces to:
+#   sigma_nu^2  = within SSR / (O - N - 1)
+#   sigma_eta^2 = (sum_i T_i e_Bi^2 - (N - 2) sigma_nu^2) / (O - tr(A^-1 B))
+# where O is the observation count, N the group count, e_Bi the residuals of
+# the T_i-weighted between regression, A = sum_i T_i m_i m_i' and
+# B = sum_i T_i^2 m_i m_i' with m_i = (1, xbar_i). plm's balanced-panel
+# branch (dfcor = c(2, 2)) is the algebraic special case of these formulas,
+# so no separate branch is needed. Negative components clamp to zero, then
+# theta_i = 1 - sqrt(sigma_nu^2 / (T_i sigma_eta^2 + sigma_nu^2)) and OLS on
+# the quasi-demeaned data yields the GLS estimates.
+#
+# The guards mirror the conditions under which plm errors, so degenerate
+# resamples fail identically on both paths: plm's swar_Between_check rejects
+# fewer than three distinct groups, and its within fit rejects a regressor
+# with no within-group variation ("empty model").
+boot_estimate_re <- function(data, rows) {
+  y <- data$effect[rows]
+  x <- data$se[rows]
+  group <- droplevels(data$study_id[rows])
+
+  n_obs <- length(y)
+  n_groups <- nlevels(group)
+  if (n_groups < 3L) {
+    cli::cli_abort("Swamy-Arora needs at least three distinct clusters")
+  }
+  if (n_obs - n_groups < 2L) {
+    cli::cli_abort("Not enough within-group observations for Swamy-Arora")
+  }
+
+  y_mean <- stats::ave(y, group)
+  x_mean <- stats::ave(x, group)
+  y_demeaned <- y - y_mean
+  x_demeaned <- x - x_mean
+  if (sum(x_demeaned^2) == 0) {
+    cli::cli_abort("No within-group variation in se")
+  }
+
+  within_slope <- stats::.lm.fit(cbind(x_demeaned), y_demeaned)$coefficients[[1L]]
+  within_ssr <- sum((y_demeaned - within_slope * x_demeaned)^2)
+  idios_var <- within_ssr / (n_obs - n_groups - 1)
+
+  group_codes <- as.integer(group)
+  sizes_by_obs <- tabulate(group_codes, nbins = n_groups)[group_codes]
+  first_in_group <- !duplicated(group_codes)
+  group_sizes <- sizes_by_obs[first_in_group]
+  group_x <- x_mean[first_in_group]
+  group_y <- y_mean[first_in_group]
+
+  between_fit <- stats::lm.wfit(cbind(1, group_x), group_y, group_sizes)
+  between_quad <- sum(group_sizes * between_fit$residuals^2)
+
+  m <- cbind(1, group_x)
+  a_mat <- crossprod(m * sqrt(group_sizes))
+  b_mat <- crossprod(m * group_sizes)
+  id_eta_weight <- n_obs - sum(diag(solve(a_mat, b_mat)))
+  id_var <- (between_quad - (n_groups - 2) * idios_var) / id_eta_weight
+
+  sigma2 <- c(idios_var, id_var)
+  sigma2[sigma2 < 0] <- 0
+
+  theta <- 1 - sqrt(sigma2[[1L]] / (sizes_by_obs * sigma2[[2L]] + sigma2[[1L]]))
+  fit <- stats::lm.fit(
+    cbind(1 - theta, x - theta * x_mean),
+    y - theta * y_mean
+  )
+  c(effect = fit$coefficients[[1L]], publication_bias = fit$coefficients[[2L]])
 }
 
 #' @title Compute bootstrap confidence intervals
+#' @description Only point estimates are needed per replication. Specs with a
+#'   `boot_estimate` fast path compute them directly on the resampled rows;
+#'   the rest refit via `spec$fit` and extract coefficients with the cheap
+#'   `boot_coefs` extractor instead of the full `tidy` path. The data is
+#'   trimmed to the columns the fit actually touches before resampling.
 #' @param spec *[list]* Linear model specification.
 #' @param data *[data.frame]* Prepared dataset.
 #' @param replications *[integer]* Number of bootstrap replications.
@@ -119,16 +268,36 @@ bootstrap_confidence <- function(spec, data, replications, conf_level) {
     return(matrix(NA_real_, nrow = 0, ncol = 2))
   }
 
+  keep_columns <- intersect(
+    unique(c(spec$required_columns, spec$weight_column, spec$cluster_column)),
+    colnames(data)
+  )
+  data <- data[, keep_columns, drop = FALSE]
+
   samples <- matrix(NA_real_, nrow = replications, ncol = length(spec$terms))
   colnames(samples) <- spec$terms
 
+  cluster_column <- spec$cluster_column
+  cluster_splits <- if (!is.null(cluster_column) && cluster_column %in% colnames(data)) {
+    split(seq_len(nrow(data)), data[[cluster_column]])
+  }
+  boot_estimate <- spec$boot_estimate
+
   for (i in seq_len(replications)) {
-    boot_data <- resample_by_cluster(data, spec$cluster_column)
-    fit <- tryCatch(spec$fit(boot_data), error = function(e) NULL)
-    if (is.null(fit)) next
-    tidy <- tryCatch(spec$tidy(fit, boot_data), error = function(e) NULL)
-    if (is.null(tidy)) next
-    samples[i, tidy$term] <- tidy$estimate
+    rows <- resample_cluster_rows(nrow(data), cluster_splits)
+    if (!is.null(boot_estimate)) {
+      estimates <- tryCatch(boot_estimate(data, rows), error = function(e) NULL)
+      if (is.null(estimates)) next
+      samples[i, names(estimates)] <- estimates
+    } else {
+      boot_data <- data[rows, , drop = FALSE]
+      fit <- tryCatch(spec$fit(boot_data), error = function(e) NULL)
+      if (is.null(fit)) next
+      coefs <- tryCatch(spec$boot_coefs(fit), error = function(e) NULL)
+      if (is.null(coefs)) next
+      coefs <- coefs[intersect(names(coefs), spec$terms)]
+      samples[i, names(coefs)] <- coefs
+    }
   }
 
   ci <- matrix(NA_real_, nrow = length(spec$terms), ncol = 2, dimnames = list(spec$terms, c("lower", "upper")))
@@ -169,10 +338,15 @@ tidy_from_coeftest <- function(coef_matrix) {
   )
 }
 
-tidy_lm_model <- function(model, data, cluster_column) {
-  vcov <- tryCatch(
-    sandwich::vcovCL(model, cluster = data[[cluster_column]], type = "HC1"),
-    error = function(e) sandwich::vcovHC(model, type = "HC1")
+tidy_lm_model <- function(model, data, cluster_column, label = NULL) {
+  vcov <- robust_vcov(
+    model = model,
+    cluster = data[[cluster_column]],
+    engine = "sandwich",
+    clustered_type = "HC1",
+    fallback_types = "HC1",
+    final_vcov_fallback = FALSE,
+    label = label
   )
 
   coef_matrix <- lmtest::coeftest(model, vcov. = vcov)
@@ -184,18 +358,18 @@ tidy_lm_model <- function(model, data, cluster_column) {
   )[tidy$term_raw]
   tidy <- tidy[!is.na(tidy$term), , drop = FALSE]
   tidy$term_raw <- NULL
+  tidy$vcov_type <- vcov_type(vcov)
   tidy
 }
 
-tidy_plm_generic <- function(model, data) {
-  vcov <- tryCatch(
-    plm::vcovHC(model, type = "HC1", cluster = "group"),
-    error = function(e) {
-      tryCatch(
-        plm::vcovHC(model, type = "HC0"),
-        error = function(e2) stats::vcov(model)
-      )
-    }
+tidy_plm_generic <- function(model, data, label = NULL) {
+  vcov <- robust_vcov(
+    model = model,
+    cluster = "group",
+    engine = "plm",
+    clustered_type = "HC1",
+    fallback_types = "HC0",
+    label = label
   )
   coef_matrix <- lmtest::coeftest(model, vcov = vcov)
 
@@ -207,13 +381,92 @@ tidy_plm_generic <- function(model, data) {
   )[tidy$term_raw]
   tidy <- tidy[!is.na(tidy$term), , drop = FALSE]
   tidy$term_raw <- NULL
+  tidy$vcov_type <- vcov_type(vcov)
   tidy
 }
 
-tidy_plm_within <- function(model, data) {
-  vcov <- tryCatch(
-    plm::vcovHC(model, type = "HC1", cluster = "group"),
-    error = function(e) plm::vcovHC(model, type = "HC0")
+#' @title Collapse a prepared frame to one row per cluster
+#' @description The between estimator is unweighted OLS on cluster means, so
+#'   this is the frame it is actually fitted on.
+#' @param data *[data.frame]* Prepared data with `effect`, `se`, and the
+#'   cluster column.
+#' @param cluster_column *[character]* Name of the cluster column.
+#' @return *[data.frame]* One row per cluster, with `effect` and `se` means.
+group_mean_frame <- function(data, cluster_column) {
+  group <- droplevels(factor(data[[cluster_column]]))
+  first_in_group <- !duplicated(as.integer(group))
+  data.frame(
+    effect = stats::ave(data$effect, group)[first_in_group],
+    se = stats::ave(data$se, group)[first_in_group]
+  )
+}
+
+#' @title Tidy a between (group means) panel model
+#' @description
+#' `plm::vcovHC()` supports only `random`, `within`, `pooling` and `fd` models,
+#' so the shared ladder exhausts every robust step on a `between` fit and lands
+#' on classical standard errors. The between estimator is unweighted OLS on
+#' cluster means, so the same coefficients (and residual degrees of freedom)
+#' come out of an `lm` on that collapsed frame, where `sandwich` does work.
+#'
+#' Heteroskedasticity-robust HC1 is the right target rather than a clustered
+#' vcov: after collapsing there is exactly one observation per cluster, so
+#' `sandwich::vcovCL()` clustered on the study id returns the HC1 matrix
+#' element for element. Clustering buys nothing here, and pretending otherwise
+#' would suggest the between column corrects for within-study dependence when
+#' averaging has already removed it.
+#' @param model *[plm]* The fitted `between` model, used only to check that the
+#'   collapsed `lm` reproduces it.
+#' @param data *[data.frame]* The prepared data the model was fitted on.
+#' @param cluster_column *[character, optional]* Name of the cluster column.
+#' @param label *[character, optional]* Model display name, for warnings.
+#' @return *[data.frame]* A tidy coefficient frame with a `vcov_type` column.
+tidy_plm_between <- function(model, data, cluster_column = "study_id", label = NULL) {
+  box::use(artma / libs / core / validation[assert])
+
+  means <- group_mean_frame(data, cluster_column)
+  means_model <- stats::lm(effect ~ se, data = means)
+
+  assert(
+    isTRUE(all.equal(
+      unname(stats::coef(means_model)),
+      unname(stats::coef(model)),
+      tolerance = 1e-8
+    )),
+    "The group-means regression does not reproduce the between estimator."
+  )
+
+  vcov <- robust_vcov(
+    model = means_model,
+    cluster = NULL,
+    engine = "sandwich",
+    clustered_type = "HC1",
+    fallback_types = "HC0",
+    label = label
+  )
+
+  coef_matrix <- lmtest::coeftest(means_model, vcov. = vcov)
+  tidy <- tidy_from_coeftest(coef_matrix)
+
+  tidy$term <- c(
+    `se` = "publication_bias",
+    `(Intercept)` = "effect"
+  )[tidy$term_raw]
+  tidy <- tidy[!is.na(tidy$term), , drop = FALSE]
+  tidy$term_raw <- NULL
+  tidy$vcov_type <- vcov_type(vcov)
+  tidy
+}
+
+tidy_plm_within <- function(model, data, label = NULL) {
+  vcov <- robust_vcov(
+    model = model,
+    cluster = "group",
+    engine = "plm",
+    clustered_type = "HC1",
+    fallback_types = "HC0",
+    final_vcov_fallback = FALSE,
+    label = label
   )
 
   coef_matrix <- lmtest::coeftest(model, vcov = vcov)
@@ -222,8 +475,15 @@ tidy_plm_within <- function(model, data) {
   slope$term_raw <- NULL
   slope$term <- "publication_bias"
 
+  # within_intercept() applies the supplied vcov function to its own auxiliary
+  # model (intercept + regressor), so it must compute a fresh clustered vcov
+  # for whatever model it receives; the slope-only matrix above would make the
+  # intercept SE read the slope's variance.
   intercept <- tryCatch(
-    plm::within_intercept(model, vcov = function(x) vcov),
+    plm::within_intercept(
+      model,
+      vcov = function(m) plm::vcovHC(m, method = "arellano", type = "HC1", cluster = "group")
+    ),
     error = function(e) NA_real_
   )
 
@@ -241,7 +501,92 @@ tidy_plm_within <- function(model, data) {
     check.names = FALSE
   )
 
-  rbind(intercept_row, slope[c("term", "estimate", "std_error", "statistic", "p_value")])
+  tidy <- rbind(intercept_row, slope[c("term", "estimate", "std_error", "statistic", "p_value")])
+  tidy$vcov_type <- vcov_type(vcov)
+  tidy
+}
+
+#' Extract bootstrap point estimates from an intercept + `se` slope model.
+#'
+#' Cheap counterpart of the `tidy` functions for use inside the bootstrap:
+#' no clustered vcov, no coeftest, just the coefficients.
+#'
+#' @param model A fitted `lm` or `plm` model with an explicit intercept.
+#' @return A named numeric vector with `effect` and `publication_bias`.
+boot_coefs_intercept_slope <- function(model) {
+  coefs <- stats::coef(model)
+  c(
+    effect = unname(coefs["(Intercept)"]),
+    publication_bias = unname(coefs["se"])
+  )
+}
+
+#' Extract bootstrap point estimates from a within (FE) plm model.
+#'
+#' `plm::within_intercept` is called without a custom vcov: the default is far
+#' cheaper than `plm::vcovHC` and only the point estimate is used.
+#'
+#' @param model A fitted `plm` model with `model = "within"`.
+#' @return A named numeric vector with `effect` and `publication_bias`.
+boot_coefs_within <- function(model) {
+  intercept <- tryCatch(
+    plm::within_intercept(model),
+    error = function(e) NA_real_
+  )
+  c(
+    effect = if (is.numeric(intercept)) intercept[[1]] else NA_real_,
+    publication_bias = unname(stats::coef(model)["se"])
+  )
+}
+
+# Spec prechecks -------------------------------------------------------------
+#
+# Each panel spec carries a `precheck(prepared)` function evaluated after
+# `prepare_linear_data()`. It returns NULL when the prepared data can support
+# the estimator, or a plain-language skip reason. This turns raw plm errors
+# (e.g. "empty model", "model not estimable") into actionable messages; the
+# tryCatch around `spec$fit` remains as a fallback for anything missed here.
+
+has_within_cluster_variation <- function(data, value_column, cluster_column) {
+  groups <- split(data[[value_column]], data[[cluster_column]])
+  any(vapply(groups, function(x) length(unique(x)) > 1L, logical(1)))
+}
+
+precheck_fe <- function(prepared) {
+  if (!has_within_cluster_variation(prepared$data, "se", "study_id")) {
+    return(cli::format_inline(
+      "Cannot fit {.emph Fixed Effects}: {.field se} does not vary within any {.field study_id} cluster"
+    ))
+  }
+  NULL
+}
+
+precheck_be <- function(prepared) {
+  if (prepared$n_clusters < 3L) {
+    return(cli::format_inline(
+      "Not enough clusters to fit {.emph Between Effects}: at least 3 distinct {.field study_id} values are needed, found {prepared$n_clusters}"
+    ))
+  }
+  NULL
+}
+
+precheck_re <- function(prepared) {
+  if (prepared$n_clusters < 3L) {
+    return(cli::format_inline(
+      "Not enough clusters to fit {.emph Random Effects}: at least 3 distinct {.field study_id} values are needed, found {prepared$n_clusters}"
+    ))
+  }
+  if (prepared$n_obs <= prepared$n_clusters + 1L) {
+    return(cli::format_inline(
+      "Not enough observations to fit {.emph Random Effects}: more than {prepared$n_clusters + 1L} rows are needed with {prepared$n_clusters} {.field study_id} clusters, found {prepared$n_obs}"
+    ))
+  }
+  if (!has_within_cluster_variation(prepared$data, "se", "study_id")) {
+    return(cli::format_inline(
+      "Cannot fit {.emph Random Effects}: {.field se} does not vary within any {.field study_id} cluster"
+    ))
+  }
+  NULL
 }
 
 linear_model_specs <- function() {
@@ -254,7 +599,9 @@ linear_model_specs <- function() {
       cluster_column = "study_id",
       terms = c("effect", "publication_bias"),
       fit = function(df) stats::lm(effect ~ se, data = df),
-      tidy = function(model, data) tidy_lm_model(model, data, "study_id"),
+      tidy = function(model, data) tidy_lm_model(model, data, "study_id", "OLS"),
+      boot_coefs = boot_coefs_intercept_slope,
+      boot_estimate = boot_estimate_ols,
       supports_bootstrap = TRUE
     ),
     list(
@@ -264,8 +611,12 @@ linear_model_specs <- function() {
       numeric_columns = c("effect", "se"),
       cluster_column = "study_id",
       terms = c("effect", "publication_bias"),
+      required_packages = "plm",
+      precheck = precheck_fe,
       fit = function(df) plm::plm(effect ~ se, data = df, model = "within", index = "study_id"),
-      tidy = tidy_plm_within,
+      tidy = function(model, data) tidy_plm_within(model, data, "Fixed Effects"),
+      boot_coefs = boot_coefs_within,
+      boot_estimate = boot_estimate_within,
       supports_bootstrap = TRUE
     ),
     list(
@@ -275,9 +626,13 @@ linear_model_specs <- function() {
       numeric_columns = c("effect", "se"),
       cluster_column = "study_id",
       terms = c("effect", "publication_bias"),
+      required_packages = "plm",
+      precheck = precheck_be,
       fit = function(df) plm::plm(effect ~ se, data = df, model = "between", index = "study_id"),
-      tidy = tidy_plm_generic,
-      supports_bootstrap = FALSE
+      tidy = function(model, data) tidy_plm_between(model, data, "study_id", "Between Effects"),
+      boot_coefs = boot_coefs_intercept_slope,
+      boot_estimate = boot_estimate_be,
+      supports_bootstrap = TRUE
     ),
     list(
       name = "re",
@@ -286,8 +641,12 @@ linear_model_specs <- function() {
       numeric_columns = c("effect", "se"),
       cluster_column = "study_id",
       terms = c("effect", "publication_bias"),
+      required_packages = "plm",
+      precheck = precheck_re,
       fit = function(df) plm::plm(effect ~ se, data = df, model = "random", index = "study_id"),
-      tidy = tidy_plm_generic,
+      tidy = function(model, data) tidy_plm_generic(model, data, "Random Effects"),
+      boot_coefs = boot_coefs_intercept_slope,
+      boot_estimate = boot_estimate_re,
       supports_bootstrap = TRUE
     ),
     list(
@@ -298,8 +657,10 @@ linear_model_specs <- function() {
       cluster_column = "study_id",
       weight_column = "study_size",
       terms = c("effect", "publication_bias"),
-      fit = function(df) stats::lm(effect ~ se, data = df, weights = (df$study_size^2)),
-      tidy = function(model, data) tidy_lm_model(model, data, "study_id"),
+      fit = function(df) stats::lm(effect ~ se, data = df, weights = (1 / df$study_size)),
+      tidy = function(model, data) tidy_lm_model(model, data, "study_id", "Study Weighted OLS"),
+      boot_coefs = boot_coefs_intercept_slope,
+      boot_estimate = boot_estimate_study_weighted_ols,
       supports_bootstrap = TRUE
     ),
     list(
@@ -311,26 +672,79 @@ linear_model_specs <- function() {
       weight_column = "precision",
       terms = c("effect", "publication_bias"),
       fit = function(df) stats::lm(effect ~ se, data = df, weights = (df$precision^2)),
-      tidy = function(model, data) tidy_lm_model(model, data, "study_id"),
+      tidy = function(model, data) tidy_lm_model(model, data, "study_id", "Precision Weighted OLS"),
+      boot_coefs = boot_coefs_intercept_slope,
+      boot_estimate = make_boot_estimate_weighted_ols("precision"),
       supports_bootstrap = TRUE
     )
   )
 }
 
+#' @title Flag disagreements between the analytic and bootstrap significance tests
+#' @description
+#' The analytic p-value comes from a clustered-vcov Wald test; the bootstrap CI
+#' is a nonparametric percentile interval. They can disagree, most often when
+#' the regressor (`se`) is heavy-tailed enough that a handful of resampled
+#' clusters dominate the bootstrap distribution. Both tests are evaluated at
+#' the same `conf_level` so the comparison is apples-to-apples regardless of
+#' the (coarser) `*`/`**`/`***` star thresholds.
+#' @param p_value *[numeric]* Analytic (clustered) p-values.
+#' @param bootstrap_lower *[numeric]* Lower bootstrap percentile CI bound.
+#' @param bootstrap_upper *[numeric]* Upper bootstrap percentile CI bound.
+#' @param conf_level *[numeric]* Confidence level shared by both tests.
+#' @return A logical vector, `NA` where no bootstrap CI is available.
+flag_ci_conflicts <- function(p_value, bootstrap_lower, bootstrap_upper, conf_level) {
+  ci_available <- is.finite(bootstrap_lower) & is.finite(bootstrap_upper)
+  analytic_significant <- is.finite(p_value) & p_value <= (1 - conf_level)
+  ci_excludes_zero <- ci_available & (bootstrap_lower > 0 | bootstrap_upper < 0)
+
+  conflict <- analytic_significant != ci_excludes_zero
+  conflict[!ci_available] <- NA
+  conflict
+}
+
 #' @title Run linear model specifications
 #' @param df *[data.frame]* Input dataset.
 #' @param options *[list]* Options controlling formatting and bootstrap.
+#' @param is_pkg_available *[function, optional]* Predicate that reports whether
+#'   a package namespace is available. Defaults to `requireNamespace`; injectable
+#'   so tests can simulate a missing package.
 #' @return A list containing the coefficients, formatted summary, and skipped models.
-run_linear_models <- function(df, options) {
+run_linear_models <- function(df, options, is_pkg_available = NULL) {
+  if (is.null(is_pkg_available)) {
+    is_pkg_available <- function(pkg) requireNamespace(pkg, quietly = TRUE)
+  }
+
   specs <- linear_model_specs()
   results <- list()
   skipped <- list()
 
   for (spec in specs) {
+    required_pkgs <- spec$required_packages %||% character()
+    missing_pkgs <- required_pkgs[!vapply(required_pkgs, is_pkg_available, logical(1))]
+    if (length(missing_pkgs) > 0) {
+      install_hint <- paste0("install.packages(", deparse(missing_pkgs), ")")
+      skipped[[spec$name]] <- list(
+        label = spec$label,
+        reason = cli::format_inline(
+          "Package {.pkg {missing_pkgs}} is required for {.emph {spec$label}}. Install with: {install_hint}"
+        )
+      )
+      next
+    }
+
     prepared <- prepare_linear_data(df, spec)
     if (prepared$skipped) {
       skipped[[spec$name]] <- list(label = spec$label, reason = prepared$reason)
       next
+    }
+
+    if (!is.null(spec$precheck)) {
+      precheck_reason <- spec$precheck(prepared)
+      if (!is.null(precheck_reason)) {
+        skipped[[spec$name]] <- list(label = spec$label, reason = precheck_reason)
+        next
+      }
     }
 
     model <- tryCatch(spec$fit(prepared$data), error = function(e) {
@@ -383,6 +797,7 @@ run_linear_models <- function(df, options) {
       n_obs = integer(),
       bootstrap_lower = numeric(),
       bootstrap_upper = numeric(),
+      vcov_type = character(),
       stringsAsFactors = FALSE
     )
     return(list(coefficients = empty, summary = empty, skipped = skipped, options = options))
@@ -390,19 +805,25 @@ run_linear_models <- function(df, options) {
 
   coefficients <- do.call(rbind, results)
 
-  coefficients$significance <- if (options$add_significance_marks) vapply(coefficients$p_value, significance_mark, character(1)) else ""
+  coefficients$significance <- if (options$add_significance_marks) significance_mark(coefficients$p_value) else ""
   coefficients$estimate_rounded <- round(coefficients$estimate, options$round_to)
   coefficients$std_error_rounded <- round(coefficients$std_error, options$round_to)
   coefficients$estimate_formatted <- paste0(format_number(coefficients$estimate, options$round_to), coefficients$significance)
-  coefficients$std_error_formatted <- vapply(coefficients$std_error, format_se, character(1), digits = options$round_to)
-  coefficients$bootstrap_formatted <- mapply( # nolint: undesirable_function_linter.
-    format_ci,
+  coefficients$std_error_formatted <- format_se(coefficients$std_error, options$round_to)
+  coefficients$bootstrap_formatted <- format_ci(
     coefficients$bootstrap_lower,
     coefficients$bootstrap_upper,
-    MoreArgs = list(digits = options$round_to),
-    SIMPLIFY = TRUE,
-    USE.NAMES = FALSE
+    digits = options$round_to
   )
+
+  coefficients$ci_conflict <- flag_ci_conflicts(
+    coefficients$p_value,
+    coefficients$bootstrap_lower,
+    coefficients$bootstrap_upper,
+    options$conf_level
+  )
+  conflicting <- !is.na(coefficients$ci_conflict) & coefficients$ci_conflict
+  coefficients$bootstrap_formatted[conflicting] <- paste0(coefficients$bootstrap_formatted[conflicting], " †")
 
   summary <- build_summary_table(coefficients, options$round_to)
 
@@ -423,7 +844,10 @@ build_summary_table <- function(coefficients, digits) {
     return(data.frame())
   }
 
-  models <- unique(coefficients$model)
+  # The models do not all get the same kind of standard error (the between
+  # estimator cannot be clustered, and any model can be downgraded by a failing
+  # robust estimator), so the table says which is which. Without it the columns
+  # read as directly comparable when they are not.
   row_labels <- c(
     "Publication Bias",
     "(Std. Error)",
@@ -431,16 +855,12 @@ build_summary_table <- function(coefficients, digits) {
     "Effect Beyond Bias",
     "(Std. Error)",
     "Bootstrap CI (Effect)",
-    "Total Observations"
+    "Total Observations",
+    "Standard Errors"
   )
 
-  summary <- data.frame(
-    Metric = row_labels,
-    stringsAsFactors = FALSE,
-    check.names = FALSE
-  )
-
-  for (model in models) {
+  columns <- list()
+  for (model in unique(coefficients$model)) {
     model_rows <- coefficients[coefficients$model == model, , drop = FALSE]
     pb <- model_rows[model_rows$term == "publication_bias", , drop = FALSE]
     eff <- model_rows[model_rows$term == "effect", , drop = FALSE]
@@ -453,26 +873,31 @@ build_summary_table <- function(coefficients, digits) {
       n_obs_value <- n_obs_value[1]
     }
 
-    col_values <- c(
+    vcov_values <- unique(model_rows$vcov_type %||% NA_character_)
+    vcov_values <- vcov_values[!is.na(vcov_values)]
+    vcov_label <- if (length(vcov_values)) paste(vcov_values, collapse = "; ") else NA_character_
+
+    column_name <- model_rows$model_label[1]
+    columns[[column_name]] <- c(
       if (nrow(pb)) pb$estimate_formatted else NA_character_,
       if (nrow(pb)) pb$std_error_formatted else NA_character_,
       if (nrow(pb)) pb$bootstrap_formatted else NA_character_,
       if (nrow(eff)) eff$estimate_formatted else NA_character_,
       if (nrow(eff)) eff$std_error_formatted else NA_character_,
       if (nrow(eff)) eff$bootstrap_formatted else NA_character_,
-      if (nrow(model_rows)) format_number(n_obs_value, 0) else NA_character_
+      if (nrow(model_rows)) format_number(n_obs_value, 0) else NA_character_,
+      vcov_label
     )
-
-    column_name <- model_rows$model_label[1]
-    summary[[column_name]] <- col_values
   }
 
-  attr(summary, "row.names") <- row_labels
-  summary
+  shared_build_summary_table(row_labels, columns)
 }
 
 box::export(
-  run_linear_models
+  run_linear_models,
+  linear_model_specs,
+  resample_cluster_rows,
+  flag_ci_conflicts
 )
 
 # nocov end -----------------------------------------------------------------

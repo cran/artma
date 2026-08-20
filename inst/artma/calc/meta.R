@@ -18,7 +18,9 @@ t_stat <- function(effect, se) {
     if (get_verbosity() >= 2) {
       cli::cli_alert_warning("Introducing infinite t-values for {length(zero_se_rows)} rows with zero standard errors")
     }
-    t_values[zero_se_rows] <- Inf
+    # Keep the sign of the effect; 0/0 carries no direction and becomes NA.
+    t_values[zero_se_rows] <- sign(effect[zero_se_rows]) * Inf
+    t_values[zero_se_rows][effect[zero_se_rows] == 0] <- NA_real_
   }
 
   t_values
@@ -39,9 +41,12 @@ reg_dof <- function(n_obs, n_predictors) n_obs - n_predictors
 #' @param reg_dof *\[numeric, optional\]* The degrees of freedom for the regression. Has to be provided if `se` is not provided.
 #' @return *\[numeric\]* The precision of the effect estimates
 precision <- function(se = NULL, reg_dof = NULL) {
-  box::use(artma / libs / core / utils[get_verbosity])
+  box::use(
+    artma / libs / core / utils[get_verbosity],
+    artma / options / typed_accessors[get_precision_type]
+  )
 
-  precision_type <- getOption("artma.calc.precision_type", "1/SE")
+  precision_type <- get_precision_type()
   if (precision_type == "1/SE") {
     zero_se_rows <- which(se == 0)
     if (length(zero_se_rows) > 0) {
@@ -62,8 +67,24 @@ precision <- function(se = NULL, reg_dof = NULL) {
 }
 
 
+#' @title Two-sided normal p-value for an estimate/standard-error pair
+#' @description Calculate the p-value from a Wald z-statistic under a normal
+#'   approximation, used by the non-linear publication-bias estimators.
+#' @param estimate *\[numeric\]* The point estimate.
+#' @param std_error *\[numeric\]* The standard error of the estimate.
+#' @return *\[numeric\]* The two-sided p-value, or `NA_real_` if the inputs
+#'   are not finite or `std_error` is non-positive.
+normal_p_value <- function(estimate, std_error) {
+  if (!is.finite(estimate) || !is.finite(std_error) || std_error <= 0) {
+    return(NA_real_)
+  }
+  2 * stats::pnorm(abs(estimate / std_error), lower.tail = FALSE)
+}
+
+
 box::export(
   t_stat,
   precision,
-  reg_dof
+  reg_dof,
+  normal_p_value
 )
