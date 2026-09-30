@@ -21,6 +21,16 @@ get_required_colnames <- function() {
   CONST$DATA$REQUIRED_COLNAMES
 }
 
+#' @title Get numeric column names
+#' @description Standard column names whose values must be numeric. Their
+#'   type is never inferred from the data: a text column in one of these
+#'   roles is an input error, not a category.
+#' @return *\[character\]* A vector of numeric standard column names.
+get_numeric_colnames <- function() {
+  box::use(artma / const[CONST])
+  CONST$DATA$NUMERIC_COLNAMES
+}
+
 #' @title Get the column name mapping from the unified column store
 #' @description Reads `artma.data.columns` and extracts the mapping from
 #'   standard column names to the source column names in the user's data file.
@@ -55,6 +65,23 @@ get_colnames_map <- function() {
 get_reserved_colnames <- function() {
   box::use(artma / const[CONST])
   union(get_required_colnames(), CONST$DATA$COMPUTED_COLNAMES)
+}
+
+#' @title Get columns the compute phase rebuilds from winsorized data
+#' @description Columns whose mapped values `compute_optional_columns()`
+#'   discards and recalculates from the winsorized `effect`/`se` (see
+#'   `add_precision_column()` and `add_t_stat_column()`). Upstream steps skip
+#'   these columns so that no imputation work, or reported imputation count,
+#'   goes into values about to be thrown away (issues #522 and #538).
+#' @param df *\[data.frame\]* The data frame.
+#' @return *\[character\]* Column names present in `df` that the compute
+#'   phase recalculates; empty when winsorization is off.
+get_winsorization_recomputed_cols <- function(df) {
+  box::use(artma / options / typed_accessors[is_winsorization_active])
+  if (!is_winsorization_active()) {
+    return(character(0))
+  }
+  intersect(c("precision", "t_stat"), colnames(df))
 }
 
 #' Get the number of studies in an analysis data frame.
@@ -279,9 +306,11 @@ box::export(
   determine_vector_type,
   get_colnames_map,
   get_number_of_studies,
+  get_numeric_colnames,
   get_required_colnames,
   get_reserved_colnames,
   get_standardized_colnames,
+  get_winsorization_recomputed_cols,
   raise_invalid_data_type_error,
   standardize_column_names
 )

@@ -95,13 +95,14 @@ Method-specific parameters for each analysis method:
 - `iv_instrument`: Instrument selection (automatic or specific formula)
 - `puniform_alpha`: Significance level for p-uniform*
 - `puniform_method`: Estimation method (ML or P)
+- `puniform_side`: Direction of the selection for significance (auto, left, or right)
 
 #### `bma` (Bayesian Model Averaging)
 
 - `burn`: Burn-in iterations (default: 10000)
 - `iter`: MCMC iterations (default: 50000)
 - `g`: Prior specification (default: "UIP")
-- `mprior`: Model prior (default: "uniform")
+- `mprior`: Model prior, one of "uniform", "random", "fixed", "dilut" (default: "uniform")
 - `nmodel`: Number of top models to retain
 - `mcmc`: Sampler type ("bd" or "rev.jump")
 - `use_vif_optimization`: Whether to use VIF optimization
@@ -180,10 +181,12 @@ Temporary file settings (runtime only, not stored)
 
 ### Interactive Creation
 
-The easiest way to create an options file is interactively. When you run an artma function without specifying an options file, you'll be prompted to create one:
+The easiest way to create an options file is interactively. Calling `artma()`
+without one opens the session hub with no options file loaded; its **Options
+file** item is where you select an existing file or create a new one:
 
 ```r
-# This will prompt you to create an options file
+# Opens the session hub; pick "Options file" to select or create one
 artma::artma()
 ```
 

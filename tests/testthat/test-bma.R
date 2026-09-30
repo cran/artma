@@ -22,9 +22,12 @@ box::use(
     handle_bma_params,
     get_bma_data,
     find_optimal_bma_formula,
-    rename_bma_model
+    rename_bma_model,
+    run_bma,
+    unscale_bma_coefs
   ],
-  artma / methods / bma[bma, prepare_bma_inputs]
+  artma / methods / bma[bma, prepare_bma_inputs],
+  artma / options / template[get_option_defs]
 )
 
 make_demo_bma_data <- function() {
@@ -173,6 +176,126 @@ test_that("get_bma_data subsets and scales non-binary variables", {
   expect_false(abs(mean(bma_data$moderator2)) < 1e-10)
 })
 
+test_that("unscale_bma_coefs inverts the z-scoring of slopes and intercept", {
+  bma_data <- data.frame(effect = 1:4, x_cont = c(1, 3, 5, 9), x_bin = c(0, 1, 0, 1))
+  attr(bma_data, "bpe_scale_centers") <- c(effect = 2.5, x_cont = 4.5, x_bin = 0)
+  attr(bma_data, "bpe_scale_scales") <- c(effect = 2, x_cont = 4, x_bin = 1)
+
+  coefs <- matrix(
+    c(
+      0.9, 0.5, 0.1, 1, 1,
+      0.8, -0.25, 0.05, 0, 2,
+      1, 0.3, NA, NA, 0
+    ),
+    nrow = 3, byrow = TRUE,
+    dimnames = list(
+      c("x_cont", "x_bin", "(Intercept)"),
+      c("PIP", "Post Mean", "Post SD", "Cond.Pos.Sign", "Idx")
+    )
+  )
+
+  unscaled <- unscale_bma_coefs(coefs, bma_data, c("x_cont", "x_bin"))
+
+  # Slopes: b * sd(y) / sd(x); the dummy only picks up sd(y).
+  expect_equal(unscaled["x_cont", "Post Mean"], 0.5 * 2 / 4)
+  expect_equal(unscaled["x_cont", "Post SD"], 0.1 * 2 / 4)
+  expect_equal(unscaled["x_bin", "Post Mean"], -0.25 * 2)
+  expect_equal(unscaled["x_bin", "Post SD"], 0.05 * 2)
+  # Intercept: mean(y) + sd(y) * a - sum(raw slope * mean(x)).
+  expect_equal(unscaled["(Intercept)", "Post Mean"], 2.5 + 2 * 0.3 - 0.25 * 4.5)
+  expect_true(is.na(unscaled["(Intercept)", "Post SD"]))
+  # PIPs and the bookkeeping columns are untouched.
+  expect_equal(unscaled[, c("PIP", "Cond.Pos.Sign", "Idx")], coefs[, c("PIP", "Cond.Pos.Sign", "Idx")])
+
+  # A frame that was never scaled is passed through unchanged.
+  expect_equal(unscale_bma_coefs(coefs, data.frame(effect = 1:4), c("x_cont", "x_bin")), coefs)
+})
+
+test_that("unscaled BMA coefficients match BMS fitted on the raw data", {
+  skip_if_not_installed("BMS")
+  local_options("artma.verbose" = 1)
+
+  df <- make_demo_bma_data()
+  vars <- c("effect", "se", "moderator1", "moderator2", "moderator3")
+  var_list <- data.frame(
+    var_name = vars,
+    var_name_verbose = vars,
+    bma = TRUE,
+    to_log_for_bma = FALSE,
+    bma_reference_var = FALSE,
+    stringsAsFactors = FALSE
+  )
+  scaled <- get_bma_data(df, var_list, vars, scale_data = TRUE, from_vector = TRUE, include_reference_groups = FALSE)
+  raw <- get_bma_data(df, var_list, vars, scale_data = FALSE, from_vector = TRUE, include_reference_groups = FALSE)
+
+  # Enumerating the model space removes sampling noise, so the g-prior's scale
+  # invariance makes the two fits agree to numerical precision.
+  params <- list(burn = 10L, iter = 100L, nmodel = 16L, g = "UIP", mprior = "uniform", mcmc = "enumerate")
+  coef_args <- list(order.by.pip = FALSE, exact = TRUE, include.constant = TRUE)
+
+  scaled_model <- run_bma(scaled, params)
+  raw_model <- run_bma(raw, params)
+  scaled_coefs <- do.call(stats::coef, c(list(scaled_model), coef_args))
+  raw_coefs <- do.call(stats::coef, c(list(raw_model), coef_args))
+
+  unscaled <- unscale_bma_coefs(scaled_coefs, scaled, scaled_model$reg.names)
+
+  expect_equal(rownames(unscaled), rownames(raw_coefs))
+  expect_equal(unscaled[, "PIP"], raw_coefs[, "PIP"], tolerance = 1e-8)
+  expect_equal(unscaled[, "Post Mean"], raw_coefs[, "Post Mean"], tolerance = 1e-8)
+  slopes <- setdiff(rownames(unscaled), "(Intercept)")
+  expect_equal(unscaled[slopes, "Post SD"], raw_coefs[slopes, "Post SD"], tolerance = 1e-8)
+  # The test is only meaningful if the scaled fit differed from the raw one.
+  expect_false(isTRUE(all.equal(scaled_coefs[slopes, "Post Mean"], raw_coefs[slopes, "Post Mean"])))
+})
+
+test_that("bma reports posterior means on the data scale", {
+  skip_if_not_installed("BMS")
+
+  df <- make_demo_bma_data()
+  config <- list(
+    effect = list(var_name = "effect", var_name_verbose = "Effect", bma = FALSE),
+    se = list(var_name = "se", var_name_verbose = "SE", bma = TRUE),
+    moderator1 = list(var_name = "moderator1", var_name_verbose = "Mod1", bma = TRUE),
+    moderator3 = list(var_name = "moderator3", var_name_verbose = "Mod3", bma = TRUE)
+  )
+
+  local_options(list(
+    artma.verbose = 0,
+    artma.autonomy.level = "autonomous",
+    artma.data.columns = config,
+    artma.output.save_results = FALSE,
+    artma.visualization.export_graphics = FALSE,
+    artma.methods.bma.burn = 10L,
+    artma.methods.bma.iter = 100L,
+    artma.methods.bma.nmodel = 8L,
+    artma.methods.bma.g = "UIP",
+    artma.methods.bma.mprior = "uniform",
+    artma.methods.bma.mcmc = "enumerate"
+  ))
+
+  result <- bma(df)
+
+  raw <- df[c("effect", "se", "moderator1", "moderator3")]
+  raw_model <- run_bma(raw, list(
+    burn = 10L, iter = 100L, nmodel = 8L, g = "UIP", mprior = "uniform", mcmc = "enumerate"
+  ))
+  raw_coefs <- stats::coef(raw_model, order.by.pip = FALSE, exact = TRUE, include.constant = TRUE)
+
+  # The model still ran on the z-scored frame ...
+  expect_true(abs(mean(result$meta$data$effect)) < 1e-10)
+  # ... but the reported numbers are on the data scale, intercept included.
+  expected <- stats::setNames(raw_coefs[, "Post Mean"], c("SE", "Mod1", "Mod3", "Intercept"))
+  reported <- stats::setNames(result$estimates$estimate, result$estimates$term)
+  expect_equal(reported[names(expected)], expected, tolerance = 1e-8)
+  expect_equal(result$tables$coefficients$post_mean, result$estimates$estimate)
+  expect_equal(
+    result$estimates$std_error[result$estimates$term != "Intercept"],
+    unname(raw_coefs[rownames(raw_coefs) != "(Intercept)", "Post SD"]),
+    tolerance = 1e-8
+  )
+})
+
 test_that("run_bma executes without errors", {
   box::use(artma / econometric / bma[run_bma])
 
@@ -194,6 +317,71 @@ test_that("run_bma executes without errors", {
 
   expect_true(inherits(result, "bma"))
   expect_true(!is.null(result$topmod))
+})
+
+test_that("run_bma accepts the documented dilut model prior", {
+  skip_if_not_installed("BMS")
+
+  df <- make_demo_bma_data()
+  bma_data <- df[c("effect", "se", "moderator1", "moderator2")]
+  params <- list(
+    burn = 10L,
+    iter = 100L,
+    nmodel = 8L,
+    g = "UIP",
+    mprior = "dilut",
+    mcmc = "enumerate"
+  )
+
+  local_options("artma.verbose" = 1)
+
+  dilut_model <- run_bma(bma_data, params)
+  uniform_model <- run_bma(bma_data, utils::modifyList(params, list(mprior = "uniform")))
+
+  expect_true(inherits(dilut_model, "bma"))
+  expect_equal(dilut_model$mprior.info$origargs$mpmode, "dilut")
+  # The dilution prior downweights collinear models, so the posterior
+  # inclusion probabilities move away from the uniform ones.
+  dilut_pip <- stats::coef(dilut_model, order.by.pip = FALSE)[, "PIP"]
+  uniform_pip <- stats::coef(uniform_model, order.by.pip = FALSE)[, "PIP"]
+  expect_false(isTRUE(all.equal(dilut_pip, uniform_pip)))
+})
+
+test_that("the mprior help lists every model prior artma passes to bms", {
+  def <- get_option_defs(opt_path = "methods.bma.mprior")[[1]]
+
+  for (prior in c("uniform", "random", "fixed", "dilut")) {
+    expect_match(def$help, prior, fixed = TRUE)
+  }
+})
+
+test_that("run_bma leaves the graphics device untouched", {
+  # `BMS::bms` defaults to `user.int = TRUE`, which plots the fitted model on
+  # the way out. In a forked method worker on macOS that plot opens quartz and
+  # kills the child, so `run_bma()` must never let it draw.
+  box::use(artma / econometric / bma[run_bma])
+
+  df <- make_demo_bma_data()
+  bma_data <- df[c("effect", "se", "moderator1", "moderator2")]
+
+  params <- list(
+    burn = 100L,
+    iter = 500L,
+    nmodel = 10L,
+    g = "UIP",
+    mprior = "uniform",
+    mcmc = "bd"
+  )
+
+  local_options("artma.verbose" = 1)
+
+  # Other tests in this file leave devices open, so start from a clean slate:
+  # otherwise a device `bms` opens is indistinguishable from one already there.
+  while (!is.null(grDevices::dev.list())) grDevices::dev.off()
+
+  run_bma(bma_data, params)
+
+  expect_null(grDevices::dev.list())
 })
 
 test_that("build_bma_model_labels labels only the varying parameters", {

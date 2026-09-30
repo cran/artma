@@ -3,6 +3,8 @@ box::use(
     expect_equal,
     expect_error,
     expect_false,
+    expect_gt,
+    expect_lt,
     expect_match,
     expect_true,
     test_that
@@ -24,6 +26,7 @@ box::use(
     caliper_direction,
     build_caliper_summary
   ],
+  artma / options / template[get_option_defs],
   artma / calc / methods / elliott[
     bound0,
     bound1,
@@ -400,6 +403,27 @@ test_that("run_p_hacking_tests reports p-value counts and a caliper table", {
   expect_true(any(grepl("p-value", result$caliper[[1]])))
 })
 
+test_that("run_p_hacking_tests picks the t-statistic source from t_stat_source", {
+  local_options(artma.verbose = 1)
+  df <- make_p_hacking_df()
+  # A reported t_stat that disagrees with effect / se, as when the primary
+  # studies clustered their standard errors: doubling pushes the t = 1.5 and
+  # t = 1.0 rows past the 5% threshold, leaving only t = 0.5 (now 1.0) below.
+  df$t_stat <- 2 * df$effect / df$se
+
+  reported <- run_p_hacking_tests(df, base_p_hacking_options(t_stat_source = "reported"))
+  computed <- run_p_hacking_tests(df, base_p_hacking_options(t_stat_source = "computed"))
+  default <- run_p_hacking_tests(df, base_p_hacking_options())
+
+  expect_equal(computed$n_significant_005, 3L)
+  expect_equal(reported$n_significant_005, 5L)
+  expect_equal(default$n_significant_005, reported$n_significant_005)
+  expect_error(
+    run_p_hacking_tests(df, base_p_hacking_options(t_stat_source = "raw")),
+    "t_stat_source"
+  )
+})
+
 test_that("run_p_hacking_tests dedupes duplicated caliper thresholds/widths without crashing", {
   local_options(artma.verbose = 1)
   df <- make_p_hacking_df()
@@ -429,19 +453,19 @@ test_that("run_p_hacking_tests runs the Elliott suite when requested", {
   )
 
   expect_true(is.data.frame(result$elliott))
-  expect_true("Binomial [0, 0.05]" %in% result$elliott$Test)
-  expect_true("Fisher [0, 0.05]" %in% result$elliott$Test)
-  expect_equal(sum(result$elliott$Test == "Observations in [0, 0.1]"), 1L)
+  expect_true("Binomial [1e-05, 0.05]" %in% result$elliott$Test)
+  expect_true("Fisher [1e-05, 0.05]" %in% result$elliott$Test)
+  expect_equal(sum(result$elliott$Test == "Observations in [1e-05, 0.1]"), 1L)
   expect_false("Observations <= 0.1" %in% result$elliott$Test)
 })
 
 # Elliott supports ------------------------------------------------------------
 
 # A realistic clustered p-curve (the cox_shi_panel(202) construction, which
-# respects the Elliott theoretical bounds so the default windows stay quiet),
-# plus a heap of p-values at 0.125. The heap is invisible to the default
-# supports but breaks monotonicity on a [0, 0.15] window, so widening the
-# support flips the Cox-Shi conclusion.
+# respects the Elliott theoretical bounds so the narrow windows stay quiet),
+# plus a heap of p-values at 0.125. The heap is invisible on [0, 0.10] but
+# breaks monotonicity on a [0, 0.15] window, so widening the support flips
+# the Cox-Shi conclusion.
 heap_bump_df <- function() {
   set.seed(202, kind = "Mersenne-Twister", normal.kind = "Inversion")
   panel_t <- abs(stats::rnorm(800, mean = 1.5, sd = 1))
@@ -474,19 +498,21 @@ test_that("run_p_hacking_tests honours custom Elliott supports", {
     )
   )
 
-  expect_true("Binomial [0, 0.15]" %in% result$elliott$Test)
-  expect_true("Fisher [0, 0.15]" %in% result$elliott$Test)
-  expect_true("Observations in [0, 0.15]" %in% result$elliott$Test)
-  # The default [0, 0.10] rows are replaced, not appended.
-  expect_false(any(grepl("[0, 0.10]", result$elliott$Test, fixed = TRUE)))
-  expect_false(any(grepl("Observations in [0, 0.1]", result$elliott$Test, fixed = TRUE)))
-  # The observation count matches the requested support window.
-  expected_n <- sum(2 * stats::pnorm(-abs(df$effect / df$se)) <= 0.15)
-  obs_row <- result$elliott[result$elliott$Test == "Observations in [0, 0.15]", ]
+  expect_true("Binomial [1e-05, 0.15]" %in% result$elliott$Test)
+  expect_true("Fisher [1e-05, 0.15]" %in% result$elliott$Test)
+  expect_true("Observations in [1e-05, 0.15]" %in% result$elliott$Test)
+  # The 0.10 rows are replaced, not appended.
+  expect_false(any(grepl("[1e-05, 0.10]", result$elliott$Test, fixed = TRUE)))
+  expect_false(any(grepl("Observations in [1e-05, 0.1]", result$elliott$Test, fixed = TRUE)))
+  # The observation count matches the requested support window, lower bound
+  # included: the counts describe the sample the tests actually saw.
+  pvals <- 2 * stats::pnorm(-abs(df$effect / df$se))
+  expected_n <- sum(pvals >= 1e-5 & pvals <= 0.15)
+  obs_row <- result$elliott[result$elliott$Test == "Observations in [1e-05, 0.15]", ]
   expect_equal(obs_row$`P-value`, as.character(expected_n))
 })
 
-test_that("a custom support changes the Cox-Shi result relative to the default supports", {
+test_that("a wider support changes the Cox-Shi result relative to a narrow one", {
   local_options(artma.verbose = 1, artma.cache.use_cache = FALSE)
   df <- heap_bump_df()
 
@@ -503,21 +529,148 @@ test_that("a custom support changes the Cox-Shi result relative to the default s
     )
   }
 
-  default_run <- run_with_supports(c(0.05, 0.1))
-  custom_run <- run_with_supports(c(0.05, 0.15))
+  narrow_run <- run_with_supports(c(0.05, 0.1))
+  wide_run <- run_with_supports(c(0.05, 0.15))
 
-  default_row <- default_run$elliott[default_run$elliott$Test == "Cox-Shi [0, 0.10]", ]
-  custom_row <- custom_run$elliott[custom_run$elliott$Test == "Cox-Shi [0, 0.15]", ]
-  expect_equal(nrow(default_row), 1L)
-  expect_equal(nrow(custom_row), 1L)
+  narrow_row <- narrow_run$elliott[narrow_run$elliott$Test == "Cox-Shi [1e-05, 0.10]", ]
+  wide_row <- wide_run$elliott[wide_run$elliott$Test == "Cox-Shi [1e-05, 0.15]", ]
+  expect_equal(nrow(narrow_row), 1L)
+  expect_equal(nrow(wide_row), 1L)
   # Both windows produce a numeric p-value.
-  expect_false(grepl("NA", default_row$`P-value`))
-  expect_false(grepl("NA", custom_row$`P-value`))
+  expect_false(grepl("NA", narrow_row$`P-value`))
+  expect_false(grepl("NA", wide_row$`P-value`))
   # The heap at p = 0.125 is invisible on [0, 0.10] but rejects on [0, 0.15],
   # so the support choice flips the substantive conclusion.
-  expect_true(formatted_p_to_num(default_row$`P-value`) > 0.05)
-  expect_true(formatted_p_to_num(custom_row$`P-value`) < 0.05)
-  expect_false(identical(default_row$`P-value`, custom_row$`P-value`))
+  expect_true(formatted_p_to_num(narrow_row$`P-value`) > 0.05)
+  expect_true(formatted_p_to_num(wide_row$`P-value`) < 0.05)
+  expect_false(identical(narrow_row$`P-value`, wide_row$`P-value`))
+})
+
+test_that("the built-in Elliott supports cover the 0.05, 0.10 and 0.15 windows", {
+  local_options(artma.verbose = 1, artma.cache.use_cache = FALSE)
+  df <- heap_bump_df()
+
+  # Dropping the option falls back to the package default supports.
+  result <- run_p_hacking_tests(
+    df,
+    base_p_hacking_options(
+      include_caliper = FALSE,
+      include_elliott = TRUE,
+      elliott_supports = NULL
+    )
+  )
+
+  for (window in c("[1e-05, 0.05]", "[1e-05, 0.10]", "[1e-05, 0.15]")) {
+    expect_true(paste("Binomial", window) %in% result$elliott$Test)
+    expect_true(paste("Fisher", window) %in% result$elliott$Test)
+  }
+})
+
+test_that("the options template default matches the built-in Elliott supports", {
+  def <- get_option_defs(opt_path = "methods.p_hacking_tests.elliott_supports")[[1]]
+
+  expect_equal(def$default, c(0.05, 0.1, 0.15))
+})
+
+test_that("the options template default matches the built-in Elliott lower bound", {
+  def <- get_option_defs(opt_path = "methods.p_hacking_tests.elliott_p_min")[[1]]
+
+  expect_equal(def$default, 1e-5)
+})
+
+test_that("Elliott row labels carry the support lower bound actually used", {
+  local_options(artma.verbose = 1, artma.cache.use_cache = FALSE)
+  set.seed(202)
+  df <- make_p_hacking_df()
+
+  run_with_p_min <- function(...) {
+    run_p_hacking_tests(
+      df,
+      base_p_hacking_options(
+        include_caliper = FALSE, include_elliott = TRUE,
+        elliott_supports = 0.05, ...
+      )
+    )
+  }
+
+  # A label reading "[0, 0.05]" on a battery that ran on [1e-05, 0.05] misstates
+  # both the interval and the observation count printed against it, which is how
+  # a reader ends up comparing the count against a published one taken from zero.
+  default_labels <- run_with_p_min()$elliott$Test
+  expect_true("Binomial [1e-05, 0.05]" %in% default_labels)
+  expect_true("Fisher [1e-05, 0.05]" %in% default_labels)
+  expect_true("Observations in [1e-05, 0.05]" %in% default_labels)
+  expect_false(any(grepl("[0, 0.05]", default_labels, fixed = TRUE)))
+
+  # p_min = 0 is a real zero lower bound, so the plain label is correct there.
+  zero_labels <- run_with_p_min(elliott_p_min = 0)$elliott$Test
+  expect_true("Binomial [0, 0.05]" %in% zero_labels)
+  expect_true("Observations in [0, 0.05]" %in% zero_labels)
+  expect_false(any(grepl("1e-05", zero_labels, fixed = TRUE)))
+
+  # The machine-readable support field agrees with the printed label.
+  expect_equal(run_with_p_min()$elliott_results$binomial_005$support, "[1e-05, 0.05]")
+  expect_equal(run_with_p_min(elliott_p_min = 0)$elliott_results$binomial_005$support, "[0, 0.05]")
+})
+
+# A flat p-curve plus 60 estimates whose |t| is large enough that
+# 2 * pnorm(-|t|) underflows to exactly 0 in double precision.
+underflow_df <- function() {
+  set.seed(404, kind = "Mersenne-Twister", normal.kind = "Inversion")
+  flat_t <- stats::qnorm(1 - stats::runif(300) / 2)
+  zero_t <- rep(40, 60)
+  t_stats <- c(flat_t, zero_t)
+  data.frame(
+    effect = t_stats,
+    se = rep(1, length(t_stats)),
+    study_id = 1 + ((seq_along(t_stats) - 1) %/% 20)
+  )
+}
+
+test_that("the Elliott battery excludes p-values that underflowed to zero", {
+  local_options(artma.verbose = 1, artma.cache.use_cache = FALSE)
+  df <- underflow_df()
+  pvals <- 2 * stats::pnorm(-abs(df$effect / df$se))
+  expect_equal(sum(pvals == 0), 60L)
+
+  run_with_p_min <- function(...) {
+    run_p_hacking_tests(
+      df,
+      base_p_hacking_options(include_caliper = FALSE, include_elliott = TRUE, ...)
+    )
+  }
+
+  default_run <- run_with_p_min()
+  zero_run <- run_with_p_min(elliott_p_min = 0)
+
+  # The window label carries the lower bound the run actually used, so the two
+  # runs are addressed by different rows.
+  obs_of <- function(result, window) {
+    as.numeric(result$elliott[result$elliott$Test == paste("Observations in", window), "P-value"])
+  }
+  # The default lower bound drops exactly the underflowed p-values.
+  expect_equal(obs_of(default_run, "[1e-05, 0.1]"), obs_of(zero_run, "[0, 0.1]") - 60)
+
+  # Keeping the zeros piles 60 observations into the lower half of the window
+  # and saturates the binomial statistic, so the answer moves materially.
+  default_p <- as.numeric(default_run$elliott_results$binomial_01$p_value)
+  zero_p <- as.numeric(zero_run$elliott_results$binomial_01$p_value)
+  expect_lt(default_p, 0.9)
+  expect_gt(zero_p - default_p, 0.3)
+})
+
+test_that("run_p_hacking_tests rejects an invalid Elliott lower bound", {
+  local_options(artma.verbose = 1, artma.cache.use_cache = FALSE)
+  df <- make_p_hacking_df()
+
+  bad_options <- function(p_min) {
+    base_p_hacking_options(include_caliper = FALSE, include_elliott = TRUE, elliott_p_min = p_min)
+  }
+
+  expect_error(run_p_hacking_tests(df, bad_options(c(1e-5, 1e-4))), "single finite number")
+  expect_error(run_p_hacking_tests(df, bad_options(NA_real_)), "single finite number")
+  expect_error(run_p_hacking_tests(df, bad_options(-1e-5)), "non-negative")
+  expect_error(run_p_hacking_tests(df, bad_options(0.06)), "smallest elliott_supports bound")
 })
 
 test_that("run_p_hacking_tests rejects invalid Elliott supports", {
@@ -551,7 +704,7 @@ test_that("run_p_hacking_tests records a skip reason when the CDF simulation yie
 
   expect_true(!is.null(result$skipped$lcm_005$reason))
   expect_true(!is.null(result$skipped$lcm_01$reason))
-  expect_equal(result$skipped$lcm_005$label, "LCM [0, 0.05]")
+  expect_equal(result$skipped$lcm_005$label, "LCM [1e-05, 0.05]")
   # The row is still reported (not silently absent), just as NA.
   lcm_rows <- result$elliott[grepl("^LCM", result$elliott$Test), ]
   expect_equal(nrow(lcm_rows), 2L)
@@ -574,7 +727,7 @@ test_that("run_p_hacking_tests records a skip reason for a singular Cox-Shi cova
   )
 
   expect_match(result$skipped$cox_shi_005$reason, "singular")
-  expect_equal(result$skipped$cox_shi_005$label, "Cox-Shi [0, 0.05]")
+  expect_equal(result$skipped$cox_shi_005$label, "Cox-Shi [1e-05, 0.05]")
 })
 
 test_that("run_lcm skips with a reason instead of failing silently", {

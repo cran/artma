@@ -25,6 +25,19 @@ CONST <- list(
     # missing (see #402). Empty strings and whitespace-only cells are always
     # treated as missing regardless of this list (normalize_whitespace_to_na).
     NA_STRINGS = c("", "NA", "N/A", "NULL", "null"),
+    # Stata-style missing-value markers that survive into a raw text column:
+    # the bare "." and the extended ".a" through ".z" codes. Matched as a
+    # pattern rather than listed in NA_STRINGS because the extended codes are
+    # a range, and because read.table's `na.strings` takes fixed strings.
+    # Unlike the ambiguous "na" dropped from NA_STRINGS above, a value that is
+    # nothing but a dot is a missing marker in every dataset we have seen, so
+    # matching it does not risk swallowing a genuine category.
+    STATA_MISSING_PATTERN = "^\\.[a-z]?$",
+    # A single number written with a decimal comma ("0,817"), the convention
+    # Excel, Stata and SPSS export under a European locale. Used by the CSV
+    # reader to pick `dec` (detect_decimal_separator) and by coerce_df_columns
+    # to re-parse text columns the other readers leave as character.
+    DECIMAL_COMMA_PATTERN = "^[-+]?[0-9]+,[0-9]+$",
     # Standard column names the pipeline recognizes. These keys identify the
     # role records in the unified per-column store (`data.columns`); every
     # other record key is a moderator variable. Accessors live in
@@ -35,6 +48,10 @@ CONST <- list(
     ),
     # The subset of standard columns the analysis cannot run without.
     REQUIRED_COLNAMES = c("study_id", "effect", "se", "n_obs"),
+    # Standard columns that must hold numbers. Their type is asserted rather
+    # than inferred from the data, so a text column in one of these roles
+    # aborts with the offending values instead of surviving as a category.
+    NUMERIC_COLNAMES = c("effect", "se", "n_obs", "t_stat", "precision"),
     # Standard column names derived or computed by the data pipeline (never
     # user moderator variables).
     COMPUTED_COLNAMES = c("obs_id", "study_label", "t_stat", "study_size", "reg_dof", "precision")
@@ -90,7 +107,11 @@ CONST <- list(
     TEMPLATE_NAMES = c("template.yaml", "template.yml", "options_template.yaml", "options_template.yml"),
     # These are the names of the keywords that are recognized in the options template.
     RECOGNIZED_KEYWORDS = c("default", "help", "prompt", "allow_na", "confirm_default"),
-    DEFAULT_PROMPT_TYPE = "readline"
+    DEFAULT_PROMPT_TYPE = "readline",
+    # How many times a single option prompt is re-asked before giving up, used
+    # when the answer asks for a file picker that cannot be opened or that the
+    # user closed without picking anything.
+    MAX_PROMPT_ATTEMPTS = 3L
   ),
   VARIABLE_SUMMARY_STATS = list(
     NAMES = c(

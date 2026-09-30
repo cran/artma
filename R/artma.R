@@ -8,11 +8,16 @@
 #'   be loaded from the options file (see `options` parameter). When provided, this
 #'   data will be used directly, bypassing the data reading step.
 #' @param methods *\[character, optional\]* A character vector of method names to run.
-#'   Use `"all"` to run all available methods. If `NULL`, an interactive menu will
-#'   prompt you to select methods. See `artma::methods_list()` for available methods.
+#'   Use `"all"` to run all available methods. If `NULL` and running
+#'   interactively, the session hub opens: a menu loop for picking and running
+#'   methods, previewing data, and opening results across repeated runs. See
+#'   `artma::methods_list()` for available methods.
 #' @param options *\[character, optional\]* Name of the options file (with or without
-#'   `.yaml` extension) to use. If `NULL` and running interactively, you will be
-#'   prompted to create or select an options file.
+#'   `.yaml` extension) to use. If `NULL` and running interactively, the session
+#'   hub opens without one: with no options files yet you are guided straight
+#'   into creating your first, and otherwise a picker of the existing files
+#'   opens. Backing out of either lands in the hub menu, whose options-file
+#'   item selects or creates the file the session runs on.
 #' @param options_dir *\[character, optional\]* Directory containing the options file.
 #'   If `NULL`, uses the default options directory.
 #' @param open_results *\[logical, optional\]* Whether to open the results directory
@@ -24,14 +29,18 @@
 #'   Methods that fail are omitted from the list; their names and error messages
 #'   are attached as the `failed_methods` attribute. The `run_info` attribute
 #'   carries the run's identity: the methods requested, the effective seed, and
-#'   the files each method wrote.
+#'   the files each method wrote. A session hub call additionally attaches a
+#'   `runs` attribute with one entry per run (methods, seed, timestamp, and the
+#'   options changed since the previous run) and keeps the latest result per
+#'   method across the session's runs.
 #'
 #' @details
 #' The `artma()` function is the primary way to interact with the artma package.
 #' It handles the complete workflow:
 #'
-#' 1. **Options Loading**: Loads configuration from an options file (or prompts for
-#'    creation in interactive mode)
+#' 1. **Options Loading**: Loads configuration from an options file (in the
+#'    session hub, from the entry create-or-pick flow or the options-file
+#'    menu item)
 #' 2. **Data Preparation**: Reads and prepares your data (unless `data` is provided)
 #' 3. **Method Execution**: Runs the specified analytical methods on your data
 #' 4. **Results**: Returns a structured list of results
@@ -87,8 +96,10 @@
 #'
 #' The manifest is overwritten on every run into the same output directory: it
 #' always describes the latest run, never a history. Runs driven by different
-#' options files already get their own output directory, so keep a run by
-#' copying its directory or by pointing `output.dir` somewhere per-run.
+#' options files already get their own output directory. To keep every run,
+#' set `output.run_subdirectories` to `TRUE`: each run then writes into
+#' `<output.dir>/runs/<timestamp>/`, with its own manifest, tables, graphics
+#' and report, and `artma::results_open()` opens the latest one.
 #'
 #' ## Method Failures
 #'
@@ -156,140 +167,461 @@ artma <- function(
 
   main <- function() {
     box::use(
-      artma / data / index[prepare_data],
-      artma / libs / core / utils[get_verbosity],
       artma / libs / infrastructure / output_files[
         begin_output_file_capture, end_output_file_capture
       ],
-      artma / output / export[
-        resolve_output_dir, ensure_output_dirs, export_results
-      ],
-      artma / output / run_manifest[manifest_plot_index, write_run_manifest],
-      artma / output / run_summary[render_run_summary]
+      artma / options / last_used[write_last_used_file]
     )
 
-    # Ensure output directories exist before methods run (graphics export
-    # happens during method execution and needs the directories in place)
-    save_results <- getOption("artma.output.save_results", TRUE)
-    output_dir <- NULL
-    if (isTRUE(save_results)) {
-      output_dir <- resolve_output_dir()
-      ensure_output_dirs(output_dir)
+    # Every successfully loaded options file is remembered, so a later bare
+    # interactive artma() call can resume on the file the user last ran on,
+    # whether it was named explicitly or picked from a prompt.
+    bound_file <- getOption("artma.temp.file_name", NULL)
+    if (!is.null(bound_file)) {
+      write_last_used_file(bound_file, options_dir = options_dir)
     }
 
-    # Record every file this run writes, so the manifest describes the run
-    # rather than whatever has accumulated in the output directory.
-    run_capture <- begin_output_file_capture()
-    on.exit(end_output_file_capture(run_capture), add = TRUE)
+    # The pipeline steps below are the ones the session hub re-runs from its
+    # menu loop; keep them individually callable rather than inlined here. The
+    # context lives in an environment so the hub's handlers can swap it for the
+    # run closure as well.
+    session_state <- new.env(parent = emptyenv())
+    session_state$context <- NULL
+    session_state$root_capture <- NULL
 
-    # Prepare data: use provided data or load from options
-    if (is.null(data)) {
-      df <- prepare_data(methods = methods)
-    } else {
-      # User provided data directly - still need to preprocess and compute.
-      # Mirror prepare_data's phases: decide the NA strategy (configure), run
-      # the pure preprocess + compute, then persist the computed columns.
+    # Safety net for the capture the prepare step opened: the run step closes
+    # it when it writes the manifest, and closing a closed frame is a no-op.
+    # The first prepare of the session opens the outermost frame; closing it
+    # also pops any frames the hub's later rebuilds opened.
+    on.exit(
+      if (!is.null(session_state$root_capture)) {
+        end_output_file_capture(session_state$root_capture)
+      },
+      add = TRUE
+    )
+
+    prepare_into_session <- function(selected) {
+      context <- prepare_run_context(data = data, methods = selected)
+      if (is.null(session_state$root_capture)) {
+        session_state$root_capture <- context$capture
+      }
+      session_state$context <- context
+      context$df
+    }
+
+    # An interactive call without methods lands in the session hub: a menu
+    # loop that runs the same pipeline steps repeatedly and returns the
+    # accumulated results when the user exits. Scripted paths stay linear.
+    if (interactive() && is.null(methods)) {
       box::use(
-        artma / data / preprocess[clean_data, preprocess_data],
-        artma / data / configure[resolve_na_handling],
-        artma / data / compute[compute_optional_columns, update_config_with_computed_columns],
-        artma / data_config / resolve[prime_df_for_config_cache]
+        artma / interactive / hub[run_session_hub],
+        artma / interactive / options_file_menu[default_file_actions]
       )
 
-      if (get_verbosity() >= 3) {
-        cli::cli_inform("Using provided data frame (skipping file read step).")
+      bind_session_options <- function(file_name) {
+        box::use(artma / options / migrate[migrate_legacy_options])
+        migrate_legacy_options(
+          options_file_name = file_name,
+          options_dir = options_dir
+        )
+        # The same outdated-file repair offer the linear path makes before
+        # loading, now following the file the user picked.
+        offer_options_fix( # nolint: box_usage_linter. # Package function from R/aaa.R
+          options_file_name = file_name,
+          options_dir = options_dir
+        )
+        loaded <- options_load( # nolint: box_usage_linter. # Package function from R/options.R
+          options_file_name = file_name,
+          options_dir = options_dir,
+          should_validate = TRUE,
+          should_add_temp_options = TRUE
+        )
+        # Applied with base options(), not withr::local_options(): the new
+        # values must outlive this call and govern the rest of the hub
+        # session. runtime_setup()'s own local_options frame still restores
+        # the caller's options when artma() returns.
+        options(loaded)
+        invisible(TRUE)
       }
 
-      # Prime the data-config module cache with the frame we already have, so
-      # the repeated `get_data_config()` / `read_df_for_config()` calls inside
-      # `update_config_with_computed_columns()` below reuse it instead of
-      # re-reading and re-standardizing `artma.data.source_path` from disk
-      # (mirroring the priming step `prepare_data()` performs for the
-      # file-backed path).
-      prime_df_for_config_cache(data)
+      # An unbound session (no options file chosen yet) enters the hub with no
+      # data: the hub prepares it once the user picks a file. A call that named
+      # its options file prepares up front, as the linear path does.
+      options_file <- getOption("artma.temp.file_name", NULL)
+      initial_df <- if (is.null(options_file)) NULL else prepare_into_session(NULL)
 
-      resolve_na_handling(clean_data(data))
-      df <- preprocess_data(data)
-      df <- compute_optional_columns(df)
-      update_config_with_computed_columns(df)
-    }
-
-    # Invoke methods
-    results <- invoke_runtime_methods(methods = methods, df = df, ...)
-
-    # Export tabular results
-    run_files <- character()
-    if (isTRUE(save_results)) {
-      export_results(results, output_dir)
-
-      # Optionally render a single self-contained HTML report of the whole run.
-      # A render failure must never abort a run that already produced results.
-      if (isTRUE(getOption("artma.output.report", FALSE))) {
-        tryCatch(
-          {
-            box::use(
-              artma / report / render[gather_report_meta, render_report]
-            )
-            render_report(
-              results = results,
-              output_file = file.path(output_dir, "report.html"),
-              plot_index = manifest_plot_index(attr(results, "run_info")$output_files),
-              report_meta = gather_report_meta(),
-              open = FALSE
-            )
-          },
-          error = function(e) {
-            if (get_verbosity() >= 2) {
-              cli::cli_alert_warning("Failed to render the HTML report: {e$message}")
-            }
-          }
+      if (is.null(options_file)) {
+        # A previous session's bind left a marker; resume on that file with
+        # its options loaded but its data unprepared (the hub's ensure_data()
+        # prepares lazily), so a moved data source cannot wreck session
+        # entry. Any failure enters the hub unbound, exactly as before.
+        options_file <- restore_last_options_file(
+          bind_session_options,
+          options_dir = options_dir
         )
       }
 
-      # Close the capture last, so the manifest lists the exported tables and
-      # the report alongside the graphics the methods wrote.
-      run_files <- end_output_file_capture(run_capture)
-      write_run_manifest(
-        results,
-        output_dir = output_dir,
-        run_files = run_files
-      )
+      return(run_session_hub(
+        df = initial_df,
+        options_file = options_file,
+        run_methods = function(selected) {
+          # Each hub run records its own files: a fresh capture frame per run,
+          # nested inside the session frame the prepare step opened.
+          run_context <- session_state$context
+          run_context$capture <- begin_output_file_capture()
+          run <- execute_run(run_context, methods = selected, ...)
+          # The run step closes the frame when it saves results; without
+          # saving, close it here (closing a closed frame is a no-op).
+          end_output_file_capture(run_context$capture)
+          summarize_run(
+            run$results,
+            context = run$context,
+            run_files = run$run_files,
+            open_results = open_results
+          )
+        },
+        # A fresh prepare step under the current options, for a session that
+        # has no data yet or whose data options changed. Its capture frame
+        # nests inside the session frame the first prepare opened, which the
+        # on.exit above closes together with everything above it.
+        rebuild_data = prepare_into_session,
+        bind_options = bind_session_options,
+        file_actions = default_file_actions(options_dir = options_dir)
+      ))
     }
 
-    # What ran, what did not, and what it produced. Prints on every run; the
-    # console counterpart of the manifest written just above.
-    render_run_summary(results, output_dir = output_dir, run_files = run_files)
+    prepare_into_session(methods)
 
-    if (isTRUE(save_results) && isTRUE(open_results) && interactive()) {
-      tryCatch(
-        results_open(), # nolint: box_usage_linter. # Package function from R/results.R
-        error = function(e) {
-          if (get_verbosity() >= 2) {
-            cli::cli_alert_warning(
-              "Unable to open results directory: {e$message}"
-            )
-          }
-        }
-      )
-    }
+    run <- execute_run(session_state$context, methods = methods, ...)
 
-    if (get_verbosity() >= 3) {
-      cli::cli_alert_success("Analysis complete.")
-      if (isTRUE(save_results) && !isTRUE(open_results)) {
-        cli::cli_alert_info(
-          "Run {.code artma::results_open()} to open the results directory."
-        )
-      }
-    }
-
-    invisible(results)
+    summarize_run(
+      run$results,
+      context = run$context,
+      run_files = run$run_files,
+      open_results = open_results
+    )
   }
 
   runtime_setup( # nolint: box_usage_linter. # Imported on a package-level
     options_file_name = options,
     options_dir = options_dir,
+    # The hub asks for the options file from its own menu, so an interactive
+    # call without methods does not need one up front.
+    allow_unbound = interactive() && is.null(methods),
     FUN = main
   )
+}
+
+#' @title Restore the last used options file for a hub session
+#' @description Entry step of an interactive `artma()` call that named no
+#'   options file: read the last-used marker and, when it names an options
+#'   file that still exists, bind the session to it through the same handler
+#'   the hub's options-file menu uses. Any failure (no marker, the file is
+#'   gone, the load errors) reports one info line and returns `NULL`, leaving
+#'   the session to enter unbound exactly as it would without the marker. A
+#'   marker naming a file that no longer exists is cleared; a load error keeps
+#'   it, since the file may load fine next time.
+#' @param bind_options *\[function\]* Called with the remembered file name;
+#'   must load that file's options for the session.
+#' @param options_dir *\[character, optional\]* Directory containing the
+#'   options files. If `NULL`, uses the default options directory.
+#' @return *\[character, optional\]* The restored options file name, or `NULL`
+#'   when the session should enter unbound.
+#' @keywords internal
+restore_last_options_file <- function(bind_options, options_dir = NULL) {
+  box::use(
+    artma / options / files[options_file_path, resolve_options_dir],
+    artma / options / last_used[clear_last_used_file, read_last_used_file]
+  )
+
+  remembered <- read_last_used_file(options_dir = options_dir)
+  if (is.null(remembered)) {
+    return(NULL)
+  }
+
+  resolved_dir <- resolve_options_dir(options_dir, must_exist = FALSE)
+  if (!file.exists(options_file_path(resolved_dir, remembered))) {
+    cli::cli_alert_info(
+      "The last used options file {.file {remembered}} no longer exists; starting without one."
+    )
+    clear_last_used_file(options_dir = options_dir)
+    return(NULL)
+  }
+
+  restored <- tryCatch(
+    {
+      bind_options(remembered)
+      TRUE
+    },
+    error = function(e) {
+      cli::cli_alert_info(
+        "Could not resume on {.file {remembered}} ({conditionMessage(e)}); starting without an options file."
+      )
+      FALSE
+    }
+  )
+  if (!isTRUE(restored)) {
+    return(NULL)
+  }
+
+  cli::cli_alert_success(
+    "Resuming on {.file {remembered}} (pick {.strong Options file} to switch)."
+  )
+  remembered
+}
+
+#' @title Prepare a run
+#' @description First step of the `artma()` pipeline: resolve the output
+#'   directory, open the run's output-file capture, and produce the prepared
+#'   data frame. Either loads the data through `prepare_data()` or, when a data
+#'   frame is supplied, mirrors that pipeline's preprocess and compute phases on
+#'   it.
+#'
+#' The returned context is what the run and summarize steps consume. The
+#' capture frame it opens stays open on success: the caller owns it and must
+#' close it (the run step does so when it writes the manifest, and `artma()`
+#' registers an `on.exit()` fallback). A failure inside this function closes the
+#' frame before propagating, so an aborted preparation leaves no dangling frame.
+#'
+#' Callable repeatedly within one `runtime_setup()` extent, which is what the
+#' session hub needs to re-prepare data from its menu loop.
+#'
+#' @param data *\[data.frame, optional\]* Data frame to analyze. When `NULL`, the
+#'   data is loaded from the options file.
+#' @param methods *\[character, optional\]* The methods the run will invoke, used
+#'   to decide which columns the data preparation must resolve.
+#' @return *\[list\]* The run context: `df` (the prepared data frame),
+#'   `unwinsorized_df` (a function returning the same frame prepared without
+#'   winsorization, built on first call and then kept; handed to methods that
+#'   register `winsorize = FALSE`), `output_dir` (the base output directory;
+#'   `NULL` when results are not saved, and replaced by the run's own
+#'   directory in `execute_run()`), `save_results` and `capture` (the open
+#'   output-file capture frame identifier).
+#' @keywords internal
+prepare_run_context <- function(data = NULL, methods = NULL) {
+  box::use(
+    artma / data / index[compute_unwinsorized_data, prepare_data, without_winsorization],
+    artma / libs / core / utils[get_verbosity],
+    artma / libs / infrastructure / output_files[
+      begin_output_file_capture, end_output_file_capture
+    ],
+    artma / output / export[
+      clear_run_output_dir, ensure_output_dirs, resolve_base_output_dir,
+      use_run_subdirectories
+    ]
+  )
+
+  # The run step picks the directory this run writes into, so any run directory
+  # left over from an earlier run stops governing path resolution here.
+  clear_run_output_dir()
+
+  # Ensure output directories exist before methods run (graphics export
+  # happens during method execution and needs the directories in place).
+  # With run subdirectories enabled the run's own directory is only known once
+  # the run starts, so `execute_run()` creates it instead.
+  save_results <- getOption("artma.output.save_results", TRUE)
+  output_dir <- NULL
+  if (isTRUE(save_results)) {
+    output_dir <- resolve_base_output_dir()
+    if (!use_run_subdirectories()) {
+      ensure_output_dirs(output_dir)
+    }
+  }
+
+  # Record every file this run writes, so the manifest describes the run
+  # rather than whatever has accumulated in the output directory.
+  run_capture <- begin_output_file_capture()
+  handed_over <- FALSE
+  on.exit(if (!handed_over) end_output_file_capture(run_capture), add = TRUE)
+
+  # Prepare data: use provided data or load from options
+  if (is.null(data)) {
+    df <- prepare_data(methods = methods)
+    build_unwinsorized <- compute_unwinsorized_data
+  } else {
+    # User provided data directly - still need to preprocess and compute.
+    # Mirror prepare_data's phases: decide the NA strategy (configure), run
+    # the pure preprocess + compute, then persist the computed columns.
+    box::use(
+      artma / data / preprocess[clean_data, preprocess_data],
+      artma / data / configure[resolve_na_handling],
+      artma / data / compute[compute_optional_columns, update_config_with_computed_columns],
+      artma / data_config / resolve[prime_df_for_config_cache]
+    )
+
+    if (get_verbosity() >= 3) {
+      cli::cli_inform("Using provided data frame (skipping file read step).")
+    }
+
+    # Prime the data-config module cache with the frame we already have, so
+    # the repeated `get_data_config()` / `read_df_for_config()` calls inside
+    # `update_config_with_computed_columns()` below reuse it instead of
+    # re-reading and re-standardizing `artma.data.source_path` from disk
+    # (mirroring the priming step `prepare_data()` performs for the
+    # file-backed path).
+    prime_df_for_config_cache(data)
+
+    resolve_na_handling(clean_data(data))
+    df <- preprocess_data(data)
+    df <- compute_optional_columns(df)
+    update_config_with_computed_columns(df)
+    build_unwinsorized <- function() {
+      without_winsorization(compute_optional_columns(preprocess_data(data)))
+    }
+  }
+
+  # The unwinsorized frame is built on first use and then kept: only methods
+  # registered with `winsorize = FALSE` need it, and a hub session may run them
+  # repeatedly against one prepared context.
+  unwinsorized_state <- new.env(parent = emptyenv())
+  unwinsorized_df <- function() {
+    if (is.null(unwinsorized_state$df)) {
+      unwinsorized_state$df <- build_unwinsorized()
+    }
+    unwinsorized_state$df
+  }
+
+  handed_over <- TRUE
+
+  list(
+    df = df,
+    unwinsorized_df = unwinsorized_df,
+    output_dir = output_dir,
+    save_results = save_results,
+    capture = run_capture
+  )
+}
+
+#' @title Run the methods of a prepared run
+#' @description Second step of the `artma()` pipeline: invoke the runtime
+#'   methods on the prepared data frame and, when the run saves results, export
+#'   the tables, optionally render the HTML report, and write the run manifest.
+#'
+#' The output-file capture opened by `prepare_run_context()` is closed here,
+#' after the export and the report, so the manifest lists the exported tables
+#' and the report alongside the graphics the methods wrote.
+#'
+#' @param context *\[list\]* The run context returned by `prepare_run_context()`.
+#' @param methods *\[character, optional\]* A character vector of the methods to
+#'   invoke. `NULL` prompts for a selection.
+#' @param ... *\[any\]* Additional arguments passed to the runtime methods.
+#' @return *\[list\]* A list with `results` (the invocation results, carrying the
+#'   `run_info`, `failed_methods` and `skipped_methods` attributes), `run_files`
+#'   (the files this run wrote; empty when results are not saved) and `context`
+#'   (the run context, with `output_dir` set to the directory this run used).
+#' @keywords internal
+execute_run <- function(context, methods = NULL, ...) {
+  box::use(
+    artma / libs / core / utils[get_verbosity],
+    artma / libs / infrastructure / output_files[end_output_file_capture],
+    artma / output / export[begin_run_output_dir, ensure_output_dirs, export_results],
+    artma / output / run_manifest[manifest_plot_index, write_run_manifest]
+  )
+
+  # Claim this run's output directory before any method writes a file. Without
+  # run subdirectories this is the directory the prepare step already resolved
+  # and created; with them every run (including every hub run against the same
+  # prepared context) gets its own timestamped one.
+  if (isTRUE(context$save_results)) {
+    context$output_dir <- begin_run_output_dir(context$output_dir)
+    ensure_output_dirs(context$output_dir)
+  }
+
+  # Invoke methods
+  results <- invoke_runtime_methods(
+    methods = methods,
+    df = context$df,
+    unwinsorized_df = context$unwinsorized_df,
+    ...
+  )
+
+  # Export tabular results
+  run_files <- character()
+  if (isTRUE(context$save_results)) {
+    export_results(results, context$output_dir)
+
+    # Optionally render a single self-contained HTML report of the whole run.
+    # A render failure must never abort a run that already produced results.
+    if (isTRUE(getOption("artma.output.report", FALSE))) {
+      tryCatch(
+        {
+          box::use(
+            artma / report / render[gather_report_meta, render_report]
+          )
+          render_report(
+            results = results,
+            output_file = file.path(context$output_dir, "report.html"),
+            plot_index = manifest_plot_index(attr(results, "run_info")$output_files),
+            report_meta = gather_report_meta(),
+            open = FALSE
+          )
+        },
+        error = function(e) {
+          if (get_verbosity() >= 2) {
+            cli::cli_alert_warning("Failed to render the HTML report: {e$message}")
+          }
+        }
+      )
+    }
+
+    # Close the capture last, so the manifest lists the exported tables and
+    # the report alongside the graphics the methods wrote.
+    run_files <- end_output_file_capture(context$capture)
+    write_run_manifest(
+      results,
+      output_dir = context$output_dir,
+      run_files = run_files
+    )
+  }
+
+  list(results = results, run_files = run_files, context = context)
+}
+
+#' @title Summarize a finished run
+#' @description Third step of the `artma()` pipeline: print the run summary,
+#'   optionally open the results directory, and emit the closing messages.
+#' @param results *\[list\]* The results returned by `execute_run()`.
+#' @param context *\[list\]* The run context returned by `prepare_run_context()`.
+#' @param run_files *\[character, optional\]* The files the run wrote.
+#' @param open_results *\[logical, optional\]* Whether to open the results
+#'   directory. Only honoured in interactive sessions that saved results.
+#' @return *\[list\]* The `results`, invisibly.
+#' @keywords internal
+summarize_run <- function(results, context, run_files = character(), open_results = FALSE) {
+  box::use(
+    artma / libs / core / utils[get_verbosity],
+    artma / output / run_summary[render_run_summary]
+  )
+
+  save_results <- context$save_results
+
+  # What ran, what did not, and what it produced. Prints on every run; the
+  # console counterpart of the manifest written just above.
+  render_run_summary(results, output_dir = context$output_dir, run_files = run_files)
+
+  if (isTRUE(save_results) && isTRUE(open_results) && interactive()) {
+    tryCatch(
+      results_open(), # nolint: box_usage_linter. # Package function from R/results.R
+      error = function(e) {
+        if (get_verbosity() >= 2) {
+          cli::cli_alert_warning(
+            "Unable to open results directory: {e$message}"
+          )
+        }
+      }
+    )
+  }
+
+  if (get_verbosity() >= 3) {
+    cli::cli_alert_success("Analysis complete.")
+    if (isTRUE(save_results) && !isTRUE(open_results)) {
+      cli::cli_alert_info(
+        "Run {.code artma::results_open()} to open the results directory."
+      )
+    }
+  }
+
+  invisible(results)
 }
 
 #' @title Invoke methods
@@ -312,6 +644,13 @@ artma <- function(
 #' @param methods *\[character\]* A character vector of the methods to invoke.
 #' @param df *\[data.frame\]* The data frame to invoke the methods on.
 #' @param modules_dir *\[character, optional\]* Directory to discover runtime method modules in. Defaults to `NULL`, in which case the standard package methods directory is used. Used mainly for dependency injection in tests.
+#' @param unwinsorized_df *\[data.frame|function, optional\]* The data frame
+#'   prepared without winsorization, or a function returning it, handed to
+#'   methods registered with `winsorize = FALSE` in place of `df`. Defaults to
+#'   `NULL`: such methods then run on `df`, with a warning when winsorization
+#'   is active. A build that fails (the frame reruns the data pipeline
+#'   unclipped, so it can abort where the winsorized pass did not) fails only
+#'   the methods that asked for it.
 #' @param ... *\[any\]* Additional arguments to pass to the methods.
 #' @return *\[list\]* Results of the invocations, indexed by method names.
 #'   Failed methods are omitted; their names and error messages are attached
@@ -324,12 +663,16 @@ artma <- function(
 #' invoke_runtime_methods(c("funnel_plot", "bma", "fma"), df)
 #'
 #' @keywords internal
-invoke_runtime_methods <- function(methods, df, modules_dir = NULL, ...) {
+invoke_runtime_methods <- function(methods, df, modules_dir = NULL, unwinsorized_df = NULL, ...) {
   box::use(
     artma / const[CONST],
+    artma / interactive / method_picker[ask_runtime_methods],
+    artma / libs / core / log[log_warn],
     artma / libs / core / string[pluralize],
     artma / libs / core / utils[get_verbosity],
+    artma / options / typed_accessors[is_winsorization_active],
     artma / libs / infrastructure / output_files[record_output_files],
+    artma / modules / methods_table[build_methods_table],
     artma / modules / method_execution[
       build_rng_streams,
       execute_method_layer,
@@ -361,14 +704,16 @@ invoke_runtime_methods <- function(methods, df, modules_dir = NULL, ...) {
   )
 
   if (is.null(methods)) {
-    methods <- climenu::checkbox(
-      choices = supported_methods,
-      prompt = "No runtime methods were provided. Please select the methods you would like to run: ",
-      allow_select_all = TRUE
+    methods <- ask_runtime_methods(
+      build_methods_table(available_for = df, modules = RUNTIME_METHOD_MODULES),
+      default = getOption("artma.temp.last_methods", NULL)
     )
     if (rlang::is_empty(methods)) {
       cli::cli_abort("No runtime methods were selected. Aborting...")
     }
+    # Preselect this confirmed selection on the next interactive pick of the
+    # session.
+    options(artma.temp.last_methods = methods)
   }
 
   resolve_methods <- function(methods_input) {
@@ -442,6 +787,57 @@ invoke_runtime_methods <- function(methods, df, modules_dir = NULL, ...) {
   method_output_files <- list()
 
   extra_args <- list(...)
+
+  # Methods registered with `winsorize = FALSE` get the frame prepared without
+  # winsorization, resolved once on first need from the supplied frame or
+  # thunk. When winsorization is off there is nothing to undo and `df` is that
+  # frame already. When it is on and nothing was supplied, the method runs on
+  # `df` and says so: silently handing it clipped values is the failure this
+  # opt-out exists to prevent.
+  unwinsorized_state <- new.env(parent = emptyenv())
+  resolve_unwinsorized_df <- function(method_name) {
+    if (!is.null(unwinsorized_state$df)) {
+      return(unwinsorized_state$df)
+    }
+    if (!is.null(unwinsorized_state$error)) {
+      # Re-signalled verbatim: the reason is an already formatted message, and
+      # cli would glue-interpolate and rewrap it.
+      stop(unwinsorized_state$error, call. = FALSE) # nolint: undesirable_function_linter.
+    }
+    frame <- df
+    if (is_winsorization_active()) {
+      # Building the frame runs the data pipeline a second time with the
+      # clipping switched off, so values winsorization masked (a zero standard
+      # error lifted onto the 1st percentile, say) reach the data checks
+      # unclipped and can abort a pass the winsorized frame survived. That
+      # failure belongs to the methods that asked for the frame, not to the
+      # run, so it is trapped here, cached, and re-signalled for every later
+      # method needing the same frame; the caller reports it against the
+      # method and keeps the rest of the run going.
+      supplied <- tryCatch(
+        if (is.function(unwinsorized_df)) unwinsorized_df() else unwinsorized_df,
+        error = function(err) {
+          # Flattened to one line: the reason is replayed inline in the
+          # per-method warning and in the closing run summary.
+          unwinsorized_state$error <- paste0(
+            "could not prepare the data frame without winsorization: ",
+            gsub("[[:space:]]*\n[[:space:]]*", " ", conditionMessage(err))
+          )
+          stop(unwinsorized_state$error, call. = FALSE) # nolint: undesirable_function_linter.
+        }
+      )
+      if (is.data.frame(supplied)) {
+        frame <- supplied
+      } else {
+        log_warn(paste0(
+          "{.code {method_name}} opts out of winsorization, but no unwinsorized ",
+          "data frame was supplied; running it on the winsorized data."
+        ))
+      }
+    }
+    unwinsorized_state$df <- frame
+    frame
+  }
 
   # Methods that do not depend on one another form a layer and can run
   # concurrently. Every method gets its own RNG stream up front, derived from
@@ -539,7 +935,27 @@ invoke_runtime_methods <- function(methods, df, modules_dir = NULL, ...) {
         next
       }
 
-      method_args <- c(list(df = df), extra_args)
+      method_df <- df
+      if (isFALSE(meta$winsorize)) {
+        unwinsorized_error <- NULL
+        method_df <- tryCatch(
+          resolve_unwinsorized_df(method_name),
+          error = function(err) {
+            unwinsorized_error <<- conditionMessage(err)
+            NULL
+          }
+        )
+        if (!is.null(unwinsorized_error)) {
+          failed_methods[[method_name]] <- unwinsorized_error
+          if (get_verbosity() >= 2) {
+            cli::cli_warn(
+              "Method {.code {method_name}} failed and was skipped: {unwinsorized_error}"
+            )
+          }
+          next
+        }
+      }
+      method_args <- c(list(df = method_df), extra_args)
 
       # Pass each upstream dependency's result to the dependent as
       # `<dependency>_result`, unless the caller already supplied it. Every
@@ -691,6 +1107,7 @@ prompt_install_missing_packages <- function(pkgs, method_name,
                                             is_installed = NULL,
                                             install_packages = NULL) {
   box::use(
+    artma / interactive / input[ask_yes_no],
     artma / libs / core / autonomy[should_prompt_user]
   )
 
@@ -704,13 +1121,12 @@ prompt_install_missing_packages <- function(pkgs, method_name,
     return(pkgs)
   }
 
-  choice <- climenu::select(
-    choices = c("Yes", "No"),
-    prompt = cli::format_inline(
+  should_install <- ask_yes_no(
+    cli::format_inline(
       "Method {.code {method_name}} needs {pkgs}, which {?is/are} not installed. Install now?"
     )
   )
-  if (!identical(choice, "Yes")) {
+  if (!should_install) {
     return(pkgs)
   }
 

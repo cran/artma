@@ -19,12 +19,17 @@ be loaded from the options file (see \code{options} parameter). When provided, t
 data will be used directly, bypassing the data reading step.}
 
 \item{methods}{\emph{[character, optional]} A character vector of method names to run.
-Use \code{"all"} to run all available methods. If \code{NULL}, an interactive menu will
-prompt you to select methods. See \code{artma::methods_list()} for available methods.}
+Use \code{"all"} to run all available methods. If \code{NULL} and running
+interactively, the session hub opens: a menu loop for picking and running
+methods, previewing data, and opening results across repeated runs. See
+\code{artma::methods_list()} for available methods.}
 
 \item{options}{\emph{[character, optional]} Name of the options file (with or without
-\code{.yaml} extension) to use. If \code{NULL} and running interactively, you will be
-prompted to create or select an options file.}
+\code{.yaml} extension) to use. If \code{NULL} and running interactively, the session
+hub opens without one: with no options files yet you are guided straight
+into creating your first, and otherwise a picker of the existing files
+opens. Backing out of either lands in the hub menu, whose options-file
+item selects or creates the file the session runs on.}
 
 \item{options_dir}{\emph{[character, optional]} Directory containing the options file.
 If \code{NULL}, uses the default options directory.}
@@ -40,7 +45,10 @@ method name. The structure of each result depends on the specific method.
 Methods that fail are omitted from the list; their names and error messages
 are attached as the \code{failed_methods} attribute. The \code{run_info} attribute
 carries the run's identity: the methods requested, the effective seed, and
-the files each method wrote.
+the files each method wrote. A session hub call additionally attaches a
+\code{runs} attribute with one entry per run (methods, seed, timestamp, and the
+options changed since the previous run) and keeps the latest result per
+method across the session's runs.
 }
 \description{
 Main entry point for the artma package. This function orchestrates the complete
@@ -51,8 +59,9 @@ analytical methods.
 The \code{artma()} function is the primary way to interact with the artma package.
 It handles the complete workflow:
 \enumerate{
-\item \strong{Options Loading}: Loads configuration from an options file (or prompts for
-creation in interactive mode)
+\item \strong{Options Loading}: Loads configuration from an options file (in the
+session hub, from the entry create-or-pick flow or the options-file
+menu item)
 \item \strong{Data Preparation}: Reads and prepares your data (unless \code{data} is provided)
 \item \strong{Method Execution}: Runs the specified analytical methods on your data
 \item \strong{Results}: Returns a structured list of results
@@ -112,8 +121,10 @@ what the HTML report uses to find each method's plots.
 
 The manifest is overwritten on every run into the same output directory: it
 always describes the latest run, never a history. Runs driven by different
-options files already get their own output directory, so keep a run by
-copying its directory or by pointing \code{output.dir} somewhere per-run.
+options files already get their own output directory. To keep every run,
+set \code{output.run_subdirectories} to \code{TRUE}: each run then writes into
+\verb{<output.dir>/runs/<timestamp>/}, with its own manifest, tables, graphics
+and report, and \code{artma::results_open()} opens the latest one.
 }
 
 \subsection{Method Failures}{

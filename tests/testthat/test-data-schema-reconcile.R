@@ -3,6 +3,7 @@ box::use(
     expect_equal,
     expect_error,
     expect_false,
+    expect_identical,
     expect_null,
     expect_true,
     test_that
@@ -296,4 +297,624 @@ test_that("reconcile_schema in strict mode passes when no drift exists", {
   )
 
   expect_null(result)
+})
+
+# Derived columns
+#
+# `data.derived` columns are created at the end of the compute phase, one step
+# after reconciliation runs, so a config entry naming one is not drift (#541).
+
+test_that("detect_schema_drift ignores configured data.derived columns", {
+  box::use(artma / data / schema_reconcile[detect_schema_drift])
+
+  store <- base_store(list(se_top5_journal = list(bma = TRUE)))
+
+  result <- withr::with_options(
+    list("artma.data.derived" = list(se_top5_journal = "se * top5_journal")),
+    detect_schema_drift(base_df(), store)
+  )
+
+  expect_false(result$has_drift)
+  expect_equal(length(result$missing_moderators), 0L)
+})
+
+test_that("detect_schema_drift accepts an explicit derived set", {
+  box::use(artma / data / schema_reconcile[detect_schema_drift])
+
+  store <- base_store(list(se_top5_journal = list(bma = TRUE)))
+
+  result <- detect_schema_drift(
+    base_df(), store,
+    derived = "se_top5_journal"
+  )
+
+  expect_equal(length(result$missing_moderators), 0L)
+
+  # Without it, the same entry is the missing moderator it used to be.
+  plain <- withr::with_options(
+    list("artma.data.derived" = NULL),
+    detect_schema_drift(base_df(), store)
+  )
+  expect_true("se_top5_journal" %in% plain$missing_moderators)
+})
+
+test_that("reconcile_schema auto keeps a derived moderator in the config", {
+  box::use(artma / data / schema_reconcile[reconcile_schema])
+
+  withr::with_options(
+    base_reconcile_opts(list(
+      "artma.data.columns" = base_store(list(se_top5_journal = list(bma = TRUE))),
+      "artma.data.derived" = list(se_top5_journal = "se * top5_journal")
+    )),
+    {
+      reconcile_schema(base_df(), mode = "auto")
+
+      store <- getOption("artma.data.columns")
+      expect_true("se_top5_journal" %in% names(store))
+      expect_true(isTRUE(store$se_top5_journal$bma))
+    }
+  )
+})
+
+# Optional roles
+#
+# A role outside the run's required set whose mapped source column vanished is
+# not a blocker: the pipeline tolerates an unmapped optional role, so the
+# mapping is dropped (or remapped when the match is clear) and the run goes on.
+
+optional_role_opts <- function(extra = list()) {
+  base_reconcile_opts(utils::modifyList(
+    list(
+      "artma.data.columns" = base_store(list(t_stat = list(source_name = "tstat"))),
+      "artma.data.expected_schema_columns" = c("effect_size", "se_col", "study", "n_obs", "tstat")
+    ),
+    extra
+  ))
+}
+
+test_that("reconcile_schema auto drops the mapping of an optional role whose source vanished", {
+  box::use(artma / data / schema_reconcile[reconcile_schema])
+
+  withr::with_options(
+    optional_role_opts(),
+    {
+      expect_null(reconcile_schema(base_df(), mode = "auto"))
+      expect_null(getOption("artma.data.columns")[["t_stat"]])
+      expect_false("tstat" %in% getOption("artma.data.expected_schema_columns"))
+    }
+  )
+})
+
+test_that("reconcile_schema auto keeps the rest of an optional role's record when dropping its mapping", {
+  box::use(artma / data / schema_reconcile[reconcile_schema])
+
+  withr::with_options(
+    optional_role_opts(list(
+      "artma.data.columns" = base_store(list(t_stat = list(source_name = "tstat", bma = TRUE)))
+    )),
+    {
+      reconcile_schema(base_df(), mode = "auto")
+      entry <- getOption("artma.data.columns")[["t_stat"]]
+      expect_null(entry$source_name)
+      expect_true(isTRUE(entry$bma))
+    }
+  )
+})
+
+test_that("reconcile_schema auto remaps an optional role when the rename is unambiguous", {
+  box::use(artma / data / schema_reconcile[reconcile_schema])
+
+  withr::with_options(
+    optional_role_opts(),
+    {
+      reconcile_schema(base_df(tstats = c(1.5, 2.5, 3.5)), mode = "auto")
+      expect_equal(getOption("artma.data.columns")$t_stat$source_name, "tstats")
+    }
+  )
+})
+
+test_that("reconcile_schema auto treats a mapped role outside the run's required set as optional", {
+  box::use(artma / data / schema_reconcile[reconcile_schema])
+
+  # n_obs was mapped to N by hand; N is gone, and no requested method needs it.
+  raw_df <- data.frame(effect_size = 1:3, se_col = 0.1, study = "A")
+
+  withr::with_options(
+    base_reconcile_opts(list(
+      "artma.data.columns" = base_store(list(n_obs = list(source_name = "N"))),
+      "artma.data.expected_schema_columns" = c("effect_size", "se_col", "study", "N")
+    )),
+    {
+      expect_null(reconcile_schema(
+        raw_df,
+        mode = "auto", required_colnames = c("study_id", "effect", "se")
+      ))
+      expect_null(getOption("artma.data.columns")[["n_obs"]])
+    }
+  )
+})
+
+test_that("reconcile_schema strict reports a vanished optional mapping", {
+  box::use(artma / data / schema_reconcile[reconcile_schema])
+
+  withr::with_options(
+    optional_role_opts(),
+    expect_error(reconcile_schema(base_df(), mode = "strict"), "optional")
+  )
+})
+
+# Substring renames and exclusive assignment
+
+test_that("reconcile_schema auto does not remap a moderator onto a column that merely contains its name", {
+  box::use(artma / data / schema_reconcile[reconcile_schema])
+
+  withr::with_options(
+    base_reconcile_opts(list(
+      "artma.data.columns" = base_store(list(gdp = list(bma = TRUE, subset = "gdp > 0"))),
+      "artma.data.expected_schema_columns" = c("effect_size", "se_col", "study", "n_obs", "gdp", "gdp_growth", "log_gdp")
+    )),
+    {
+      reconcile_schema(base_df(gdp_growth = 1:3, log_gdp = 4:6), mode = "auto")
+      store <- getOption("artma.data.columns")
+      expect_null(store[["gdp"]])
+      expect_null(store[["gdp_growth"]])
+      expect_null(store[["log_gdp"]])
+    }
+  )
+})
+
+test_that("reconcile_schema auto never remaps two moderators onto one column", {
+  box::use(artma / data / schema_reconcile[reconcile_schema])
+
+  withr::with_options(
+    base_reconcile_opts(list(
+      "artma.data.columns" = base_store(list(
+        x_1 = list(bma = TRUE, note = "one"),
+        x_10 = list(bma = FALSE, note = "ten")
+      )),
+      "artma.data.expected_schema_columns" = c("effect_size", "se_col", "study", "n_obs", "x_1", "x_10")
+    )),
+    {
+      reconcile_schema(base_df(x_100 = 1:3), mode = "auto")
+      store <- getOption("artma.data.columns")
+      # x_10 is the closer name and takes x_100; x_1 is dropped rather than
+      # overwriting x_10's record on the same key.
+      expect_equal(store$x_100$note, "ten")
+      expect_null(store[["x_1"]])
+      expect_null(store[["x_10"]])
+    }
+  )
+})
+
+# Priority across the buckets is by auto-acceptability first, bucket second: a
+# bucket withholds a candidate from lower-priority buckets only when it would
+# actually apply that rename unasked.
+
+test_that("award_renames hands a merely suggested candidate to a bucket that can auto-apply it", {
+  box::use(artma / data / schema_reconcile[award_renames])
+
+  # study_id scores the same on both new columns (a tie it would never apply
+  # unasked); the n_studies moderator is confident about "studies".
+  raw_df <- data.frame(studies = 1:3, studied = 4:6, se_col = 0.1, n_obs = 10L)
+  awarded <- award_renames(
+    list(
+      roles = list(missing = c(study_id = "study"), roles_known = TRUE),
+      moderators = list(missing = c(n_studies = "n_studies"))
+    ),
+    c("studies", "studied"),
+    raw_df
+  )
+
+  expect_equal(awarded$moderators$n_studies$candidate, "studies")
+  expect_equal(awarded$roles$study_id$candidate, "studied")
+})
+
+test_that("award_renames keeps a candidate with the higher bucket when both would auto-apply it", {
+  box::use(artma / data / schema_reconcile[award_renames])
+
+  raw_df <- data.frame(study_no = 1:3, se_col = 0.1, n_obs = 10L)
+  awarded <- award_renames(
+    list(
+      roles = list(missing = c(study_id = "study"), roles_known = TRUE),
+      moderators = list(missing = c(study_num = "study_num"))
+    ),
+    "study_no",
+    raw_df
+  )
+
+  expect_equal(awarded$roles$study_id$candidate, "study_no")
+  expect_true(is.na(awarded$moderators$study_num$candidate))
+})
+
+test_that("award_renames never proposes one column to two buckets", {
+  box::use(artma / data / schema_reconcile[award_renames])
+
+  raw_df <- data.frame(studies = 1:3, studied = 4:6, se_col = 0.1, n_obs = 10L)
+  awarded <- award_renames(
+    list(
+      roles = list(missing = c(study_id = "study"), roles_known = TRUE),
+      optional = list(missing = c(t_stat = "tstat"), roles_known = TRUE),
+      moderators = list(missing = c(n_studies = "n_studies"))
+    ),
+    c("studies", "studied"),
+    raw_df
+  )
+
+  claimed <- unlist(lapply(awarded, function(props) {
+    cands <- vapply(props, function(prop) prop$candidate, character(1))
+    cands[!is.na(cands)]
+  }), use.names = FALSE)
+  expect_equal(anyDuplicated(claimed), 0L)
+})
+
+test_that("reconcile_schema auto aborts on a tied required-role suggestion instead of picking by column order", {
+  box::use(artma / data / schema_reconcile[reconcile_schema])
+
+  df <- data.frame(
+    effect_size_b = c(0.1, 0.2, 0.3), effect_size_a = c(0.15, 0.25, 0.35),
+    se_col = 0.1, study = "A", n_obs = 10L
+  )
+
+  withr::with_options(
+    base_reconcile_opts(),
+    {
+      expect_error(reconcile_schema(df, mode = "auto"), "ambiguous")
+      expect_equal(getOption("artma.data.columns")$effect$source_name, "effect_size")
+    }
+  )
+})
+
+test_that("the auto-mode abort points at data.reconcile_mode rather than a nonexistent argument", {
+  box::use(artma / data / schema_reconcile[reconcile_schema])
+
+  df <- data.frame(xyz_qq = 1:3, se_col = 0.1, study = "A", n_obs = 10L)
+
+  message <- withr::with_options(
+    base_reconcile_opts(),
+    tryCatch(reconcile_schema(df, mode = "auto"), error = function(e) conditionMessage(e))
+  )
+
+  expect_true(grepl("data.reconcile_mode", message, fixed = TRUE))
+  expect_true(grepl("config_set", message, fixed = TRUE))
+  expect_false(grepl("reconcile = ", message, fixed = TRUE))
+})
+
+test_that("the strict-mode abort points at data.reconcile_mode rather than a nonexistent argument", {
+  box::use(artma / data / schema_reconcile[reconcile_schema])
+
+  message <- withr::with_options(
+    base_reconcile_opts(),
+    tryCatch(reconcile_schema(base_df(region = "EU"), mode = "strict"), error = function(e) conditionMessage(e))
+  )
+
+  expect_true(grepl("data.reconcile_mode", message, fixed = TRUE))
+  expect_false(grepl("reconcile = ", message, fixed = TRUE))
+})
+
+# Ask mode, driven through the injectable menu backend
+#
+# `scripted_menu()` answers each prompt in turn with the first choice matching
+# the next pattern, and records the choices every prompt offered so a test can
+# assert on what was (not) on the menu.
+
+scripted_menu <- function(patterns) {
+  state <- new.env()
+  state$i <- 0L
+  state$offered <- list()
+  fn <- function(choices, prompt, ...) {
+    state$i <- state$i + 1L
+    state$offered[[state$i]] <- unname(choices)
+    if (state$i > length(patterns)) {
+      stop("unexpected prompt: ", prompt)
+    }
+    hit <- grep(patterns[[state$i]], choices, value = TRUE)
+    if (length(hit) == 0) {
+      stop("no choice matching '", patterns[[state$i]], "' among: ", paste(choices, collapse = " | "))
+    }
+    hit[[1]]
+  }
+  list(fn = fn, state = state)
+}
+
+ask_opts <- function(extra = list()) {
+  base_reconcile_opts(utils::modifyList(
+    list("artma.autonomy.level" = "ask_more"),
+    extra
+  ))
+}
+
+test_that("reconcile_schema ask offers to drop a vanished optional mapping", {
+  box::use(artma / data / schema_reconcile[reconcile_schema])
+
+  menu <- scripted_menu(c("^Drop the mapping", "^Save"))
+
+  withr::with_options(
+    ask_opts(list(
+      "artma.data.columns" = base_store(list(t_stat = list(source_name = "tstat"))),
+      "artma.data.expected_schema_columns" = c("effect_size", "se_col", "study", "n_obs", "tstat")
+    )),
+    {
+      reconcile_schema(base_df(), mode = "ask", is_interactive = TRUE, select_fn = menu$fn)
+      expect_null(getOption("artma.data.columns")[["t_stat"]])
+    }
+  )
+  expect_equal(menu$state$i, 2L)
+})
+
+test_that("reconcile_schema ask can remap a vanished optional mapping", {
+  box::use(artma / data / schema_reconcile[reconcile_schema])
+
+  menu <- scripted_menu(c("^Remap to", "^Save"))
+
+  withr::with_options(
+    ask_opts(list(
+      "artma.data.columns" = base_store(list(t_stat = list(source_name = "tstat"))),
+      "artma.data.expected_schema_columns" = c("effect_size", "se_col", "study", "n_obs", "tstat")
+    )),
+    {
+      reconcile_schema(base_df(tstats = c(1.5, 2.5, 3.5)), mode = "ask", is_interactive = TRUE, select_fn = menu$fn)
+      expect_equal(getOption("artma.data.columns")$t_stat$source_name, "tstats")
+    }
+  )
+})
+
+test_that("reconcile_schema ask withholds a column already chosen from later menus", {
+  box::use(artma / data / schema_reconcile[reconcile_schema])
+
+  # Both required sources are gone. The user maps effect by hand onto the very
+  # column proposed for se, so the se prompt must not offer to accept it, and
+  # the manual list for se must not contain it either.
+  df <- data.frame(es = c(0.1, 0.2, 0.3), std_err = c(0.01, 0.02, 0.03), study = "A", n_obs = 10L)
+  menu <- scripted_menu(c(
+    "^Map to a different column", "^std_err$", # effect: manual, take std_err
+    "^Map to a different column", "^es$", # se: no Accept offered, pick es
+    "^Save"
+  ))
+
+  withr::with_options(
+    ask_opts(),
+    {
+      reconcile_schema(df, mode = "ask", is_interactive = TRUE, select_fn = menu$fn)
+      store <- getOption("artma.data.columns")
+      expect_equal(store$effect$source_name, "std_err")
+      expect_equal(store$se$source_name, "es")
+    }
+  )
+
+  offered <- menu$state$offered
+  expect_true(any(grepl("^Accept", offered[[1]])))
+  expect_false(any(grepl("^Accept", offered[[3]])))
+  expect_false("std_err" %in% offered[[4]])
+})
+
+test_that("reconcile_schema ask offers the confident record the candidate a required role only suggests", {
+  box::use(artma / data / schema_reconcile[reconcile_schema])
+
+  # "study" and "n_studies" both vanished, replaced by "studies" and "studied".
+  # study_id is equally unsure about the two, so "studies" goes to the
+  # moderator that is confident about it, and study_id keeps "studied".
+  menu <- scripted_menu(c("^Accept", "^Remap to", "^Save"))
+  df <- data.frame(effect_size = 1:3, se_col = 0.1, studies = 4:6, studied = 7:9, n_obs = 10L)
+
+  withr::with_options(
+    ask_opts(list(
+      "artma.data.columns" = base_store(list(n_studies = list(bma = TRUE))),
+      "artma.data.expected_schema_columns" = c("effect_size", "se_col", "study", "n_obs", "n_studies")
+    )),
+    {
+      reconcile_schema(df, mode = "ask", is_interactive = TRUE, select_fn = menu$fn)
+      store <- getOption("artma.data.columns")
+      expect_equal(store$study_id$source_name, "studied")
+      expect_true(isTRUE(store$studies$bma))
+      expect_null(store[["n_studies"]])
+    }
+  )
+
+  offered <- menu$state$offered
+  expect_true(any(grepl("studied", offered[[1]], fixed = TRUE)))
+  expect_true(any(grepl("studies", offered[[2]], fixed = TRUE)))
+})
+
+test_that("reconcile_schema ask does not offer a column another record backs", {
+  box::use(artma / data / schema_reconcile[reconcile_schema])
+
+  # se_col vanished with no lookalike. effect_size, study and n_obs all still
+  # back a record of their own, so extra_col is the only pickable column.
+  df <- data.frame(effect_size = 1:3, study = "A", n_obs = 10L, extra_col = c(0.1, 0.2, 0.3))
+  menu <- scripted_menu(c("^Map to a different column", "^extra_col$", "^Save"))
+
+  withr::with_options(
+    ask_opts(),
+    {
+      reconcile_schema(df, mode = "ask", is_interactive = TRUE, select_fn = menu$fn)
+      store <- getOption("artma.data.columns")
+      expect_equal(store$se$source_name, "extra_col")
+      expect_false(identical(store$se$source_name, store$effect$source_name))
+    }
+  )
+
+  expect_equal(menu$state$offered[[2]], "extra_col")
+})
+
+test_that("reconcile_schema ask aborts rather than mapping onto a claimed column", {
+  box::use(artma / data / schema_reconcile[reconcile_schema])
+
+  # Every column of the dataset already backs a record, so the manual picker
+  # has nothing left to offer for the vanished se_col.
+  df <- data.frame(effect_size = 1:3, study = "A", n_obs = 10L)
+  menu <- scripted_menu("^Map to a different column")
+
+  withr::with_options(
+    ask_opts(),
+    expect_error(
+      reconcile_schema(df, mode = "ask", is_interactive = TRUE, select_fn = menu$fn),
+      "No unclaimed column"
+    )
+  )
+})
+
+test_that("reconcile_schema ask does not remap a moderator onto a role column", {
+  box::use(artma / data / schema_reconcile[reconcile_schema])
+
+  menu <- scripted_menu(c("^Map to a different column", "^extra_col$", "^Save"))
+
+  withr::with_options(
+    ask_opts(list(
+      "artma.data.columns" = base_store(list(region = list(bma = TRUE))),
+      "artma.data.expected_schema_columns" = c("effect_size", "se_col", "study", "n_obs", "region")
+    )),
+    {
+      reconcile_schema(
+        base_df(extra_col = c(0.1, 0.2, 0.3)),
+        mode = "ask", is_interactive = TRUE, select_fn = menu$fn
+      )
+      store <- getOption("artma.data.columns")
+      expect_true("extra_col" %in% names(store))
+      expect_false("region" %in% names(store))
+    }
+  )
+
+  expect_equal(menu$state$offered[[2]], "extra_col")
+})
+
+test_that("reconcile_schema ask aborts cleanly when the user declines to save", {
+  box::use(artma / data / schema_reconcile[reconcile_schema])
+
+  menu <- scripted_menu(c("^Drop the mapping", "^Abort"))
+
+  withr::with_options(
+    ask_opts(list(
+      "artma.data.columns" = base_store(list(t_stat = list(source_name = "tstat"))),
+      "artma.data.expected_schema_columns" = c("effect_size", "se_col", "study", "n_obs", "tstat")
+    )),
+    {
+      expect_error(
+        reconcile_schema(base_df(), mode = "ask", is_interactive = TRUE, select_fn = menu$fn),
+        "aborted by user"
+      )
+      expect_equal(getOption("artma.data.columns")$t_stat$source_name, "tstat")
+    }
+  )
+})
+
+# A menu backend is injected, so what it returns is input, not a given: only
+# `NULL` (cancelled) or one of the offered labels may reach the configuration.
+
+test_that("reconcile_schema ask rejects a menu answer that was never offered", {
+  box::use(artma / data / schema_reconcile[reconcile_schema])
+
+  garbage <- function(choices, prompt, ...) "this is not one of the choices at all"
+
+  withr::with_options(
+    ask_opts(list(
+      "artma.data.columns" = base_store(list(t_stat = list(source_name = "tstat"))),
+      "artma.data.expected_schema_columns" = c("effect_size", "se_col", "study", "n_obs", "tstat")
+    )),
+    {
+      expect_error(
+        reconcile_schema(base_df(), mode = "ask", is_interactive = TRUE, select_fn = garbage),
+        "not offered"
+      )
+      expect_equal(getOption("artma.data.columns")$t_stat$source_name, "tstat")
+    }
+  )
+})
+
+test_that("reconcile_schema ask does not map a role onto a column the manual menu never offered", {
+  box::use(artma / data / schema_reconcile[reconcile_schema])
+
+  # Asks for the manual column list, then answers it with a column that is not
+  # in the data at all. spare_col keeps the manual menu non-empty, since the
+  # picker only offers columns no other record backs.
+  invent_column <- function(choices, prompt, ...) {
+    hit <- grep("^Map to a different column", choices, value = TRUE)
+    if (length(hit) > 0) hit[[1]] else "no_such_column"
+  }
+
+  withr::with_options(
+    ask_opts(list(
+      "artma.data.columns" = base_store(list(t_stat = list(source_name = "tstat"))),
+      "artma.data.expected_schema_columns" = c("effect_size", "se_col", "study", "n_obs", "tstat", "spare_col")
+    )),
+    {
+      expect_error(
+        reconcile_schema(
+          base_df(spare_col = c(0.1, 0.2, 0.3)),
+          mode = "ask", is_interactive = TRUE, select_fn = invent_column
+        ),
+        "not offered"
+      )
+      expect_equal(getOption("artma.data.columns")$t_stat$source_name, "tstat")
+    }
+  )
+})
+
+test_that("reconcile_schema ask rejects a menu answer that is not a single label", {
+  box::use(artma / data / schema_reconcile[reconcile_schema])
+
+  return_index <- function(choices, prompt, ...) 1L
+
+  withr::with_options(
+    ask_opts(list(
+      "artma.data.columns" = base_store(list(t_stat = list(source_name = "tstat"))),
+      "artma.data.expected_schema_columns" = c("effect_size", "se_col", "study", "n_obs", "tstat")
+    )),
+    {
+      expect_error(
+        reconcile_schema(base_df(), mode = "ask", is_interactive = TRUE, select_fn = return_index),
+        "not offered"
+      )
+      expect_equal(getOption("artma.data.columns")$t_stat$source_name, "tstat")
+    }
+  )
+})
+
+# Baseline upkeep
+#
+# Removing an unmapped column is not drift, but the baseline must still follow
+# the data: otherwise the column would never register as new if it came back.
+
+test_that("reconcile_schema refreshes the baseline when an unmapped column disappears without drift", {
+  box::use(artma / data / schema_reconcile[reconcile_schema])
+
+  withr::with_options(
+    base_reconcile_opts(list(
+      "artma.data.expected_schema_columns" = c("effect_size", "se_col", "study", "n_obs", "region")
+    )),
+    {
+      expect_null(reconcile_schema(base_df(), mode = "strict"))
+      expect_equal(
+        sort(getOption("artma.data.expected_schema_columns")),
+        sort(c("effect_size", "se_col", "study", "n_obs"))
+      )
+    }
+  )
+})
+
+test_that("a column that was removed and later restored is reported as new again", {
+  box::use(artma / data / schema_reconcile[reconcile_schema])
+
+  withr::with_options(
+    base_reconcile_opts(list(
+      "artma.data.expected_schema_columns" = c("effect_size", "se_col", "study", "n_obs", "region")
+    )),
+    {
+      reconcile_schema(base_df(), mode = "auto") # region gone: no drift, baseline shrinks
+      expect_error(reconcile_schema(base_df(region = "EU"), mode = "strict"), "region")
+    }
+  )
+})
+
+test_that("reconcile_schema leaves an up-to-date baseline alone", {
+  box::use(artma / data / schema_reconcile[reconcile_schema])
+
+  baseline <- c("n_obs", "study", "se_col", "effect_size") # same set, different order
+
+  withr::with_options(
+    base_reconcile_opts(list("artma.data.expected_schema_columns" = baseline)),
+    {
+      reconcile_schema(base_df(), mode = "auto")
+      expect_identical(getOption("artma.data.expected_schema_columns"), baseline)
+    }
+  )
 })

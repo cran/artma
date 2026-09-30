@@ -1,5 +1,5 @@
 box::use(
-  artma / data / utils[get_required_colnames],
+  artma / data / utils[get_required_colnames, get_winsorization_recomputed_cols],
   artma / libs / core / utils[get_verbosity]
 )
 
@@ -38,11 +38,17 @@ label_with_source_names <- function(counts) {
 #' @title Detect missing values
 #' @description Analyze the data frame for missing values and return a summary.
 #' @param df *\[data.frame\]* The data frame to analyze
+#' @param ignore_cols *\[character, optional\]* Columns left out of the scan,
+#'   e.g. columns the compute phase is about to recalculate anyway
 #' @return *\[list\]* Summary of missing values with columns and counts
 #' @keywords internal
-detect_missing_values <- function(df) {
-  required_cols <- get_required_colnames()
-  all_cols <- colnames(df)
+detect_missing_values <- function(df, ignore_cols = character(0)) {
+  all_cols <- setdiff(colnames(df), ignore_cols)
+  # A required column the frame does not carry (possible since methods declare
+  # their own requirements, see #400) must not enter the NA scan: indexing
+  # na_counts by an absent name would inject a phantom NA-named entry that
+  # aborts the run with an unnamed "missing values" error.
+  required_cols <- intersect(get_required_colnames(), all_cols)
   optional_cols <- setdiff(all_cols, required_cols)
 
   # Count missing values per column
@@ -56,7 +62,7 @@ detect_missing_values <- function(df) {
   optional_na <- optional_na[optional_na > 0]
 
   # Count rows with any missing values
-  rows_with_any_na <- sum(rowSums(is.na(df)) > 0)
+  rows_with_any_na <- sum(rowSums(is.na(df[, all_cols, drop = FALSE])) > 0)
 
   list(
     required_cols_with_na = required_na,
@@ -72,11 +78,14 @@ detect_missing_values <- function(df) {
 #' @title Handle missing values with removal strategy
 #' @description Remove rows with any missing values (listwise deletion).
 #' @param df *\[data.frame\]* The data frame to process
+#' @param exclude_cols *\[character, optional\]* Columns whose missing values
+#'   do not cause row removal
 #' @return *\[data.frame\]* The data frame with complete cases only
 #' @keywords internal
-handle_na_remove <- function(df) {
+handle_na_remove <- function(df, exclude_cols = character(0)) {
   initial_rows <- nrow(df)
-  df_complete <- df[stats::complete.cases(df), ]
+  checked_cols <- setdiff(colnames(df), exclude_cols)
+  df_complete <- df[stats::complete.cases(df[, checked_cols, drop = FALSE]), ]
   removed_rows <- initial_rows - nrow(df_complete)
 
   if (removed_rows > 0 && get_verbosity() >= 3) {
@@ -406,6 +415,10 @@ identify_unimputable_columns <- function(df, threshold) {
 #' exceeds `artma.data.max_imputation_missingness`; those columns keep their
 #' missing values and a warning is emitted.
 #'
+#' Columns the compute phase recalculates from winsorized data anyway
+#' (`get_winsorization_recomputed_cols()`, issue #522) are left out entirely:
+#' they are neither reported, imputed, nor allowed to trigger row removal.
+#'
 #' @param df *\[data.frame\]* The data frame to process
 #' @return *\[data.frame\]* The processed data frame
 #' @keywords internal
@@ -416,8 +429,20 @@ handle_missing_values <- function(df) {
     artma / options / typed_accessors[get_na_handling, get_max_imputation_missingness]
   )
 
+  # Columns about to be rebuilt downstream carry values that are discarded
+  # either way, so their missing values are not worth reporting or filling.
+  recomputed_cols <- get_winsorization_recomputed_cols(df)
+  recomputed_cols <- recomputed_cols[vapply(recomputed_cols, function(col) anyNA(df[[col]]), logical(1))]
+  if (length(recomputed_cols) > 0 && get_verbosity() >= 3) {
+    recomputed_counts <- vapply(recomputed_cols, function(col) sum(is.na(df[[col]])), integer(1))
+    recomputed_msg <- format_cols_with_counts(recomputed_counts)
+    cli::cli_alert_info(
+      "Leaving missing values in {recomputed_msg} alone: recalculated from winsorized data downstream."
+    )
+  }
+
   # Detect missing values
-  na_summary <- detect_missing_values(df)
+  na_summary <- detect_missing_values(df, ignore_cols = recomputed_cols)
 
   # Get the handling strategy
   na_handling <- get_na_handling()
@@ -509,6 +534,7 @@ handle_missing_values <- function(df) {
       "The option 'artma.data.max_imputation_missingness' must be a single number between 0 and 1."
     )
     skip_ratios <- identify_unimputable_columns(df, max_missingness)
+    skip_ratios <- skip_ratios[setdiff(names(skip_ratios), recomputed_cols)]
     skip_cols <- names(skip_ratios)
     if (length(skip_cols) > 0 && get_verbosity() >= 2) {
       skip_msg <- paste0(
@@ -523,6 +549,8 @@ handle_missing_values <- function(df) {
       )
     }
   }
+
+  exclude_cols <- union(skip_cols, recomputed_cols)
 
   # Apply the selected strategy
   df_processed <- switch(na_handling,
@@ -542,11 +570,11 @@ handle_missing_values <- function(df) {
       }
       df
     },
-    "remove" = handle_na_remove(df),
-    "median" = handle_na_median(df, exclude_cols = skip_cols),
-    "mean" = handle_na_mean(df, exclude_cols = skip_cols),
-    "interpolate" = handle_na_interpolate(df, exclude_cols = skip_cols),
-    "mice" = handle_na_mice(df, exclude_cols = skip_cols),
+    "remove" = handle_na_remove(df, exclude_cols = recomputed_cols),
+    "median" = handle_na_median(df, exclude_cols = exclude_cols),
+    "mean" = handle_na_mean(df, exclude_cols = exclude_cols),
+    "interpolate" = handle_na_interpolate(df, exclude_cols = exclude_cols),
+    "mice" = handle_na_mice(df, exclude_cols = exclude_cols),
     {
       cli::cli_abort("Unknown missing value handling strategy: {.val {na_handling}}")
     }

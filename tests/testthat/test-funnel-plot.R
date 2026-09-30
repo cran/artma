@@ -1,6 +1,7 @@
 box::use(
   testthat[
     expect_equal,
+    expect_false,
     expect_identical,
     expect_named,
     expect_null,
@@ -199,4 +200,135 @@ test_that("funnel_plot returns empty result when all data filtered", {
 
   expect_null(result$plots$funnel_plot)
   expect_equal(result$meta$n_points, 0)
+})
+
+
+# The x-axis labels used to be HTML color spans rendered by ggtext. After
+# ggtext was dropped the markup was still emitted and printed literally, so the
+# axis read `<span style='color:black'>50</span>`. Assert on the built plot,
+# which is what the user actually sees.
+test_that("funnel_plot renders plain x-axis labels, not HTML markup", {
+  local_funnel_options()
+
+  df <- create_test_data()
+  plot <- funnel_plot(df)$plots$funnel_plot
+  labels <- ggplot2::ggplot_build(plot)$layout$panel_params[[1]]$x$get_labels()
+
+  expect_true(length(labels) > 0)
+  expect_false(any(grepl("<|span|style=", labels)))
+})
+
+
+# Collect the mapped reference-line labels from every layer that carries them.
+layer_labels <- function(plot) {
+  unlist(lapply(plot$layers, function(layer) {
+    data <- layer$data
+    if (is.data.frame(data) && "label" %in% names(data)) unique(data$label) else NULL
+  }))
+}
+
+
+test_that("funnel_plot names its reference lines in a legend", {
+  local_funnel_options()
+
+  df <- create_test_data()
+  plot <- funnel_plot(df)$plots$funnel_plot
+  built <- ggplot2::ggplot_build(plot)
+  breaks <- built$layout$panel_params[[1]]$x$get_breaks()
+  breaks <- breaks[!is.na(breaks)]
+
+  # The mean still earns its own tick, it is just no longer tinted to say so.
+  mean_effect <- mean(df$effect)
+  expect_equal(breaks[which.min(abs(breaks - mean_effect))], mean_effect)
+
+  expect_true("Mean effect" %in% layer_labels(plot))
+
+  # One colour for every tick label: the vectorised per-tick colouring is gone,
+  # and with it the "Vectorized input to element_text()" warning it raised.
+  expect_equal(length(built$plot$theme$axis.text.x$colour), 1L)
+})
+
+
+test_that("funnel_plot draws pseudo-confidence contours when precision is 1/SE", {
+  local_funnel_options("artma.calc.precision_type" = "1/SE")
+
+  plot <- funnel_plot(create_test_data())$plots$funnel_plot
+  contour_layers <- Filter(
+    function(layer) is.data.frame(layer$data) && "side" %in% names(layer$data),
+    plot$layers
+  )
+
+  expect_equal(length(contour_layers), 1L)
+  expect_setequal(unique(contour_layers[[1]]$data$side), c("lower", "upper"))
+})
+
+
+test_that("funnel_plot omits the contours when precision is not 1/SE", {
+  # Under the DoF precision type precision is sqrt(reg_dof), which carries no
+  # standard-error relationship, so mean +/- 1.96 * SE is undefined.
+  local_funnel_options("artma.calc.precision_type" = "DoF")
+
+  plot <- funnel_plot(create_test_data())$plots$funnel_plot
+  contour_layers <- Filter(
+    function(layer) is.data.frame(layer$data) && "side" %in% names(layer$data),
+    plot$layers
+  )
+
+  expect_equal(length(contour_layers), 0L)
+})
+
+
+test_that("funnel_plot drops the contours when show_contours is off", {
+  local_funnel_options(
+    "artma.calc.precision_type" = "1/SE",
+    "artma.methods.funnel_plot.show_contours" = FALSE
+  )
+
+  plot <- funnel_plot(create_test_data())$plots$funnel_plot
+  contour_layers <- Filter(
+    function(layer) is.data.frame(layer$data) && "side" %in% names(layer$data),
+    plot$layers
+  )
+
+  expect_equal(length(contour_layers), 0L)
+})
+
+
+# The contours reach mean +/- 1.96/precision, which at a low observed precision
+# lies far outside the estimates; they used to drag the x-axis with them.
+test_that("funnel_plot clips the x-axis to the estimates, not the contours", {
+  local_funnel_options("artma.calc.precision_type" = "1/SE")
+
+  df <- create_test_data()
+  df$precision[1] <- 0.05 # contour reaches mean +/- 39.2 at this precision
+
+  plot <- funnel_plot(df)$plots$funnel_plot
+  built <- ggplot2::ggplot_build(plot)
+  panel_range <- built$layout$panel_params[[1]]$x.range
+
+  effect_range <- range(df$effect)
+  margin <- 0.1 * diff(effect_range)
+  expect_true(panel_range[1] >= effect_range[1] - margin)
+  expect_true(panel_range[2] <= effect_range[2] + margin)
+})
+
+
+# A wide range used to pin the exact data minimum, maximum and mean on top of a
+# fixed-interval grid, so labels such as 350 and 369.54 overlapped.
+test_that("funnel_plot keeps x-axis ticks far enough apart to be readable", {
+  local_funnel_options()
+
+  set.seed(7)
+  df <- data.frame(
+    effect = c(runif(200, 1, 369.54), 1, 369.54),
+    precision = runif(202, 5, 50)
+  )
+
+  plot <- funnel_plot(df)$plots$funnel_plot
+  breaks <- ggplot2::ggplot_build(plot)$layout$panel_params[[1]]$x$get_breaks()
+  breaks <- sort(breaks[!is.na(breaks)])
+
+  range_size <- max(df$effect) - min(df$effect)
+  expect_true(all(diff(breaks) >= range_size / 14))
+  expect_true(length(breaks) <= 14)
 })

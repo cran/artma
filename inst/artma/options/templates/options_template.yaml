@@ -57,9 +57,6 @@ calc:
     type: "enum: stop|warn|remove|ignore"
     default: .na
     allow_na: true
-    prompt: "function"
-    prompt_function: "prompt_se_zero_handling"
-    suppress_help_in_prompt: true
     help: |
       Having standard errors equal to zero can lead to division by zero errors, introducing infinite t-statistics.
       By default, rows with zero standard errors are removed with a warning; set this option to 'stop'
@@ -209,16 +206,20 @@ methods:
 
   exogeneity_tests:
     iv_instrument:
-      type: "enum: automatic|1/sqrt(n_obs)|1/n_obs|1/n_obs^2|log(n_obs)"
+      type: "enum: automatic|1/sqrt(n_obs)|1/n_obs|1/n_obs^2|sqrt(n_obs)|log(n_obs)"
       default: "1/sqrt(n_obs)"
       help: |
         Instrument to use for the instrumental variable (IV) regression.
         Defaults to {.strong 1/sqrt(n_obs)}, the theoretically motivated
         instrument: the standard error of an estimator scales with 1/sqrt(N),
         so sample size predicts reported precision without being a channel for
-        selective reporting. It is also the instrument used throughout the
-        applied literature, which keeps results comparable with published
-        meta-analyses.
+        selective reporting.
+
+        Published meta-analyses are not unanimous about the functional form.
+        {.strong sqrt(n_obs)} and {.strong log(n_obs)} are both in common use,
+        and on some datasets they are considerably stronger in the first stage
+        than {.strong 1/sqrt(n_obs)}; pick the one the analysis you are
+        replicating uses.
 
         {.strong automatic} instead ranks the candidates by first-stage
         F-statistic and picks the strongest, breaking ties in favor of
@@ -236,15 +237,29 @@ methods:
       type: "numeric"
       default: 0.05
       help: |
-        Significance level for the p-uniform* selection model.
-        Defaults to 0.05 (5%).
+        Two-sided significance level for the p-uniform* selection model.
+        A study counts as significant when its z-statistic exceeds the
+        corresponding critical value on the side declared by
+        {.strong puniform_side}. Defaults to 0.05 (5%).
 
     puniform_method:
       type: "enum: ML|P"
       default: "ML"
       help: |
         Estimation method for p-uniform*.
-        Use {.strong ML} for maximum likelihood or {.strong P} for method of moments.
+        Use {.strong ML} for maximum likelihood, which fits the p-uniform*
+        likelihood on all studies (significant or not), or {.strong P} for
+        the original p-uniform method of moments on the significant studies.
+
+    puniform_side:
+      type: "enum: auto|left|right"
+      default: "auto"
+      help: |
+        Direction of the selection for significance in the p-uniform* model.
+        {.strong right} treats studies with significantly positive effects as
+        selected, {.strong left} significantly negative ones. {.strong auto}
+        picks the side from the sign of the inverse-variance weighted mean of
+        all studies.
 
   box_plot:
     factor_by:
@@ -316,6 +331,16 @@ methods:
       help: |
         If `TRUE`, always include zero in the x-axis ticks when it falls
         within the data range. Useful as a reference point.
+
+    show_contours:
+      type: "logical"
+      default: true
+      help: |
+        If `TRUE`, draw 95% pseudo-confidence contours around the mean effect.
+        These trace `mean +/- 1.96 * SE` and mark the region an unbiased
+        literature's estimates should fall inside, so funnel asymmetry can be
+        read against them. Ignored unless `calc.precision_type` is "1/SE",
+        since the contours are undefined for a precision that is not 1/SE.
 
   t_stat_histogram:
     lower_cutoff:
@@ -431,9 +456,11 @@ methods:
 
     legend_font_size:
       type: "numeric"
-      default: 14
+      default: 9
       help: |
-        Font size for legend text in prima facie graphs.
+        Font size, in points, for legend text in prima facie graphs.
+        The shared theme sizes its own text from a base of 10pt, so values far
+        above that leave the legend dwarfing the axis labels.
 
   bma:
     burn:
@@ -462,7 +489,12 @@ methods:
       default: "uniform"
       help: |
         Model prior specification for BMA.
-        Options: "uniform" (all models equally likely), "random", "fixed".
+        Options: "uniform" (all models equally likely), "random", "fixed",
+        "dilut" (George's dilution prior). The dilution prior downweights
+        models whose regressors are highly correlated (it scales the model
+        prior by the determinant of the regressor correlation matrix), which
+        addresses the collinearity typical of meta-regression; several
+        published meta-analyses use it in place of the uniform prior.
 
     nmodel:
       type: "integer"
@@ -679,6 +711,21 @@ methods:
         only the combined MA table is displayed.
 
   p_hacking_tests:
+    t_stat_source:
+      type: "character"
+      default: "reported"
+      help: |
+        Which t-statistic the tests turn into p-values.
+        "reported" (default) uses the mapped `t_stat` column as the data reports
+        it: that is the number an author would have been hacking toward, and it
+        can carry inference (clustered standard errors, say) that `effect / se`
+        cannot rebuild. Without a mapped column the pipeline fills `t_stat` with
+        `effect / se`, so the two settings then agree.
+        "computed" always recomputes `effect / se`.
+        Either way the tests run on the unwinsorized `effect` and `se`: clipping
+        piles observations onto the two clip values, which is the density
+        irregularity the Elliott et al. (2022) battery is built to detect.
+
     include_caliper:
       type: "logical"
       default: true
@@ -736,14 +783,31 @@ methods:
 
     elliott_supports:
       type: "numeric"
-      default: [0.05, 0.1]
+      default: [0.05, 0.1, 0.15]
       help: |
         Upper bounds of the p-value supports [0, p_max] on which the Elliott
         et al. (2022) battery (Binomial, LCM, Fisher, Cox-Shi) runs. Each
         bound must lie in (0, 1] and the vector must be strictly increasing.
-        Published applications often extend the default with 0.15 or 0.2;
-        the support choice can flip the substantive conclusion, so report
-        which support a rejection comes from.
+        The default covers the three windows published applications report
+        most often; some extend it further with 0.2. The support choice can
+        flip the substantive conclusion, so report which support a rejection
+        comes from.
+
+    elliott_p_min:
+      type: "numeric"
+      default: 1.0e-5
+      help: |
+        Lower bound of the p-value supports [p_min, p_max] on which the Elliott
+        et al. (2022) battery runs. Defaults to `1e-5`, matching the canonical
+        Elliott et al. code, which starts the Cox-Shi binning grid there and
+        drops every p-value below it. That covers p-values which underflowed to
+        exactly zero as well as genuine ones (1e-5 is |t| = 4.42, so a strongly
+        powered literature has many), and keeping either kind pulls the whole
+        battery towards rejection. The support bound appears in every Elliott
+        row label, and the observation counts honour it too, so they run lower
+        than a published figure counting from zero; set this to `0` to
+        reproduce such a figure. Must be non-negative and below the smallest
+        `elliott_supports` bound.
 
     simulate_cdfs:
       chunk_size:
@@ -945,9 +1009,6 @@ data:
     type: "enum: stop|remove|median|mean|interpolate|mice"
     default: .na
     allow_na: true
-    prompt: "function"
-    prompt_function: "prompt_na_handling"
-    suppress_help_in_prompt: true
     help: |
       How to handle missing values:
         {cli::symbol$bullet} {.strong stop}: Abort if required columns have missing values (safest, default). Optional columns with missing values are left as-is and reported instead of aborting the run.
@@ -1008,6 +1069,56 @@ data:
       them from it.
       For more details, read the 'data_config' vignette.
 
+  mapping:
+    external_command:
+      type: "character"
+      default: .na
+      allow_na: true
+      help: |
+        Opt-in hook that lets an external tool propose column mappings for the
+        required roles auto-detection declined. Unset (the default), nothing
+        runs and detection behaves exactly as it does today.
+        Set it to a command line ({.emph Rscript /path/to/mapper.R}, or a
+        character vector of the executable and its arguments) and artma runs
+        that command once per dataset when a required role stays unmapped. The
+        command reads a JSON request on stdin (column names, per-column summary
+        statistics, and the evidence behind each decline; never any raw values)
+        and writes a proposed mapping as JSON to stdout.
+        Every proposal is verified against the same value-plausibility and
+        pair-consistency checks an auto-detected candidate faces, and a
+        proposal that fails is rejected. In an interactive session verified
+        proposals are offered for confirmation; outside one, setting this
+        option counts as consent and they are applied directly. A command that
+        fails, times out, or returns unusable output logs a warning and leaves
+        the roles unmapped; it can never abort a run.
+        Reading the payload requires the {.pkg jsonlite} package.
+        See the {.file COLUMN_MAPPING_HOOK.md} contributing guide for the
+        payload and response schemas.
+
+    external_timeout:
+      type: "numeric"
+      default: 30
+      help: |
+        Seconds the command in {.strong data.mapping.external_command} may run
+        before it is killed and the run falls back to leaving the declined
+        roles unmapped.
+
+  derive_pcc:
+    type: "logical"
+    default: false
+    help: |
+      If `TRUE`, the {.strong effect} and {.strong se} columns are not read from
+      the data file but derived as partial correlation coefficients from the
+      mapped {.strong t_stat} and {.strong reg_dof} columns:
+      {.emph r = t / sqrt(t^2 + df)} and {.emph se(r) = sqrt((1 - r^2) / df)}.
+      Meta-analyses whose primary studies report coefficients in incomparable
+      units are analysed this way, and their files often still carry a
+      coefficient/SE pair that is internally consistent but not the quantity to
+      analyse. Auto-detection proposes this route when it finds a t-statistic
+      column, a degrees-of-freedom companion, and no canonically named effect
+      and standard error. The two derived columns are computed by the pipeline
+      and recorded in the data config, not mapped to a source column.
+
   expected_schema_columns:
     type: "character"
     allow_na: true
@@ -1045,7 +1156,9 @@ data:
     suppress_help_in_prompt: true
     help: |
       Winsorization level for effect and standard error variables.
-      Values will be capped at the specified quantile from both tails.
+      Values will be capped at the specified quantile from both tails. The cap
+      is an order statistic (the nearest retained observation, as in Stata's
+      winsor), not an interpolated quantile.
       Options:
         {cli::symbol$bullet} {.strong 0}: No winsorization (keep all original values)
         {cli::symbol$bullet} {.strong 0.01}: Winsorize at 1% level (default)
@@ -1065,6 +1178,35 @@ data:
       All conditions must hold for a row to be kept (conditions are combined with AND).
       Leave unset (NA) to skip subsetting.
 
+  derived:
+    type: "list"
+    default: .na
+    allow_na: true
+    help: |
+      Optional user-defined columns built from the ones your dataset already has.
+      Each entry is named after the column it creates and holds an R expression
+      evaluated against the data, e.g.:
+        {cli::symbol$bullet} {.emph se_x_top_journal: se * top_journal} (an interaction)
+        {cli::symbol$bullet} {.emph preferred: estimate_category == 'preferred'} (an indicator)
+      Expressions are evaluated in the order written, so a later one can build on
+      an earlier one. Logical results become 0/1 integers, so the natural way of
+      writing an indicator yields the dummy a moderator set expects.
+      They run at the end of the data pipeline, after the standard computed
+      columns ({.field t_stat}, {.field precision}, {.field study_size}) exist and
+      after winsorization: an interaction with {.field se} therefore uses the same
+      winsorized values the rest of the analysis does. That also means derived
+      columns are not visible to {.strong data.subset_conditions}, which filters
+      rows earlier.
+      Each derived column is registered in {.strong data.columns} like any computed
+      column, so it can carry the usual analysis fields (including {.strong bma}).
+      A name that is not syntactic, repeats, shadows a standard column, or
+      already exists in the data is rejected, as is a column that turns out to be
+      a near-deterministic encoding of the effect or its standard error (the same
+      check BMA applies to helper columns shipped in the data file). Keep such a
+      column anyway by setting {.strong bma_allow_derived} to true on its
+      {.strong data.columns} entry.
+      Leave unset (NA) to add no derived columns.
+
 
 output:
   dir:
@@ -1078,6 +1220,17 @@ output:
       to a fixed location on your computer. The {.val auto} value stays in the
       options file and is resolved fresh on every run. Use `artma::results.dir()`
       to print the resolved directory.
+
+  run_subdirectories:
+    type: "logical"
+    default: false
+    help: |
+      If `TRUE`, every run writes its results into its own timestamped
+      subdirectory of the output directory ({.file runs/2026-08-25_14-30-12/}),
+      each with its own tables, graphics, manifest and report, so consecutive
+      runs no longer overwrite one another. `artma::results_dir()` and
+      `artma::results_open()` then point at the latest run. When `FALSE` (the
+      default), every run overwrites the previous one's output in place.
 
   save_results:
     type: "logical"

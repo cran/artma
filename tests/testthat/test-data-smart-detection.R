@@ -2,6 +2,9 @@ box::use(
   testthat[
     expect_equal,
     expect_error,
+    expect_false,
+    expect_identical,
+    expect_message,
     expect_no_error,
     expect_true,
     test_that
@@ -11,6 +14,8 @@ box::use(
 box::use(
   artma / data / smart_detection[
     detect_delimiter,
+    has_utf8_bom,
+    detect_decimal_separator,
     smart_read_csv,
     validate_df_structure
   ]
@@ -26,6 +31,17 @@ create_temp_csv <- function(content, delimiter = ",") {
     paste(apply(content, 1, paste, collapse = delimiter), collapse = "\n")
   }
   writeLines(lines, tmp_file)
+  tmp_file
+}
+
+# Write raw bytes so a UTF-8 BOM survives exactly as Excel's "CSV UTF-8"
+# export would write it.
+create_temp_bom_csv <- function(lines) {
+  tmp_file <- tempfile(fileext = ".csv")
+  con <- file(tmp_file, open = "wb")
+  on.exit(close(con))
+  writeBin(as.raw(c(0xEF, 0xBB, 0xBF)), con)
+  writeBin(charToRaw(paste0(paste(lines, collapse = "\n"), "\n")), con)
   tmp_file
 }
 
@@ -105,6 +121,103 @@ test_that("detect_delimiter handles inconsistent delimiters by choosing most con
 
   delim <- detect_delimiter(tmp_file)
   expect_equal(delim, ";")
+})
+
+
+# -- Decimal comma detection (issue #554) --------------------------------------
+# A CSV exported under a European locale uses ";" between fields and "," inside
+# numbers. The delimiter was always detected, but nothing handled the decimal
+# comma, so every numeric column stayed character until effect / se aborted.
+
+european_csv <- c(
+  "study_name;sample_size;beta_estimate;beta_se",
+  "Abebe et al. (2021);1557;0,817;0,083",
+  "Abebe et al. (2021);1559;0,794;0,057",
+  "Berg (2019);320;-1,25;0,4"
+)
+
+test_that("detect_decimal_separator returns a comma for a semicolon file with comma decimals", {
+  tmp_file <- create_temp_csv(european_csv)
+  on.exit(unlink(tmp_file))
+
+  expect_equal(detect_decimal_separator(tmp_file, ";"), ",")
+})
+
+test_that("detect_decimal_separator returns a point for a semicolon file with point decimals", {
+  tmp_file <- create_temp_csv(c(
+    "study;effect;se",
+    "A;0.817;0.083",
+    "B;0.794;0.057"
+  ))
+  on.exit(unlink(tmp_file))
+
+  expect_equal(detect_decimal_separator(tmp_file, ";"), ".")
+})
+
+test_that("detect_decimal_separator never picks a comma for a comma-delimited file", {
+  tmp_file <- create_temp_csv(c(
+    "study,effect,se",
+    "A,0.817,0.083"
+  ))
+  on.exit(unlink(tmp_file))
+
+  expect_equal(detect_decimal_separator(tmp_file, ","), ".")
+})
+
+test_that("detect_decimal_separator keeps the point when comma fields are outnumbered by point decimals", {
+  # A thousands separator next to point decimals must not flip the whole file.
+  tmp_file <- create_temp_csv(c(
+    "study;n;effect;se;precision",
+    "A;1,557;0.817;0.083;12.05",
+    "B;1,559;0.794;0.057;17.54"
+  ))
+  on.exit(unlink(tmp_file))
+
+  expect_equal(detect_decimal_separator(tmp_file, ";"), ".")
+})
+
+test_that("detect_decimal_separator returns a point for a header-only or integer-only file", {
+  header_only <- create_temp_csv("study;effect;se")
+  integers <- create_temp_csv(c("study;n", "A;10", "B;20"))
+  on.exit(unlink(c(header_only, integers)))
+
+  expect_equal(detect_decimal_separator(header_only, ";"), ".")
+  expect_equal(detect_decimal_separator(integers, ";"), ".")
+})
+
+test_that("smart_read_csv reads a semicolon file with comma decimals as numeric", {
+  withr::local_options(list(artma.verbose = 0))
+  tmp_file <- create_temp_csv(european_csv)
+  on.exit(unlink(tmp_file))
+
+  df <- smart_read_csv(tmp_file)
+
+  expect_equal(names(df), c("study_name", "sample_size", "beta_estimate", "beta_se"))
+  expect_true(is.numeric(df$beta_estimate))
+  expect_true(is.numeric(df$beta_se))
+  expect_equal(df$beta_estimate, c(0.817, 0.794, -1.25))
+  expect_equal(df$beta_se, c(0.083, 0.057, 0.4))
+  expect_equal(df$sample_size, c(1557L, 1559L, 320L))
+  expect_true(is.character(df$study_name))
+})
+
+test_that("smart_read_csv honours an explicit decimal separator", {
+  withr::local_options(list(artma.verbose = 0))
+  tmp_file <- create_temp_csv(european_csv)
+  on.exit(unlink(tmp_file))
+
+  df <- smart_read_csv(tmp_file, dec = ".")
+
+  expect_true(is.character(df$beta_estimate))
+  expect_equal(df$beta_estimate[1], "0,817")
+})
+
+test_that("smart_read_csv announces a detected comma decimal separator at info level", {
+  withr::local_options(list(artma.verbose = 3))
+  tmp_file <- create_temp_csv(european_csv)
+  on.exit(unlink(tmp_file))
+
+  expect_message(smart_read_csv(tmp_file), "comma decimal separator")
 })
 
 
@@ -282,4 +395,78 @@ test_that("smart_read_csv with auto-detection works end-to-end", {
   expect_equal(ncol(df), 4)
   expect_true(is.na(df$effect[3]))
   expect_equal(df$study_id[1], "Study A")
+})
+
+
+test_that("has_utf8_bom only reports files that start with the BOM bytes", {
+  bom_file <- create_temp_bom_csv(c("obs_id;study_name", "1;Smith (2020)"))
+  plain_file <- create_temp_csv(c("obs_id;study_name", "1;Smith (2020)"))
+  on.exit(unlink(c(bom_file, plain_file)))
+
+  expect_true(has_utf8_bom(bom_file))
+  expect_false(has_utf8_bom(plain_file))
+})
+
+
+test_that("smart_read_csv reads the first column of a BOM-prefixed file under its real name", {
+  tmp_file <- create_temp_bom_csv(c(
+    "obs_id;study_name;beta_estimate;beta_se",
+    "1;Smith (2020);0.5;0.1",
+    "2;Jones (2021);0.7;0.2"
+  ))
+  on.exit(unlink(tmp_file))
+
+  df <- smart_read_csv(tmp_file)
+
+  expect_identical(names(df), c("obs_id", "study_name", "beta_estimate", "beta_se"))
+  expect_identical(charToRaw(names(df)[[1]]), charToRaw("obs_id"))
+  expect_equal(df$obs_id, c(1L, 2L))
+  expect_equal(df$study_name, c("Smith (2020)", "Jones (2021)"))
+})
+
+
+test_that("smart_read_csv keeps a BOM-prefixed file's non-ASCII bytes intact in any locale", {
+  # The bytes must survive untouched: encoding repair happens later in
+  # `normalize_read_df`, and re-encoding through `fileEncoding` would truncate
+  # them under a C locale.
+  tmp_file <- create_temp_bom_csv(c(
+    "study_id,effect,se",
+    "M\u00fcller (2019),0.5,0.1"
+  ))
+  on.exit(unlink(tmp_file))
+
+  df <- smart_read_csv(tmp_file, delim = ",")
+
+  expect_identical(names(df)[[1]], "study_id")
+  expect_identical(charToRaw(df$study_id), charToRaw("M\u00fcller (2019)"))
+})
+
+
+test_that("smart_read_csv unquotes a BOM-prefixed quoted header", {
+  tmp_file <- create_temp_bom_csv(c(
+    '"study_id";"effect";"se"',
+    '"Study A";0.5;0.1'
+  ))
+  on.exit(unlink(tmp_file))
+
+  df <- smart_read_csv(tmp_file)
+
+  expect_identical(names(df), c("study_id", "effect", "se"))
+  expect_equal(df$study_id, "Study A")
+})
+
+
+test_that("smart_read_csv reads a BOM-prefixed file through the read.csv fallback too", {
+  # A ragged row makes read.table fail on the detected parameters; the
+  # fallback must also start past the BOM.
+  tmp_file <- create_temp_bom_csv(c(
+    "obs_id,effect,se",
+    "1,0.5,0.1",
+    "2,0.7,0.2,extra"
+  ))
+  on.exit(unlink(tmp_file))
+
+  df <- suppressWarnings(smart_read_csv(tmp_file, delim = ","))
+
+  expect_identical(names(df)[[1]], "obs_id")
 })

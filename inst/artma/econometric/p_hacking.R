@@ -33,7 +33,15 @@ skip_reason <- function(value) {
   attr(value, "reason")
 }
 
-DEFAULT_ELLIOTT_SUPPORTS <- c(0.05, 0.1)
+DEFAULT_ELLIOTT_SUPPORTS <- c(0.05, 0.1, 0.15)
+
+# Lower bound of the Elliott supports. The canonical Elliott et al. (2022) code
+# and `phack::phack_test_cox_shi` both bin from 1e-5 rather than 0, dropping
+# every p-value below that. Most of what this removes is genuine but tiny (1e-5
+# is only |t| = 4.42, so a strongly powered literature has many), and the rest
+# underflowed to exactly zero because 2 * pnorm(-|t|) has no representation left.
+# Keeping either kind pulls the whole battery towards rejection.
+DEFAULT_ELLIOTT_P_MIN <- 1e-5
 
 #' @title Result-list key suffix for an Elliott support upper bound
 #' @param p_max *[numeric]* Support upper bound, e.g. `0.05`.
@@ -49,11 +57,17 @@ support_label <- function(p_max) {
   format(p_max, nsmall = 2)
 }
 
-#' @title Interval label for an Elliott support upper bound
+#' @title Interval label for an Elliott support
+#' @description
+#' Renders the support the tests actually ran on. The lower bound is shown as
+#' given rather than assumed to be zero: with the default `p_min` the battery
+#' runs on `[1e-05, p_max]`, and a label claiming `[0, p_max]` would misstate
+#' both the interval and the observation counts reported against it.
 #' @param p_max *[numeric]* Support upper bound, e.g. `0.05`.
-#' @return *[character]* Label such as `"[0, 0.05]"`.
-support_interval_label <- function(p_max) {
-  paste0("[0, ", support_label(p_max), "]")
+#' @param p_min *[numeric]* Support lower bound. Defaults to `0`.
+#' @return *[character]* Label such as `"[0, 0.05]"` or `"[1e-05, 0.05]"`.
+support_interval_label <- function(p_max, p_min = 0) {
+  paste0("[", format(p_min), ", ", support_label(p_max), "]")
 }
 
 # Caliper tests (Gerber & Malhotra, 2008) ---------------------------------
@@ -630,13 +644,27 @@ run_cox_shi <- function(pvalues, study_id = NULL, p_min, p_max, n_bins = 10L,
 #' Executes comprehensive p-hacking detection tests: Caliper (Gerber & Malhotra, 2008),
 #' Elliott et al. (2022).
 #' @param df *[data.frame]* Input data with effect, se, and study_id columns.
-#' @param options *[list]* Options containing test parameters.
+#' @param options *[list]* Options containing test parameters. `t_stat_source`
+#'   picks the t-statistic the tests turn into p-values: `"reported"` (the
+#'   default) takes `df$t_stat` where present, falling back to `effect / se`;
+#'   `"computed"` always recomputes `effect / se`.
 #' @return *[list]* Contains test results and formatted summaries.
 run_p_hacking_tests <- function(df, options) {
   validate(is.data.frame(df), is.list(options))
 
+  t_stat_source <- options$t_stat_source %||% "reported"
+  assert(
+    t_stat_source %in% c("reported", "computed"),
+    "t_stat_source must be one of: reported, computed"
+  )
+
   study_id <- if ("study_id" %in% colnames(df)) df$study_id else seq_len(nrow(df))
-  t_stats <- resolve_t_stats(df)
+  t_stats <- if (identical(t_stat_source, "computed")) {
+    validate(is.numeric(df$effect), is.numeric(df$se))
+    df$effect / df$se
+  } else {
+    resolve_t_stats(df)
+  }
   pvalues <- 2 * stats::pnorm(-abs(t_stats))
 
   supports <- options$elliott_supports %||% DEFAULT_ELLIOTT_SUPPORTS
@@ -644,6 +672,12 @@ run_p_hacking_tests <- function(df, options) {
   assert(length(supports) > 0, "elliott_supports must not be empty")
   assert(all(supports > 0 & supports <= 1), "elliott_supports must lie in (0, 1]")
   assert(!is.unsorted(supports, strictly = TRUE), "elliott_supports must be strictly increasing")
+
+  p_min <- options$elliott_p_min %||% DEFAULT_ELLIOTT_P_MIN
+  validate(is.numeric(p_min))
+  assert(length(p_min) == 1 && is.finite(p_min), "elliott_p_min must be a single finite number")
+  assert(p_min >= 0, "elliott_p_min must be non-negative")
+  assert(p_min < min(supports), "elliott_p_min must be below the smallest elliott_supports bound")
 
   output <- list()
   skipped <- list()
@@ -703,10 +737,10 @@ run_p_hacking_tests <- function(df, options) {
     # Binomial tests
     for (p_max in supports) {
       elliott_tests[[paste0("binomial_", support_key(p_max))]] <- list(
-        test = paste0("Binomial [0, ", support_label(p_max), "]"),
+        test = paste0("Binomial ", support_interval_label(p_max, p_min)),
         family = "binomial",
-        support = support_interval_label(p_max),
-        p_value = run_binomial(pvalues, 0, p_max, type = "c")
+        support = support_interval_label(p_max, p_min),
+        p_value = run_binomial(pvalues, p_min, p_max, type = "c")
       )
     }
 
@@ -719,20 +753,20 @@ run_p_hacking_tests <- function(df, options) {
     }
     for (p_max in supports) {
       elliott_tests[[paste0("lcm_", support_key(p_max))]] <- list(
-        test = paste0("LCM [0, ", support_label(p_max), "]"),
+        test = paste0("LCM ", support_interval_label(p_max, p_min)),
         family = "lcm",
-        support = support_interval_label(p_max),
-        p_value = lcm_skip %||% run_lcm(pvalues, 0, p_max, cdfs)
+        support = support_interval_label(p_max, p_min),
+        p_value = lcm_skip %||% run_lcm(pvalues, p_min, p_max, cdfs)
       )
     }
 
     # Fisher tests
     for (p_max in supports) {
       elliott_tests[[paste0("fisher_", support_key(p_max))]] <- list(
-        test = paste0("Fisher [0, ", support_label(p_max), "]"),
+        test = paste0("Fisher ", support_interval_label(p_max, p_min)),
         family = "fisher",
-        support = support_interval_label(p_max),
-        p_value = run_fisher(pvalues, 0, p_max)
+        support = support_interval_label(p_max, p_min),
+        p_value = run_fisher(pvalues, p_min, p_max)
       )
     }
 
@@ -750,11 +784,11 @@ run_p_hacking_tests <- function(df, options) {
     if (options$include_cox_shi) {
       for (p_max in supports) {
         elliott_tests[[paste0("cox_shi_", support_key(p_max))]] <- list(
-          test = paste0("Cox-Shi [0, ", support_label(p_max), "]"),
+          test = paste0("Cox-Shi ", support_interval_label(p_max, p_min)),
           family = "cox_shi",
-          support = support_interval_label(p_max),
+          support = support_interval_label(p_max, p_min),
           p_value = run_cox_shi(
-            pvalues, study_id, 0, p_max,
+            pvalues, study_id, p_min, p_max,
             n_bins = options$cox_shi_bins,
             monotonicity_order = options$cox_shi_order,
             use_bounds = options$cox_shi_bounds
@@ -802,18 +836,23 @@ build_elliott_summary <- function(elliott_tests, pvalues, options) {
     check.names = FALSE
   )
 
-  # Add observation count rows, widest support first
+  # Add observation count rows, widest support first. The counts describe the
+  # sample the tests actually saw, so they honour the lower bound as well, and
+  # the row label carries that bound: a count over `[1e-05, p_max]` sitting
+  # under a `[0, p_max]` label is how a reader ends up comparing it against a
+  # published figure that counted from zero.
   supports <- sort(options$elliott_supports %||% DEFAULT_ELLIOTT_SUPPORTS, decreasing = TRUE)
+  p_min <- options$elliott_p_min %||% DEFAULT_ELLIOTT_P_MIN
 
   obs_rows <- data.frame(
     Test = vapply(
       supports,
-      function(p_max) paste0("Observations in [0, ", format(p_max), "]"),
+      function(p_max) paste0("Observations in [", format(p_min), ", ", format(p_max), "]"),
       character(1)
     ),
     `P-value` = vapply(
       supports,
-      function(p_max) as.character(sum(pvalues >= 0 & pvalues <= p_max, na.rm = TRUE)),
+      function(p_max) as.character(sum(pvalues >= p_min & pvalues <= p_max, na.rm = TRUE)),
       character(1)
     ),
     stringsAsFactors = FALSE,

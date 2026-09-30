@@ -14,7 +14,7 @@ prima_facie_graphs <- function(df) {
     artma / options / resolver[opt_spec, resolve_options],
     artma / variable / detection[detect_variable_groups],
     artma / visualization / options[get_visualization_options],
-    artma / visualization / export[export_named_plots, preview_plot]
+    artma / visualization / export[export_named_plots, preview_needs_file, preview_plot]
   )
 
   validate(is.data.frame(df))
@@ -40,7 +40,7 @@ prima_facie_graphs <- function(df) {
       constraint = function(x) x > 0,
       constraint_msg = "n_bins must be positive"
     ),
-    legend_font_size = opt_spec(default = 14, type = "numeric")
+    legend_font_size = opt_spec(default = 9, type = "numeric")
   ))
 
   graph_type <- resolved$graph_type
@@ -103,7 +103,26 @@ prima_facie_graphs <- function(df) {
     return(invisible(new_method_result(meta = list(groups = character(0)))))
   }
 
-  if (get_verbosity() >= 3) {
+  should_preview <- get_verbosity() >= 3
+  preview_via_file <- should_preview && preview_needs_file()
+
+  # Exports run before the previews: a file preview shows the exported PNG, and
+  # when exports are off it renders the plots to throwaway tempfiles instead.
+  exported <- NULL
+  if (export_graphics || preview_via_file) {
+    exported <- export_named_plots(
+      plots = plots,
+      base_name = "prima_facie",
+      export_path = if (export_graphics) export_path else tempfile("artma_preview_"),
+      graph_scale = graph_scale,
+      names = group_names,
+      width = 800,
+      height = 666,
+      record = export_graphics
+    )
+  }
+
+  if (should_preview) {
     cli::cli_h3("Prima Facie Graphs")
     for (i in seq_along(plots)) {
       if (length(plots) > 1) {
@@ -111,20 +130,8 @@ prima_facie_graphs <- function(df) {
           "Displaying plot {i}/{length(plots)}: {.field {names(plots)[i]}}"
         )
       }
-      preview_plot(plots[[i]])
+      preview_plot(plots[[i]], path = exported[i])
     }
-  }
-
-  if (export_graphics) {
-    export_named_plots(
-      plots = plots,
-      base_name = "prima_facie",
-      export_path = export_path,
-      graph_scale = graph_scale,
-      names = group_names,
-      width = 800,
-      height = 666
-    )
   }
 
   invisible(new_method_result(
@@ -329,14 +336,20 @@ create_prima_facie_plot <- function(df, group_col, group_name, graph_type,
       data = plot_df,
       ggplot2::aes(x = .data$effect, y = ggplot2::after_stat(density), fill = .data$group)
     ) +
-      ggplot2::geom_histogram(binwidth = bin_width) +
+      # position = "identity", not the ggplot2 default of "stack". Stacking
+      # densities adds quantities that each integrate to one, so the bars climb
+      # to a total that means nothing and no group's own distribution can be
+      # read off the chart.
+      ggplot2::geom_histogram(
+        binwidth = bin_width, position = "identity", alpha = 0.45, colour = NA
+      ) +
       ggplot2::scale_fill_brewer(palette = palette, name = group_label)
   } else {
     p <- ggplot2::ggplot(
       data = plot_df,
       ggplot2::aes(x = .data$effect, y = ggplot2::after_stat(density), color = .data$group)
     ) +
-      ggplot2::geom_density(alpha = 0.2, linewidth = 1) +
+      ggplot2::geom_density(alpha = 0.2, linewidth = 0.8) +
       ggplot2::scale_color_brewer(palette = palette, name = group_label)
   }
 
@@ -344,11 +357,12 @@ create_prima_facie_plot <- function(df, group_col, group_name, graph_type,
     ggplot2::labs(x = "Effect", y = "Density") +
     plot_theme +
     ggplot2::theme(
-      legend.position = c(0.98, 0.98),
-      legend.justification = c(1, 1),
-      legend.direction = "vertical",
-      legend.text = ggplot2::element_text(size = legend_font_size),
-      legend.background = ggplot2::element_rect(fill = "white", color = "grey80")
+      # Below the panel rather than floating inside it: an inside legend covers
+      # data whenever the distribution's mode happens to fall under it, and the
+      # opaque box it needed to stay readable made that worse.
+      legend.position = "bottom",
+      legend.direction = "horizontal",
+      legend.text = ggplot2::element_text(size = legend_font_size)
     )
 
   p

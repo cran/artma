@@ -63,7 +63,8 @@ configure_data <- function(df_raw, methods = NULL) {
     artma / data / method_requirements[resolve_hard_required_colnames],
     artma / data / schema_reconcile[reconcile_schema],
     artma / data / preprocess[clean_data],
-    artma / data / configure[resolve_na_handling, resolve_se_zero_handling]
+    artma / data / configure[resolve_na_handling, resolve_se_zero_handling],
+    artma / data / derivation[derive_pcc_columns]
   )
 
   # This is the run's hard-required-column gate: it runs on every
@@ -85,6 +86,10 @@ configure_data <- function(df_raw, methods = NULL) {
   # quietly: this frame is a configure-phase intermediate, and the compute phase
   # standardizes the same raw frame again with messages on.
   df_std <- standardize_column_names(df_raw, quiet = TRUE, required_colnames = required_colnames)
+  # The derived effect/se have to exist before the zero-SE and missing-value
+  # strategies are decided, or both decisions would be taken on a frame missing
+  # the two columns they are about.
+  df_std <- suppressMessages(derive_pcc_columns(df_std))
   df_clean <- clean_data(df_std)
   resolve_na_handling(df_clean)
   resolve_se_zero_handling(df_clean)
@@ -105,7 +110,9 @@ compute_data_impl <- function() {
     artma / data / method_requirements[resolve_hard_required_colnames],
     artma / data_config / resolve[prime_df_for_config_cache],
     artma / data / preprocess[preprocess_data],
-    artma / data / compute[compute_optional_columns]
+    artma / data / compute[compute_optional_columns],
+    artma / data / derivation[derive_pcc_columns],
+    artma / data / derived_columns[apply_derived_columns]
   )
 
   df_raw <- .raw_env$df_raw
@@ -118,9 +125,18 @@ compute_data_impl <- function() {
   required_colnames <- resolve_hard_required_colnames(.raw_env$methods)
   df <- standardize_column_names(df_raw, required_colnames = required_colnames)
 
+  # Derived before the config is primed, so `effect` and `se` are configured,
+  # cleaned, winsorized and validated exactly like columns read from the file.
+  df <- derive_pcc_columns(df)
+
   prime_df_for_config_cache(df)
   df <- preprocess_data(df)
-  compute_optional_columns(df)
+  df <- compute_optional_columns(df)
+
+  # Last, so a user-defined expression sees every standard column (`t_stat`,
+  # `precision`, `study_size`) and the winsorized `effect`/`se`: an interaction
+  # with the standard error then uses the same values the analysis does.
+  apply_derived_columns(df)
 }
 
 compute_data <- cache_cli_runner(
@@ -128,6 +144,41 @@ compute_data <- cache_cli_runner(
   stage = "prepare_data",
   key_builder = function(...) build_data_cache_signature()
 )
+
+#' @title Compute the unwinsorized variant of the prepared data
+#' @description The compute phase again, with winsorization switched off, for
+#'   runtime methods that declare `winsorize = FALSE` (see
+#'   `register_runtime_method()`). Everything else about the frame (cleaning,
+#'   missing-value handling, subset conditions, derived columns) is identical,
+#'   so the result has the same rows and columns as `prepare_data()` returned,
+#'   with `effect`, `se` and the columns derived from them unclipped. Reads the
+#'   raw frame primed by the preceding `prepare_data()` call; the cache keys
+#'   on the option group, so the two variants never collide. Runs at most at
+#'   warning verbosity: the winsorized pass already narrated the pipeline.
+#' @return *[data.frame]* The prepared data frame without winsorization.
+compute_unwinsorized_data <- function() {
+  without_winsorization(compute_data())
+}
+
+#' @title Evaluate a compute step with winsorization switched off
+#' @description Runs `expr` with the winsorization level pinned to `0` and the
+#'   verbosity capped at warnings, so a second pass over the pipeline neither
+#'   clips nor repeats the narration of the first. Shared by
+#'   `compute_unwinsorized_data()` and the provided-data branch of
+#'   `prepare_run_context()`.
+#' @param expr *[any]* The expression to evaluate.
+#' @return The value of `expr`.
+without_winsorization <- function(expr) {
+  box::use(artma / libs / core / utils[get_verbosity])
+
+  withr::with_options(
+    list(
+      artma.data.winsorization_level = 0,
+      artma.verbose = min(get_verbosity(), 2)
+    ),
+    expr
+  )
+}
 
 #' @title Persist phase
 #' @description Idempotent, always-run phase. Registers the computed columns in
@@ -199,6 +250,8 @@ box::export(
   prepare_data,
   configure_data, # phases exported so tests can drive them in isolation
   compute_data_impl,
+  compute_unwinsorized_data,
+  without_winsorization,
   persist_data,
   prime_raw_df, # lets tests seed the raw frame the cached compute reads
   read_data,

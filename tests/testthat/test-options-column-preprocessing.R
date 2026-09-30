@@ -203,6 +203,96 @@ test_that("preprocess_column_mapping works with comma-delimited files", {
 })
 
 
+test_that("preprocess_column_mapping detects columns in a Latin-1 encoded file", {
+  # Regression: a citation-style study label carrying a raw 0xFC byte ("Müller"
+  # in Windows-1252) made is_likely_study_key()'s character-class regexes error
+  # out, the whole detection step was swallowed by the surrounding tryCatch,
+  # and the options file was written with no mapping at all. Encoding is now
+  # repaired at the read boundary, so detection runs normally.
+  tmp_file <- tempfile(fileext = ".csv")
+  con <- file(tmp_file, open = "wb")
+  writeBin(charToRaw(paste0(paste(c(
+    "study_name,effect,standard_error,sample_size",
+    "M\xfcller et al. (2011),0.5,0.1,100",
+    "Smith (2015),0.7,0.2,150",
+    "Jones (2019),0.3,0.05,220"
+  ), collapse = "\n"), "\n")), con)
+  close(con)
+  on.exit(unlink(tmp_file))
+
+  user_input <- list("data.source_path" = tmp_file)
+  options_def <- create_mock_options_def()
+
+  withr::local_options(list("artma.verbose" = 1))
+  result <- preprocess_column_mapping(user_input, options_def)
+
+  expect_equal(result$data.columns$study_id$source_name, "study_name")
+  expect_equal(result$data.columns$se$source_name, "standard_error")
+  expect_equal(result$data.columns$n_obs$source_name, "sample_size")
+})
+
+
+test_that("preprocess_column_mapping does not guess a mapping for an undetectable required column", {
+  # n_obs is required but absent from the data. In a non-interactive session
+  # (such as this test run) the flow must leave it unmapped rather than fall
+  # back to climenu's first menu entry, which used to record
+  # n_obs: source_name: effect.
+  csv_content <- c(
+    "effect,se,study_id",
+    "0.5,0.1,Study A",
+    "0.7,0.2,Study B"
+  )
+  tmp_file <- tempfile(fileext = ".csv")
+  writeLines(csv_content, tmp_file)
+  on.exit(unlink(tmp_file))
+
+  user_input <- list("data.source_path" = tmp_file)
+  options_def <- create_mock_options_def()
+
+  withr::local_options(list("artma.verbose" = 1))
+  result <- preprocess_column_mapping(user_input, options_def)
+
+  expect_false("n_obs" %in% names(result$data.columns))
+})
+
+
+test_that("non-interactive options_create leaves an undetectable required column unmapped", {
+  box::use(
+    artma / options / files[options_file_path, read_options_file]
+  )
+
+  csv_content <- c(
+    "effect,se,study_id",
+    "0.5,0.1,Study A",
+    "0.7,0.2,Study B"
+  )
+  tmp_file <- tempfile(fileext = ".csv")
+  writeLines(csv_content, tmp_file)
+  on.exit(unlink(tmp_file))
+
+  tmp_dir <- withr::local_tempdir()
+  file_name <- "missing-nobs.yaml"
+
+  withr::local_options(list("artma.verbose" = 1))
+
+  artma::options_create(
+    options_file_name = file_name,
+    options_dir = tmp_dir,
+    user_input = list("data.source_path" = tmp_file),
+    should_validate = FALSE,
+    should_overwrite = TRUE
+  )
+
+  written <- read_options_file(options_file_path(tmp_dir, file_name))
+  columns <- written$data$columns
+
+  # With nothing to record, the columns node stays empty (read back as NA).
+  # The menu-default fallback used to record n_obs: source_name: effect here,
+  # which made the next run rename effect to n_obs and abort.
+  expect_false(is.list(columns) && "n_obs" %in% names(columns))
+})
+
+
 test_that("preprocess_column_mapping respects verbosity settings", {
   tmp_file <- create_temp_csv_file()
   on.exit(unlink(tmp_file))

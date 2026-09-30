@@ -66,7 +66,8 @@ default_exogeneity_options <- function(...) {
     add_significance_marks = TRUE,
     round_to = 3L,
     puniform_alpha = 0.05,
-    puniform_method = "ML"
+    puniform_method = "ML",
+    puniform_side = "auto"
   )
   utils::modifyList(defaults, list(...))
 }
@@ -128,6 +129,34 @@ test_that("run_iv_regression still auto-selects when explicitly asked", {
 
   expect_equal(res$instrument_name, "1/sqrt(n_obs)")
   expect_equal(nrow(res$coefficients), 2L)
+})
+
+test_that("run_iv_regression accepts sqrt(n_obs) as an explicit instrument", {
+  skip_if_not_installed("AER")
+  local_options(artma.verbose = 1)
+
+  # sqrt(n_obs) is the specification used by Opatrny et al. (2025, JOLE) and
+  # several other published meta-analyses, so it has to be expressible.
+  df <- make_exogeneity_df()
+  res <- run_iv_regression(df, iv_instrument = "sqrt(n_obs)")
+
+  expect_equal(res$instrument_name, "sqrt(n_obs)")
+  expect_equal(nrow(res$coefficients), 2L)
+  expect_true(is.finite(res$first_stage_fstat))
+})
+
+test_that("the iv_instrument enum offers every candidate the automatic mode ranks", {
+  # A candidate that "automatic" can pick but the enum cannot express would be
+  # unreachable as an explicit choice.
+  tpl <- yaml::read_yaml(
+    system.file("artma/options/templates/options_template.yaml", package = "artma")
+  )
+  enum <- tpl$methods$exogeneity_tests$iv_instrument$type
+  allowed <- strsplit(sub("^enum:\\s*", "", enum), "|", fixed = TRUE)[[1]]
+
+  expect_true(all(
+    c("automatic", "1/sqrt(n_obs)", "1/n_obs", "1/n_obs^2", "sqrt(n_obs)", "log(n_obs)") %in% allowed
+  ))
 })
 
 test_that("run_iv_regression rejects an instrument without n_obs", {
@@ -399,6 +428,102 @@ test_that("run_puniform_star reports a note when the ML Hessian is not invertibl
   expect_equal(res$method_used, "ML")
   expect_true(is.na(res$coefficients$std_error[1]))
   expect_match(res$note, "Hessian was not invertible")
+})
+
+# A heterogeneous literature with a roughly even split of significant and
+# non-significant studies, so the p-uniform* likelihood has both kinds of
+# truncated-normal contributions to work with.
+make_puniform_star_df <- function(seed = 519, k = 40) {
+  set.seed(seed)
+  se <- runif(k, 0.05, 0.25)
+  true_effect <- rnorm(k, 0.25, 0.12)
+  effect <- rnorm(k, true_effect, se)
+  data.frame(
+    effect = effect,
+    se = se,
+    study_id = seq_len(k),
+    study_size = rep(100L, k),
+    n_obs = rep(100L, k)
+  )
+}
+
+test_that("run_puniform_star ML matches puniform::puni_star on a mixed literature", {
+  # Regression test: the likelihood used to be fitted on the significant
+  # studies only (the original p-uniform), while the method is labelled
+  # p-uniform*, whose whole point is to also use the non-significant ones.
+  skip_if_not_installed("puniform")
+
+  df <- make_puniform_star_df()
+  n_sig <- sum(df$effect / df$se >= stats::qnorm(0.975))
+  expect_gt(n_sig, 5)
+  expect_lt(n_sig, nrow(df) - 5)
+
+  res <- run_puniform_star(df, method = "ML", side = "right")
+  ref <- puniform::puni_star(yi = df$effect, vi = df$se^2, side = "right", method = "ML", alpha = 0.05)
+
+  expect_equal(res$method_used, "ML")
+  expect_equal(res$coefficients$estimate[1], ref$est, tolerance = 1e-4)
+})
+
+test_that("run_puniform_star ML uses the non-significant studies", {
+  df <- make_puniform_star_df()
+  base <- run_puniform_star(df, method = "ML", side = "right")
+
+  # Shift only the non-significant studies; a significant-only fit would not
+  # notice, the star likelihood must.
+  shifted <- df
+  non_sig <- shifted$effect / shifted$se < stats::qnorm(0.975)
+  shifted$effect[non_sig] <- shifted$effect[non_sig] - 0.1
+  moved <- run_puniform_star(shifted, method = "ML", side = "right")
+
+  expect_true(is.finite(base$coefficients$estimate[1]))
+  expect_true(is.finite(moved$coefficients$estimate[1]))
+  expect_lt(moved$coefficients$estimate[1], base$coefficients$estimate[1] - 0.05)
+})
+
+test_that("run_puniform_star side = 'left' mirrors side = 'right' on negated data", {
+  df <- make_puniform_star_df()
+  negated <- df
+  negated$effect <- -negated$effect
+
+  for (method in c("ML", "P")) {
+    right <- run_puniform_star(df, method = method, side = "right")
+    left <- run_puniform_star(negated, method = method, side = "left")
+
+    expect_equal(left$side_used, "left")
+    expect_equal(left$coefficients$estimate[1], -right$coefficients$estimate[1], tolerance = 1e-6)
+    expect_equal(left$coefficients$std_error[1], right$coefficients$std_error[1], tolerance = 1e-6)
+    expect_equal(left$test_statistic, right$test_statistic, tolerance = 1e-6)
+  }
+})
+
+test_that("run_puniform_star side = 'auto' follows the sign of the pooled effect", {
+  df <- make_puniform_star_df()
+  negated <- df
+  negated$effect <- -negated$effect
+
+  auto_pos <- run_puniform_star(df, method = "ML")
+  auto_neg <- run_puniform_star(negated, method = "ML")
+
+  expect_equal(auto_pos$side_used, "right")
+  expect_equal(auto_neg$side_used, "left")
+  expect_equal(auto_pos$coefficients$estimate[1], run_puniform_star(df, method = "ML", side = "right")$coefficients$estimate[1])
+  expect_equal(auto_neg$coefficients$estimate[1], -auto_pos$coefficients$estimate[1], tolerance = 1e-6)
+})
+
+test_that("run_puniform_star reports the side when the declared side has no significant studies", {
+  df <- make_puniform_star_df()
+
+  res <- run_puniform_star(df, method = "ML", side = "left")
+
+  expect_equal(res$side_used, "left")
+  expect_true(is.na(res$coefficients$estimate[1]))
+  expect_match(res$note, "on the left side")
+})
+
+test_that("run_puniform_star rejects an unknown side", {
+  df <- make_puniform_star_df()
+  expect_error(run_puniform_star(df, side = "both"), "side must be one of")
 })
 
 # run_exogeneity_tests ------------------------------------------------------

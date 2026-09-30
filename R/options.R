@@ -186,7 +186,7 @@ options_copy <- function(
 }
 
 #' @title Delete user options
-#' @description Provide a name of a user options file to delete, and delete that file.
+#' @description Provide a name of a user options file to delete, and delete that file. `options_remove()` is an alias.
 #' @param options_file_name *\[character, optional\]* Name of the options file to delete. If not provided, the user will be prompted. Defaults to `NULL`.
 #' @param options_dir *\[character, optional\]* Full path to the folder that contains user options files. If not provided, the default folder is chosen. Defaults to `NULL`.
 #' @param skip_confirmation *\[boolean, optional\]* If passed as TRUE, the user will not be prompted for deletion confirmation. Defaults to FALSE.
@@ -198,6 +198,7 @@ options_delete <- function(
   skip_confirmation = FALSE
 ) {
   box::use(
+    artma / interactive / input[ask_select],
     artma / options / ask[ask_for_existing_options_file_name],
     artma / options / files[
       options_file_path,
@@ -211,11 +212,11 @@ options_delete <- function(
   options_file_names <- options_file_name %||% ask_for_existing_options_file_name(options_dir = options_dir, prompt = "Please select the user options files you wish to delete: ", multiple = TRUE)
 
   if (!skip_confirmation) {
-    deletion_confirmed <- climenu::select(
-      choices = c("Yes, I am sure", "No, I did not mean to"),
-      prompt = cli::format_inline("Are you sure you wish to delete {.file {options_file_names}}?")
+    deletion_confirmed <- ask_select(
+      question = cli::format_inline("Are you sure you wish to delete {.file {options_file_names}}?"),
+      choices = c("Yes, I am sure" = "yes", "No, I did not mean to" = "no")
     )
-    if (deletion_confirmed != "Yes, I am sure") {
+    if (!identical(deletion_confirmed, "yes")) {
       cli::cli_abort("Aborting user option file deletion.")
     }
   }
@@ -238,6 +239,10 @@ options_delete <- function(
     }
   }))
 }
+
+#' @rdname options_delete
+#' @export
+options_remove <- options_delete
 
 #' @title List available user options
 #' @description Retrieves the list of the existing options files and returns their names as a character vector. By default, this retrieves the names of the files including the yaml suffix, but can be modified to retrieve options verbose names instead.
@@ -358,6 +363,7 @@ options_load <- function(
 ) {
   box::use(
     artma / const[CONST],
+    artma / interactive / input[ask_select],
     artma / options / files[
       options_file_path,
       read_options_file,
@@ -405,20 +411,20 @@ options_load <- function(
 
       # Combine "Create new" option with existing files in a single menu
       create_new_option_text <- "Create a new options file"
-      menu_choices <- c(create_new_option_text, existing_options_files)
-      selected <- climenu::select(
-        choices = menu_choices,
-        prompt = "Select an options file to load, or create a new one:"
+      selected <- ask_select(
+        question = "Select an options file to load, or create a new one",
+        choices = c(create_new_option_text, existing_options_files)
       )
 
-      if (selected == create_new_option_text) {
+      if (identical(selected, create_new_option_text)) {
         options_file_name <- options_create(
           options_file_name = options_file_name,
           options_dir = options_dir
         )
-      } else if (selected %in% existing_options_files) {
+      } else if (length(selected) == 1 && selected %in% existing_options_files) {
         options_file_name <- selected
       } else {
+        # Also reached on a cancelled menu, which returns an empty selection.
         cli::cli_abort("No user options file was selected. Aborting...")
       }
     }
@@ -856,11 +862,8 @@ options_fix <- function(
   cli::cat_line()
 
   if (interactive()) {
-    should_proceed <- climenu::select(
-      choices = c("Yes", "No"),
-      prompt = "Do you wish to apply the proposed changes to the user options file?"
-    )
-    if (should_proceed != "Yes") {
+    box::use(artma / interactive / input[ask_yes_no])
+    if (!ask_yes_no("Do you wish to apply the proposed changes to the user options file?")) {
       cli::cli_abort("Aborting the fixing of a user options file.")
     }
   } else {
@@ -977,11 +980,8 @@ options_create <- function(
       if (!interactive()) {
         cli::cli_abort("{file_exists_msg} Either allow overwriting or provide a different name.")
       }
-      overwrite_permitted <- climenu::select(
-        choices = c("Yes", "No"),
-        prompt = paste(file_exists_msg, "Do you wish to overwrite the contents of this file?")
-      )
-      if (overwrite_permitted != "Yes") {
+      box::use(artma / interactive / input[ask_yes_no])
+      if (!ask_yes_no(paste(file_exists_msg, "Do you wish to overwrite the contents of this file?"))) {
         cli::cli_abort("Aborting the overwriting of a user options file.")
       }
     }

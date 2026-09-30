@@ -468,6 +468,8 @@ t)</li>
 specific formula)</li>
 <li><code>puniform_alpha</code>: Significance level for p-uniform*</li>
 <li><code>puniform_method</code>: Estimation method (ML or P)</li>
+<li><code>puniform_side</code>: Direction of the selection for
+significance (auto, left, or right)</li>
 </ul>
 </div>
 <div id="bma-bayesian-model-averaging" class="section level4">
@@ -476,7 +478,8 @@ specific formula)</li>
 <li><code>burn</code>: Burn-in iterations (default: 10000)</li>
 <li><code>iter</code>: MCMC iterations (default: 50000)</li>
 <li><code>g</code>: Prior specification (default: “UIP”)</li>
-<li><code>mprior</code>: Model prior (default: “uniform”)</li>
+<li><code>mprior</code>: Model prior, one of “uniform”, “random”,
+“fixed”, “dilut” (default: “uniform”)</li>
 <li><code>nmodel</code>: Number of top models to retain</li>
 <li><code>mcmc</code>: Sampler type (“bd” or “rev.jump”)</li>
 <li><code>use_vif_optimization</code>: Whether to use VIF
@@ -584,10 +587,11 @@ numeric output</li>
 <h2>Creating Options Files</h2>
 <div id="interactive-creation" class="section level3">
 <h3>Interactive Creation</h3>
-<p>The easiest way to create an options file is interactively. When you
-run an artma function without specifying an options file, you’ll be
-prompted to create one:</p>
-<div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a><span class="co"># This will prompt you to create an options file</span></span>
+<p>The easiest way to create an options file is interactively. Calling
+<code>artma()</code> without one opens the session hub with no options
+file loaded; its <strong>Options file</strong> item is where you select
+an existing file or create a new one:</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a><span class="co"># Opens the session hub; pick &quot;Options file&quot; to select or create one</span></span>
 <span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a>artma<span class="sc">::</span><span class="fu">artma</span>()</span></code></pre></div>
 <p>You can also create one explicitly:</p>
 <div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a>artma<span class="sc">::</span><span class="fu">options_create</span>()</span></code></pre></div>

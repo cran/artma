@@ -208,23 +208,57 @@ add_study_id_column <- function(df) {
 }
 
 #' @title Add t-statistic column
-#' @description Add a t-statistic column to the data frame.
+#' @description Add a t-statistic column to the data frame. A mapped `t_stat`
+#'   column is kept as reported (it may carry inference the meta-analyst cannot
+#'   rebuild from `effect`/`se`, such as clustered standard errors) unless
+#'   winsorization clipped `effect`/`se` upstream, in which case it is
+#'   recomputed from the clipped values so the three columns stay consistent;
+#'   because that discards the user's mapped values, the overwrite is reported
+#'   as a warning that names the mapping (issue #538), exactly like
+#'   `add_precision_column()`. The completeness check only runs when the mapped
+#'   column is actually kept. Without a mapped column `t_stat` is computed as
+#'   `effect / se`.
 #' @param df *\[data.frame\]* The data frame to add the t-statistic column to.
 #' @return *\[data.frame\]* The data frame with the t-statistic column.
 #' @keywords internal
 add_t_stat_column <- function(df) {
   box::use(
-    calc = artma / calc / index
+    calc = artma / calc / index,
+    artma / data / utils[get_colnames_map, get_winsorization_recomputed_cols],
+    artma / libs / core / utils[get_verbosity]
   )
 
   if ("t_stat" %in% colnames(df)) {
-    if (any(is.na(df$t_stat))) {
-      n_missing <- sum(is.na(df$t_stat))
-      cli::cli_abort(c(
-        "!" = "Found {n_missing} missing t-statistics in the column {.val t_stat}.",
-        "i" = "Please add these to your data frame, or remove the {.val t_stat} column mapping so they are computed automatically.",
-        "i" = "You can remove the mapping by running {.code artma::config_set('t_stat', source_name = NA)}."
-      ))
+    if ("t_stat" %in% get_winsorization_recomputed_cols(df)) {
+      # effect/se were winsorized upstream; recompute t_stat from the clipped
+      # values so the three columns stay consistent instead of keeping stale
+      # pre-winsorization values. The values are discarded either way, so a
+      # missing one is not worth aborting over here.
+      if (get_verbosity() >= 2) {
+        source_name <- get_colnames_map()[["t_stat"]]
+        if (is.null(source_name)) {
+          cli::cli_alert_warning(c(
+            "!" = "Winsorization is active: overwriting the {.field t_stat} column of the data with values recalculated from the winsorized data.",
+            "i" = "Set {.field data.winsorization_level} to {.val 0} to keep the original values."
+          ))
+        } else {
+          cli::cli_alert_warning(c(
+            "!" = "Winsorization is active: overwriting the mapped column {.val {source_name}} ({.field data.columns.t_stat.source_name}) with {.field t_stat} recalculated from the winsorized data.",
+            "i" = "Set {.field data.winsorization_level} to {.val 0} to keep the mapped values, or clear the mapping with {.code artma::config_set('t_stat', source_name = NA)} to compute {.field t_stat} automatically without this warning."
+          ))
+        }
+      }
+    } else {
+      if (any(is.na(df$t_stat))) {
+        n_missing <- sum(is.na(df$t_stat))
+        cli::cli_abort(c(
+          "!" = "Found {n_missing} missing t-statistics in the column {.val t_stat}.",
+          "i" = "Please add these to your data frame, or remove the {.val t_stat} column mapping so they are computed automatically.",
+          "i" = "You can remove the mapping by running {.code artma::config_set('t_stat', source_name = NA)}."
+        ))
+      }
+
+      return(df)
     }
   }
 
@@ -318,32 +352,46 @@ add_reg_dof_column <- function(df) {
 
 #' @title Add precision column
 #' @description Add a precision column to the data frame if missing.
-#'   Calculates based on precision_type option: 1/SE or sqrt(DoF).
+#'   Calculates based on precision_type option: 1/SE or sqrt(DoF). A mapped
+#'   `precision` column is kept unless winsorization clipped `effect`/`se`
+#'   upstream, in which case it is recalculated from the clipped values so it
+#'   stays consistent with them; because that discards the user's mapped
+#'   values, the overwrite is reported as a warning that names the mapping
+#'   (issue #522). `get_winsorization_recomputed_cols()` lists the columns
+#'   this applies to so upstream steps can skip them.
 #' @param df *\[data.frame\]* The data frame to add the precision column to.
 #' @return *\[data.frame\]* The data frame with the precision column.
 #' @keywords internal
 add_precision_column <- function(df) {
   box::use(
     calc = artma / calc / index,
+    artma / data / utils[get_colnames_map, get_winsorization_recomputed_cols],
     artma / libs / core / utils[get_verbosity],
-    artma / options / typed_accessors[get_precision_type, get_winsorization_level]
+    artma / options / typed_accessors[get_precision_type]
   )
-
-  winsorization_level <- get_winsorization_level()
-  winsorization_active <- !is.null(winsorization_level) &&
-    !is.na(winsorization_level) && winsorization_level != 0
 
   if ("precision" %in% colnames(df)) {
     if (!is.numeric(df$precision)) {
       cli::cli_abort("The column {.val precision} must be numeric.")
     }
 
-    if (winsorization_active) {
+    if ("precision" %in% get_winsorization_recomputed_cols(df)) {
       # se (and thus precision) was winsorized upstream; recompute precision
       # from the winsorized se/reg_dof so it stays consistent with
       # effect/se/t_stat instead of keeping stale pre-winsorization values.
-      if (get_verbosity() >= 3) {
-        cli::cli_alert_info("Recalculating {.field precision} from winsorized data.")
+      if (get_verbosity() >= 2) {
+        source_name <- get_colnames_map()[["precision"]]
+        if (is.null(source_name)) {
+          cli::cli_alert_warning(c(
+            "!" = "Winsorization is active: overwriting the {.field precision} column of the data with values recalculated from the winsorized data.",
+            "i" = "Set {.field data.winsorization_level} to {.val 0} to keep the original values."
+          ))
+        } else {
+          cli::cli_alert_warning(c(
+            "!" = "Winsorization is active: overwriting the mapped column {.val {source_name}} ({.field data.columns.precision.source_name}) with {.field precision} recalculated from the winsorized data.",
+            "i" = "Set {.field data.winsorization_level} to {.val 0} to keep the mapped values, or clear the mapping with {.code artma::config_set('precision', source_name = NA)} to compute {.field precision} automatically without this warning."
+          ))
+        }
       }
       df$precision <- calc$precision(se = df$se, reg_dof = df$reg_dof)
     } else if (any(is.na(df$precision))) {
@@ -381,6 +429,8 @@ update_config_with_computed_columns <- function(df) {
   box::use(
     artma / data_config / read[get_data_config],
     artma / data_config / write[update_data_config],
+    artma / data / derivation[pcc_derivation_active],
+    artma / data / derived_columns[derived_column_names],
     artma / data / utils[determine_vector_type],
     artma / const[CONST],
     artma / libs / core / string[make_verbose_name],
@@ -390,8 +440,17 @@ update_config_with_computed_columns <- function(df) {
   # Get current config
   config <- get_data_config()
 
-  # List of computed columns to add
+  # List of computed columns to add. Under the (t, df) route effect and se are
+  # derived rather than read, so they join the list and are recorded as
+  # computed instead of carrying a source_name. User-defined derived columns
+  # join it too.
   computed_columns <- c("obs_id", "study_id", "study_label", "t_stat", "study_size", "reg_dof", "precision")
+  if (pcc_derivation_active()) {
+    computed_columns <- c(computed_columns, "effect", "se")
+  }
+  # User-defined `data.derived` columns are registered the same way, so they
+  # carry a config entry (and can be given `bma` flags) like any other column.
+  computed_columns <- c(computed_columns, derived_column_names())
 
   # Add each computed column to config if it exists in df and not in config
   changes <- list()

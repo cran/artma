@@ -354,19 +354,28 @@ meta-analysis needs.</p>
 <p>The simplest way to use artma is to call the main function:</p>
 <div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="fu">library</span>(artma)</span>
 <span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a>results <span class="ot">&lt;-</span> <span class="fu">artma</span>()</span></code></pre></div>
-<p>When you run this in an interactive R session, artma will:</p>
+<p>In an interactive R session this opens the <strong>session
+hub</strong>, a menu you stay in for as long as you like. From it
+you:</p>
 <ol style="list-style-type: decimal">
-<li><strong>Guide you through creating an options file</strong> - This
-stores all your analysis settings</li>
-<li><strong>Help you load your data</strong> - You’ll specify where your
-dataset is located</li>
-<li><strong>Map your columns</strong> - artma will recognize common
-column names or let you specify them</li>
-<li><strong>Let you choose methods</strong> - Select which analyses you
-want to run</li>
-<li><strong>Run your analysis</strong> - Execute everything and return
-results</li>
+<li><strong>Create or pick an options file</strong> - on your very first
+run artma guides you straight into creating one (the file stores all
+your analysis settings); once files exist, a picker of them opens
+instead, and you can always back out to the hub menu and decide
+later</li>
+<li><strong>Load your data</strong> - the file says where your dataset
+lives, and artma prepares it as soon as the file is loaded</li>
+<li><strong>Map your columns</strong> - artma recognizes common column
+names, or asks you</li>
+<li><strong>Choose methods</strong> - “Run methods” lists what your data
+supports</li>
+<li><strong>Run, adjust, run again</strong> - results accumulate across
+runs and are returned when you exit the hub</li>
 </ol>
+<p>artma remembers the options file you last ran on: the next plain
+<code>artma()</code> call resumes on it automatically (“Resuming on
+<file>”), and the “Options file” menu item is where you switch to a
+different one.</p>
 <p>If you want artma to open the results folder for you at the end of a
 run, set <code>open_results = TRUE</code>. You can always access your
 results later manually using <code>artma::results_open()</code>.</p>
@@ -453,12 +462,13 @@ call. For a full description of every method, see the <a href="methods-overview.
 <span id="cb3-7"><a href="#cb3-7" tabindex="-1"></a><span class="co"># Step 3: Explore results</span></span>
 <span id="cb3-8"><a href="#cb3-8" tabindex="-1"></a><span class="fu">names</span>(results)  <span class="co"># See which methods ran</span></span>
 <span id="cb3-9"><a href="#cb3-9" tabindex="-1"></a>results<span class="sc">$</span>effect_summary_stats  <span class="co"># Access specific results</span></span></code></pre></div>
-<p>During the interactive session, you’ll be guided through:</p>
+<p>During the interactive session, the hub menu lets you:</p>
 <ul>
-<li>Creating or selecting an options file</li>
-<li>Specifying your data file path</li>
-<li>Mapping column names (artma tries to auto-detect these)</li>
-<li>Choosing which methods to run</li>
+<li>Select or create an options file (and edit, duplicate or delete the
+ones you have)</li>
+<li>Specify your data file path</li>
+<li>Map column names (artma tries to auto-detect these)</li>
+<li>Choose which methods to run, as many times as you like</li>
 </ul>
 </div>
 <div id="workflow-2-using-an-existing-options-file" class="section level3">
@@ -566,8 +576,14 @@ what you saw scroll by never disagree.</p>
 <p><code>run.json</code> is overwritten by every run into the same
 output directory: it always describes the latest run, never a history.
 Runs driven by different options files already get their own output
-directory. To keep an older run, copy its directory, or point
-<code>output.dir</code> at a per-run location.</p>
+directory.</p>
+<p>To keep every run instead of overwriting it, set
+<code>output.run_subdirectories</code> to <code>TRUE</code>. Each run
+then writes into its own timestamped subdirectory
+(<code>&lt;output.dir&gt;/runs/2026-08-25_14-30-12/</code>), with its
+own <code>tables/</code>, <code>graphics/</code>, manifest and report,
+and <code>artma::results_dir()</code> /
+<code>artma::results_open()</code> point at the latest one.</p>
 </div>
 </div>
 <div id="choosing-methods" class="section level2">

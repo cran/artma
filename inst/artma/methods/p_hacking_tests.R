@@ -7,6 +7,12 @@
 #'
 #' The MAIVE estimator has its own method (`maive`); it is an estimator rather
 #' than a test, and its diagnostics do not read as p-hacking p-values.
+#'
+#' The method registers `winsorize = FALSE`, so the orchestrator hands it the
+#' data prepared without winsorization: clipping `se` piles observations onto
+#' the two clip values, which is the p-curve irregularity the Elliott et al.
+#' battery detects. The `t_stat_source` option picks whether the tests use the
+#' `t_stat` column as reported in the data or recompute `effect / se`.
 p_hacking_tests <- function(df) {
   box::use(
     artma / libs / core / validation[validate, validate_columns],
@@ -25,6 +31,11 @@ p_hacking_tests <- function(df) {
   opt <- get_option_group("artma.methods.p_hacking_tests")
 
   resolved <- resolve_options(opt, list(
+    t_stat_source = opt_spec(
+      default = "reported", type = "character",
+      constraint = function(x) x %in% c("reported", "computed"),
+      constraint_msg = "t_stat_source must be one of: reported, computed"
+    ),
     include_caliper = opt_spec(default = TRUE, type = "logical"),
     caliper_thresholds = opt_spec(
       default = c(1.645, 1.96, 2.58), type = "numeric",
@@ -45,12 +56,17 @@ p_hacking_tests <- function(df) {
     caliper_cluster = opt_spec(default = TRUE, type = "logical"),
     include_elliott = opt_spec(default = TRUE, type = "logical"),
     elliott_supports = opt_spec(
-      default = c(0.05, 0.1), type = "numeric",
+      default = c(0.05, 0.1, 0.15), type = "numeric",
       constraint = function(x) {
         length(x) > 0 && all(is.finite(x) & x > 0 & x <= 1) &&
           !is.unsorted(x, strictly = TRUE)
       },
       constraint_msg = "elliott_supports must be strictly increasing p-value bounds in (0, 1]"
+    ),
+    elliott_p_min = opt_spec(
+      default = 1e-5, type = "numeric",
+      constraint = function(x) length(x) == 1 && is.finite(x) && x >= 0 && x < 1,
+      constraint_msg = "elliott_p_min must be a single number in [0, 1)"
     ),
     lcm_iterations = opt_spec(
       default = 10000L, type = "numeric", cast = as.integer,
@@ -106,6 +122,7 @@ p_hacking_tests <- function(df) {
   }
 
   resolved_options <- list(
+    t_stat_source = resolved$t_stat_source,
     include_caliper = resolved$include_caliper,
     caliper_thresholds = resolved$caliper_thresholds,
     caliper_widths = resolved$caliper_widths,
@@ -114,6 +131,7 @@ p_hacking_tests <- function(df) {
     caliper_cluster = resolved$caliper_cluster,
     include_elliott = resolved$include_elliott,
     elliott_supports = resolved$elliott_supports,
+    elliott_p_min = resolved$elliott_p_min,
     lcm_iterations = resolved$lcm_iterations,
     lcm_grid_points = resolved$lcm_grid_points,
     simulate_cdfs_chunk_size = resolved$simulate_cdfs_chunk_size,
@@ -134,6 +152,14 @@ p_hacking_tests <- function(df) {
 
   if (verbosity >= 1) {
     cli::cli_h2("P-hacking tests")
+
+    t_stat_note <- switch(resolved$t_stat_source,
+      reported = "the t-statistics as reported in the data (recomputed from effect / se where none is mapped)",
+      computed = "t-statistics recomputed from effect / se"
+    )
+    cli::cli_text(
+      "P-values are derived from {t_stat_note}, on unwinsorized effect sizes and standard errors."
+    )
 
     # Caliper tests (Gerber & Malhotra, 2008)
     if (!is.null(results$caliper) && nrow(results$caliper) > 0) {
@@ -165,6 +191,16 @@ p_hacking_tests <- function(df) {
         "These test global monotonicity of the p-value density, so they can legitimately ",
         "disagree with the local caliper results above."
       )
+
+      if (resolved$elliott_p_min > 0) {
+        cli::cli_text(
+          "Supports start at p = {resolved$elliott_p_min} (Elliott et al.'s lower bound), so p-values ",
+          "below it are excluded from both the tests and the counts below. That covers genuine ",
+          "small p-values as well as those that underflowed to exactly zero, so these counts run ",
+          "lower than a published figure counting from zero. Set ",
+          "{.field artma.methods.p_hacking_tests.elliott_p_min} to {.val 0} to count from zero."
+        )
+      }
 
       elliott_lines <- capture_print_wide(results$elliott, row.names = FALSE)
       cli::cli_verbatim(elliott_lines)
@@ -214,7 +250,8 @@ p_hacking_tests <- function(df) {
 #'   in `note` together with the tail inspected.
 #' * Elliott. Each test is one row, `model` is the test family (`"binomial"`,
 #'   `"lcm"`, `"fisher"`, `"discontinuity"`, `"cox_shi"`) and `term` the
-#'   p-value support it was run on (`"[0, 0.05]"`). These tests report a
+#'   p-value support it was run on, lower bound included (`"[1e-05, 0.05]"`
+#'   at the default `elliott_p_min`). These tests report a
 #'   p-value and nothing else, so only `p_value` is filled; a test that could
 #'   not run keeps its `NA` and carries the reason in `note`.
 #'
@@ -294,7 +331,9 @@ run <- register_runtime_method(
   p_hacking_tests,
   stage = "p_hacking_tests",
   description = "Caliper tests and the Elliott et al. (2022) p-hacking battery",
-  required_columns = c("effect", "se", "t_stat", "study_id")
+  required_columns = c("effect", "se", "t_stat", "study_id"),
+  # Clipping se manufactures the p-value bunching these tests look for.
+  winsorize = FALSE
 )
 
 box::export(p_hacking_tests, p_hacking_tests_estimates, run)
