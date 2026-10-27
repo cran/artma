@@ -1,6 +1,6 @@
-c89b79e06e3ef8d5c7102f0222d6115f *DESCRIPTION
+5ff0c64ed5649c95d8719f624a502524 *DESCRIPTION
 80504f400b879e16ae4c939d06282e4e *NAMESPACE
-1d92df5b1260742605555dd530a9f53c *NEWS.md
+ca123e315dc6b643185133caa090dcf0 *NEWS.md
 50a4e15a579d529acf184cb6f37c3dd2 *R/RcppExports.R
 09d43f4ffffbf15c5bf662baf893712d *R/aaa.R
 81b78117d0445adeb68a82abf20e8d4d *R/artma.R
@@ -148,7 +148,7 @@ dc21a7abd207de8d16cfa0b9b44078a6 *inst/artma/report/render.R
 426bad28293f74a5a062296a61a22412 *inst/artma/visualization/best_practice_estimate.R
 12707e917d973540dc5e2b79f4912f9d *inst/artma/visualization/bma.R
 12f157695569880c2003ec32dbf87131 *inst/artma/visualization/colors.R
-8b94b52398063b4006a2b22544b27ea7 *inst/artma/visualization/export.R
+caff7039fe1b078374a4b59a7830588b *inst/artma/visualization/export.R
 19a6da3d22093cd0b77b6563ea7f51b7 *inst/artma/visualization/fork_safety.R
 420fc0ac54ae3e7439fdcd1832a184b9 *inst/artma/visualization/index.R
 15d7eaae1d6a22cb2661ffe3b725f9d6 *inst/artma/visualization/options.R
@@ -236,7 +236,7 @@ e22ef6821ca1f9f4bfa724aafabbac97 *tests/testthat/modules/testing/fixtures/helper
 951867d5542df4891ec9cdf932874673 *tests/testthat/modules/testing/mocks/index.R
 e4f619e48f48f2f30b4e19f076ebe5a1 *tests/testthat/modules/testing/mocks/mock_options.R
 e2d2cb86c1881e7b009259976cfd69dd *tests/testthat/modules/testing/reference/elliott.R
-295495b99a2a986f84ba6619835444a7 *tests/testthat/setup.R
+9720d757aa0e17acec68fdb148c37757 *tests/testthat/setup.R
 1a9405936b12c04b273f33ccf46d0ee5 *tests/testthat/test-autonomy.R
 ffe957cdd9dad7a16dd4fa40bb4850f3 *tests/testthat/test-best-practice-estimate.R
 bf817309340b7bbb91f2106ae88bb460 *tests/testthat/test-bma-auto-select.R
@@ -344,7 +344,7 @@ da93787899f5184b926e668022bdf01f *tests/testthat/test-options-template-parity.R
 ffb1ab009480a1579a7ca4e0fa4caad3 *tests/testthat/test-report-integration.R
 6b1e5c97f9417cbdb543c1d0b819300d *tests/testthat/test-report-render.R
 70f155c3b3ada915d531b48de2e15737 *tests/testthat/test-result-formatters.R
-78f492aca5694fa1a968ccd9b8f69b68 *tests/testthat/test-robma.R
+dcf8870df4c7b3937ecf19f783a2e42e *tests/testthat/test-robma.R
 ab35d4745a8014f3e47f7ae25f54b92a *tests/testthat/test-run-manifest.R
 f9eff46c4a215c56373a1d392fcbcded *tests/testthat/test-run-summary.R
 90cdd5d8a63406a00325e94c93d605c2 *tests/testthat/test-run.R
@@ -356,10 +356,10 @@ b4e991847fc6578a6e7d8f093312b7c8 *tests/testthat/test-summary-table-characteriza
 62b84178b4ac08273992fd11a361592a *tests/testthat/test-t-stat-histogram.R
 64a2f8e73d59943220304f544d283ead *tests/testthat/test-variable-suggestion.R
 ba4c6366a713598bdb17beab60b40866 *tests/testthat/test-variable-summary-stats.R
-90f3b9b27b1a5545bc83513fdcaf68ad *tests/testthat/test-visualization-fork-safety.R
+828c0df22b61aeeca5efed827878650b *tests/testthat/test-visualization-fork-safety.R
 ebd40228d246e5982a98185bb456eff6 *tests/testthat/test-visualization-preview.R
 4bda32deea126118fc4fd374339da775 *tests/testthat/test-visualization-ticks.R
-7565e4221d403aa6dcfae49714d1bb74 *tests/testthat/test-visualization.R
+5743afb7b4fb0d82c57d78d7751c29b3 *tests/testthat/test-visualization.R
 903216ab734fa256dbbc2c162de9b207 *vignettes/getting-started.Rmd
 03a5b57afc051e51845684c4df63dc99 *vignettes/methods-overview.Rmd
 934718ae7d2c43a359a2fdf07c04aa37 *vignettes/options-files.Rmd

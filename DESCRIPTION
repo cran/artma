@@ -1,6 +1,6 @@
 Package: artma
 Title: Automatic Replication Tools for Meta-Analysis
-Version: 0.5.0
+Version: 0.5.2
 Authors@R: c(
     person("Petr", "Čala", , "61505008@fsv.cuni.cz", role = c("aut", "cre")),
     person("Matyáš", "Tvrz", role = "ctb",
@@ -49,6 +49,6 @@ Config/testthat/start-first: github-actions, release
 Encoding: UTF-8
 Config/roxygen2/version: 8.0.0
 NeedsCompilation: yes
-Packaged: 2026-09-30 07:53:58 UTC; runner
+Packaged: 2026-10-27 05:07:05 UTC; runner
 Repository: CRAN
-Date/Publication: 2026-09-30 15:10:09 UTC
+Date/Publication: 2026-10-27 08:10:02 UTC
